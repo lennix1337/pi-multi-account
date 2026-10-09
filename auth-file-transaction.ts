@@ -1,7 +1,8 @@
 /** Pi-compatible cross-process auth lock and crash-safe OAuth shadow publication. */
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { replaceFileSync } from "./replace-file.ts";
 import { dirname } from "node:path";
 import type { AuthBlob } from "./slot-proxy-auth.ts";
 
@@ -20,7 +21,7 @@ function atomicWrite(path: string, data: Auth): void {
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temp, `${JSON.stringify(data, null, "\t")}\n`, { mode: 0o600, flag: "wx" });
-    renameSync(temp, path);
+    replaceFileSync(temp, path);
   } finally { rmSync(temp, { force: true }); }
 }
 

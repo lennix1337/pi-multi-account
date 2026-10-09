@@ -30,6 +30,7 @@ import { mutateProxyAuth } from "./auth-file-transaction.ts";
 import { mergeStateDeltas, mutateStateFile } from "./state-file-transaction.ts";
 import { normalizeModelPins, persistModelPin, validModelPinScope } from "./model-pins.ts";
 import { mutateConfigFile } from "./config-file-transaction.ts";
+import { replaceFileSync } from "./replace-file.ts";
 import { createHash } from "node:crypto";
 import {
 	accessSync,
@@ -918,45 +919,47 @@ function nativeModelEntries(models: unknown[]): NativeModelEntry[] {
 function provisionNativeSlot(provider: string, entry: NativeProviderEntry): void {
 	try {
 		const models = nativeModelEntries(entry.models);
-		const raw = existsSync(MODELS_CONFIG_PATH)
-			? readFileSync(MODELS_CONFIG_PATH, "utf8")
-			: "{}";
-		const parsed = JSON.parse(raw);
-		const providers =
-			typeof parsed?.providers === "object" && parsed.providers !== null
-				? parsed.providers
-				: {};
-		const existing = providers[provider];
-		const normalized: Record<string, unknown> = {
-			api: entry.api,
-			baseUrl: entry.baseUrl,
-			models,
-		};
-		if (entry.apiKey) normalized.apiKey = entry.apiKey;
-		if (entry.compat) normalized.compat = entry.compat;
-		const modelOverrides = preservedModelOverrides(existing);
-		if (modelOverrides) normalized.modelOverrides = modelOverrides;
-		if (
-			existing?.baseUrl === normalized.baseUrl &&
-			existing?.api === normalized.api &&
-			existing?.apiKey === normalized.apiKey &&
-			JSON.stringify(existing?.models ?? []) === JSON.stringify(models)
-		) {
-			return; // already provisioned — do not touch the file
+		try {
+			writeFileSync(MODELS_CONFIG_PATH, "{}\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+		} catch (error: any) {
+			if (error?.code !== "EEXIST") throw error;
 		}
-		const next = {
-			...parsed,
-			providers: { ...providers, [provider]: normalized },
-		};
-		const tmp = `${MODELS_CONFIG_PATH}.multi-account.tmp`;
-		writeFileSync(tmp, `${JSON.stringify(next, null, 2)}
-`, {
-			encoding: "utf8",
-			mode: 0o600,
-		});
-		renameSync(tmp, MODELS_CONFIG_PATH);
-	} catch {
-		/* models.json locked/corrupt — the extension registry still works */
+		// Locked, read-latest, per-process temp file: concurrent Pi sessions publishing slots can
+		// neither clobber each other's entries nor race on one shared temp path.
+		mutateConfigFile(
+			MODELS_CONFIG_PATH,
+			(parsed) => {
+				const providers =
+					typeof parsed?.providers === "object" && parsed.providers !== null
+						? parsed.providers
+						: {};
+				const existing = providers[provider];
+				const normalized: Record<string, unknown> = {
+					api: entry.api,
+					baseUrl: entry.baseUrl,
+					models,
+				};
+				if (entry.apiKey) normalized.apiKey = entry.apiKey;
+				if (entry.compat) normalized.compat = entry.compat;
+				const modelOverrides = preservedModelOverrides(existing);
+				if (modelOverrides) normalized.modelOverrides = modelOverrides;
+				if (
+					existing?.baseUrl === normalized.baseUrl &&
+					existing?.api === normalized.api &&
+					existing?.apiKey === normalized.apiKey &&
+					JSON.stringify(existing?.models ?? []) === JSON.stringify(models)
+				) {
+					return undefined; // already provisioned — do not touch the file
+				}
+				return { providers: { ...providers, [provider]: normalized } };
+			},
+			undefined,
+			2,
+		);
+	} catch (error: any) {
+		// The extension registry still works, but Pi's own model list (and so every switch to this
+		// slot) will not see it until the next publish: never fail silently.
+		logEvent("models_json_publish_failed", { provider, code: error?.code ?? String(error?.message ?? error) });
 	}
 }
 
@@ -972,15 +975,25 @@ function unprovisionOwnLoopbacks(slotIds?: readonly string[]): void {
 		if (!providers) return;
 		const nextProviders = dropOwnLoopbackPublications(providers, slotIds);
 		if (JSON.stringify(nextProviders) === JSON.stringify(providers)) return;
-		const next = { ...parsed, providers: nextProviders };
-		const tmp = `${MODELS_CONFIG_PATH}.multi-account.tmp`;
-		writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, {
-			encoding: "utf8",
-			mode: 0o600,
-		});
-		renameSync(tmp, MODELS_CONFIG_PATH);
-	} catch {
+		mutateConfigFile(
+			MODELS_CONFIG_PATH,
+			(disk) => {
+				const current =
+					typeof disk?.providers === "object" && disk.providers !== null
+						? disk.providers
+						: undefined;
+				if (!current) return undefined;
+				const dropped = dropOwnLoopbackPublications(current, slotIds);
+				return JSON.stringify(dropped) === JSON.stringify(current)
+					? undefined
+					: { providers: dropped };
+			},
+			undefined,
+			2,
+		);
+	} catch (error: any) {
 		/* leaving a stale loopback is worse than a failed write; next publish retries */
+		logEvent("models_json_unpublish_failed", { code: error?.code ?? String(error?.message ?? error) });
 	}
 }
 
@@ -2074,7 +2087,7 @@ export function writeProxyOAuthSidecar(data: Record<string, AuthEntry>): void {
 		encoding: "utf8",
 		mode: 0o600,
 	});
-	renameSync(tmp, PROXY_OAUTH_PATH);
+	replaceFileSync(tmp, PROXY_OAUTH_PATH);
 }
 
 /**
@@ -2095,7 +2108,7 @@ function writeAuthFile(data: Record<string, AuthEntry>): void {
 		encoding: "utf8",
 		mode: 0o600,
 	});
-	renameSync(tmp, AUTH_PATH);
+	replaceFileSync(tmp, AUTH_PATH);
 }
 
 function authFileIsWritable(): boolean {

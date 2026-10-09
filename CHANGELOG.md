@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- On Windows, publishing a numbered account slot into `models.json` could fail silently: replacing a file that another process (a second Pi session, an antivirus or indexer scan) holds open fails with `EPERM`, the error was swallowed, and the slot never reached Pi's model list. Every switch to that account then failed with "could not be activated" and `next` skipped it. `models.json` slot publication now goes through the locked, read-latest config transaction, every temp-file replacement (models, auth, OAuth sidecar, shared state) retries transient `EPERM`/`EACCES`/`EBUSY` for up to one second, and a failed publication is logged (`models_json_publish_failed` / `models_json_unpublish_failed`) instead of ignored.
+
 ## [1.24.0] — 2026-10-03
 
 ### Added

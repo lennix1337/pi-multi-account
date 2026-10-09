@@ -1,7 +1,8 @@
 /** Shared cooldown/cache state: lock before reading, merge local deltas, publish atomically. */
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { replaceFileSync } from "./replace-file.ts";
 import { dirname } from "node:path";
 
 const require = createRequire(import.meta.url);
@@ -59,7 +60,7 @@ export function mutateStateFile<T extends State>(path: string, transform: (disk:
     }
     const next = transform(disk);
     writeFileSync(temp, `${JSON.stringify(next, null, "\t")}\n`, { mode: 0o600, flag: "wx" });
-    renameSync(temp, path);
+    replaceFileSync(temp, path);
     return next;
   } finally {
     try { rmSync(temp, { force: true }); } finally { release(); }

@@ -46,6 +46,7 @@
     "auth-file-transaction.ts",
     "state-file-transaction.ts",
     "config-file-transaction.ts",
+    "replace-file.ts",
     "model-catalog.ts",
     "model-pins.ts",
     "usage.ts",

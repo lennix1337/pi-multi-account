@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 const rootPath = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -64,7 +64,7 @@ export function ${factory}() { return { auth: { oauth: {
 		writeFileSync(driver, `
 process.env.PI_CODING_AGENT_DIR = ${JSON.stringify(agent)};
 process.env.PI_CURSOR_PROVIDER_ROOT = ${JSON.stringify(join(root, "no-cursor"))};
-const {default: extension} = await import(${JSON.stringify(join(ext, "index.ts"))});
+const {default: extension} = await import(${JSON.stringify(pathToFileURL(join(ext, "index.ts")).href)});
 const registrations = new Map();
 extension({registerProvider: (id, config) => registrations.set(id, config),
  registerCommand() {}, on() {}, setModel: async () => true,

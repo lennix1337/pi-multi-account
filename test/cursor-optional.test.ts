@@ -17,11 +17,12 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const EXTENSION_ENTRY = join(REPO_ROOT, "index.ts");
+// The driver hands this to import(); on Windows a bare absolute path is not a valid ESM URL.
+const EXTENSION_ENTRY = pathToFileURL(join(REPO_ROOT, "index.ts")).href;
 
 const DRIVER = `const agentDir = process.argv[2];
 const cursorRoot = process.argv[3];

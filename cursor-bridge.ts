@@ -59,9 +59,9 @@ let proxyPort: number | undefined;
 let loadAttempt = 0;
 
 function loadSpecifier(entry: string): string {
-	return loadAttempt === 0
-		? entry
-		: `${pathToFileURL(entry).href}?pi-multi-account-retry=${loadAttempt}`;
+	// Always a file URL: Node's ESM loader rejects a bare Windows path (`C:\...`) as a URL scheme.
+	const url = pathToFileURL(entry).href;
+	return loadAttempt === 0 ? url : `${url}?pi-multi-account-retry=${loadAttempt}`;
 }
 
 /**

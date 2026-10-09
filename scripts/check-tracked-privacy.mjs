@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url).pathname;
+// fileURLToPath, not .pathname: on Windows .pathname is "/C:/...", an invalid cwd.
+const root = fileURLToPath(new URL("..", import.meta.url));
 const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: root })
 	.toString("utf8")
 	.split("\0")

@@ -1,16 +1,20 @@
-import { execFileSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { containsPackageSecret } from "../package-secret-scan.ts";
 
-const root = new URL("..", import.meta.url).pathname;
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const packed = JSON.parse(execFileSync(npm, ["pack", "--dry-run", "--json"], {
+// fileURLToPath, not .pathname: on Windows .pathname is "/C:/...", an invalid cwd.
+const root = fileURLToPath(new URL("..", import.meta.url));
+// A fixed command through the shell: Node refuses to spawn Windows' npm.cmd shim without one (CVE-2024-27980).
+const output = JSON.parse(execSync("npm pack --dry-run --json", {
 	cwd: root,
 	encoding: "utf8",
 	stdio: ["ignore", "pipe", "inherit"],
 }));
-if (!Array.isArray(packed) || packed.length !== 1 || !Array.isArray(packed[0]?.files)) {
+// npm <=11 prints an array of manifests; npm 12 prints an object keyed by package name.
+const packed = Array.isArray(output) ? output : Object.values(output ?? {});
+if (packed.length !== 1 || !Array.isArray(packed[0]?.files)) {
 	throw new Error("npm pack did not return one package manifest");
 }
 const names = packed[0].files.map((file) => file.path);

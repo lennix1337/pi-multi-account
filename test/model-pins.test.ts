@@ -32,7 +32,8 @@ test("pin persistence mutates one scope and preserves latest unrelated configura
 		persistModelPin(t.path, "anthropic", undefined);
 		persistModelPin(t.path, "anthropic", undefined);
 		assert.deepEqual(t.read(), { ...changed, pinnedModels: { "openai-codex": "gpt-5.5", future: { unknownVersion: true }, cursor: "cursor-grok-4.6" } });
-		assert.equal(statSync(t.path).mode & 0o777, 0o600);
+		// Windows has no POSIX mode bits: every file stats as 0o666.
+		if (process.platform !== "win32") assert.equal(statSync(t.path).mode & 0o777, 0o600);
 		assert.deepEqual(readdirSync(t.dir), ["provider-failover.json"]);
 	} finally { t.close(); }
 });

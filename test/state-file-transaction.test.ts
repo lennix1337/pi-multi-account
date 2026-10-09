@@ -67,7 +67,8 @@ test("four real processes retain every independent state update without torn JSO
       child.on("error", reject); child.on("close", code => code === 0 ? resolve() : reject(new Error(error)));
     })));
     assert.equal(Object.keys(JSON.parse(readFileSync(path, "utf8")).exhaustedUntilByProvider).length, 120);
-    assert.equal(statSync(path).mode & 0o777, 0o600);
+    // Windows has no POSIX mode bits: every file stats as 0o666.
+    if (process.platform !== "win32") assert.equal(statSync(path).mode & 0o777, 0o600);
     assert.deepEqual(readdirSync(dir), ["state.json"]);
     assert.throws(() => mutateStateFile(path, () => { throw new Error("interrupted"); }), /interrupted/);
     assert.equal(Object.keys(JSON.parse(readFileSync(path, "utf8")).exhaustedUntilByProvider).length, 120);

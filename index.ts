@@ -27,6 +27,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createPayloadStream } from "./provider-payload-stream.ts";
 import { mutateProxyAuth } from "./auth-file-transaction.ts";
+import { multiAccountCompletions, type AccountChoice } from "./command-completions.ts";
 import { mergeStateDeltas, mutateStateFile } from "./state-file-transaction.ts";
 import { normalizeModelPins, persistModelPin, validModelPinScope } from "./model-pins.ts";
 import { mutateConfigFile } from "./config-file-transaction.ts";
@@ -1979,13 +1980,26 @@ function loadState(): ProviderFailoverState {
 	}
 }
 
+// A command applied a setting in memory but could not write config.json: say so, or the
+// user believes a preference was saved that will be gone next session.
+function warnConfigNotSaved(ctx: any, error: any) {
+	const code = error?.code ?? String(error?.message ?? error);
+	logEvent("config_write_failed", { code });
+	ctx.ui.notify(
+		`pi-multi-account: applied for this session only; could not save ${CONFIG_PATH} (${code})`,
+		"warning",
+	);
+}
+
 function saveState(state: ProviderFailoverState) {
 	// Best-effort: a locked/read-only/full disk must never crash the host. Losing a
 	// state write only costs a cooldown estimate that is re-derived on the next error.
 	try {
 		mutateStateFile(STATE_PATH, () => ({ stateVersion: STATE_VERSION, ...state }));
-	} catch {
-		/* persistence is non-critical; in-memory state remains correct */
+	} catch (error: any) {
+		// Persistence is non-critical (in-memory state remains correct), but a lost write
+		// must leave a trace, or a stale state file is undiagnosable.
+		logEvent("state_write_failed", { code: error?.code ?? String(error?.message ?? error) });
 	}
 }
 
@@ -5478,8 +5492,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return `${windowLabel(window, snapshot.family, position)} ${remainingPercent(window)}%/${formatResetDuration(window.resetAt, now)}`;
 	}
 
-	function renderAccountTable(ctx: any): string {
-		refreshDiscovery(false, ctx);
+	/** Every account the accounts table lists, rotation order first, with its status. */
+	function accountRows(ctx: any, now: number) {
 		const auth = readAuthFile();
 		const ordered = [
 			...rotation,
@@ -5491,15 +5505,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			duplicateSlots.map(({ duplicate, primary }) => [duplicate, primary]),
 		);
 		const unconfigured = new Set(unconfiguredRotationMembers(ctx));
-		const now = Date.now();
-		const rows = ordered.map((provider) => {
+		return ordered.map((provider) => {
 			const entry = auth[provider];
 			const snapshot = cachedUsage(provider);
-			const account = snapshot?.account ?? "—";
-			const alias =
-				snapshot?.account && snapshot.account.includes("@")
-					? snapshot.account.slice(0, snapshot.account.indexOf("@"))
-					: snapshot?.account ?? "—";
 			const duplicate = duplicateOf.get(provider);
 			const recoveryAt = providerRecoveryAt(provider, now);
 			let status: string;
@@ -5511,6 +5519,41 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				status = `cooldown ${formatResetDuration(recoveryAt, now)}`;
 			else if (usageErrors.has(provider)) status = "ready · usage unavailable";
 			else status = "ready";
+			return { provider, snapshot, status, ready: status.startsWith("ready") };
+		});
+	}
+
+	/** Accounts offered by `/multi-account use <Tab>`; runs on every keystroke, so no network. */
+	function accountChoices(): AccountChoice[] {
+		let ctx = completionRouterContext;
+		let current: string | undefined;
+		try {
+			current = ctx?.model?.provider;
+		} catch {
+			// A context from a replaced session throws on access; list accounts without it.
+			ctx = undefined;
+		}
+		refreshDiscovery(false);
+		const now = Date.now();
+		return accountRows(ctx, now).map(({ provider, snapshot, status, ready }) => ({
+			provider,
+			status,
+			ready,
+			current: provider === current,
+			account: snapshot?.account,
+			usage: snapshot?.primary ? accountUsageCell(snapshot, "primary", now) : undefined,
+		}));
+	}
+
+	function renderAccountTable(ctx: any): string {
+		refreshDiscovery(false, ctx);
+		const now = Date.now();
+		const rows = accountRows(ctx, now).map(({ provider, snapshot, status }) => {
+			const account = snapshot?.account ?? "—";
+			const alias =
+				snapshot?.account && snapshot.account.includes("@")
+					? snapshot.account.slice(0, snapshot.account.indexOf("@"))
+					: snapshot?.account ?? "—";
 			return [
 				provider,
 				alias,
@@ -9397,8 +9440,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			config = { ...config, fallbacks: [] };
 			try {
 				mutateConfigFile(CONFIG_PATH, () => ({ fallbacks: [] }));
-			} catch {
-				// non-fatal: in-memory state is still cleared
+			} catch (error) {
+				// non-fatal: in-memory state is still cleared, but the user must know it won't persist
+				warnConfigNotSaved(ctx, error);
 			}
 			// Remove all numbered alias slots through Pi's locked credential API so `/multi-account add`
 			// starts fresh at account-2 without overwriting a concurrent login or refresh. Keep base
@@ -9757,8 +9801,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			config = { ...config, onlyActive: next2 };
 			try {
 				mutateConfigFile(CONFIG_PATH, () => ({ onlyActive: next2 }));
-			} catch {
+			} catch (error) {
 				// non-fatal: the in-memory flag still applies for this session
+				warnConfigNotSaved(ctx, error);
 			}
 			if (next2) applyOnlyActiveFilter(ctx);
 			else clearOnlyActiveFilter();
@@ -9816,8 +9861,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			config = { ...config, providerPriority: next };
 			try {
 				mutateConfigFile(CONFIG_PATH, () => ({ providerPriority: next }));
-			} catch {
+			} catch (error) {
 				// non-fatal: the ladder still applies for this session
+				warnConfigNotSaved(ctx, error);
 			}
 			logEvent("priority_set", { priority: next, reset, cleared });
 
@@ -10016,6 +10062,15 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		pi.registerCommand(name, {
 			description: "Manage automatic multi-account failover & rotation",
 			handler: safeHandleCommand,
+			getArgumentCompletions: (prefix: string) => {
+				try {
+					return multiAccountCompletions(prefix, accountChoices);
+				} catch (error) {
+					// Autocomplete must never break typing; the command itself still works.
+					logEvent("command_completion_failed", { error: String(error).slice(0, 200) });
+					return null;
+				}
+			},
 		});
 	}
 

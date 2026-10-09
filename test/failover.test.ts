@@ -482,6 +482,7 @@ function setup(opts: {
 	const events: Record<string, Array<(event: any, ctx?: any) => any>> = {};
 	const busEvents = new Map<string, Array<(payload: any) => void>>();
 	const commands: Record<string, (args: string, ctx: any) => any> = {};
+	const completions: Record<string, (prefix: string) => any> = {};
 	const pendingThinkingLevelSelects: Array<{
 		delivery: Promise<void>;
 		release?: () => void;
@@ -652,9 +653,13 @@ function setup(opts: {
 		},
 		registerCommand: (
 			name: string,
-			options: { handler: (args: string, ctx: any) => any },
+			options: {
+				handler: (args: string, ctx: any) => any;
+				getArgumentCompletions?: (prefix: string) => any;
+			},
 		) => {
 			commands[name] = options.handler;
+			if (options.getArgumentCompletions) completions[name] = options.getArgumentCompletions;
 		},
 		registerCompletionRouter: (router: {
 			select: (request: any) => any;
@@ -823,6 +828,8 @@ function setup(opts: {
 	};
 	const command = async (args: string) =>
 		commands["multi-account"]?.(args, ctx);
+	// What the editor offers while the user types `/multi-account <prefix>`.
+	const complete = (prefix: string) => completions["multi-account"]?.(prefix);
 	const input = async (text: string, images?: any[]) =>
 		fire("input", { type: "input", text, images, source: "interactive" });
 
@@ -849,6 +856,7 @@ function setup(opts: {
 		readState,
 		beforeReq,
 		command,
+		complete,
 		input,
 		thinkingLevel,
 		userSetsThinking,
@@ -3342,6 +3350,33 @@ test("manual next lands on a ready account before one believed spent", async () 
 	}
 });
 
+test("/multi-account use autocompletes accounts as they are typed, ready ones first", async () => {
+	const t = setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "a", refresh: "ar" },
+			"openai-codex-account-2": { type: "oauth", access: "b", refresh: "br", accountId: "b" },
+			"openai-codex-account-4": { type: "oauth", access: "d", refresh: "dr", accountId: "d" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-5" },
+		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
+	});
+	await t.fire("session_start");
+	const all = t.complete("use ");
+	assert.deepEqual(all?.map((item: any) => item.label), [
+		"openai-codex-account-4",
+		"openai-codex-account-2",
+		"anthropic",
+	]);
+	assert.match(all[1].description, /cooldown/);
+	assert.match(all[2].description, /current/);
+	assert.deepEqual(t.complete("use codex-account-4")?.map((item: any) => item.value), [
+		"use openai-codex-account-4",
+	]);
+	// The completed line runs as typed: it lands on the account the list offered.
+	await t.command(all[0].value);
+	assert.equal(t.ctx.model.provider, "openai-codex-account-4");
+});
+
 test("manual next never downgrades to a weaker model of the same account (no mini flap)", async () => {
 	// Real report: on gpt-5.4 with gpt-5.5 momentarily unavailable, repeated /multi-account next
 	// flapped gpt-5.4 ↔ gpt-5.4-mini. HARD RULE: failover switches the ACCOUNT, never demotes the
@@ -5252,6 +5287,27 @@ test("only-active preference persists without removing models from Pi", async ()
 	const cfg = JSON.parse(readFileSync(CONFIG, "utf8"));
 	assert.equal(cfg.onlyActive, true, "the flag must survive restarts via config");
 	assert.ok(t.rec.notifies.at(-1)?.includes("only-active ON"));
+});
+
+test("a preference that cannot be saved says so instead of failing silently", async () => {
+	const t = setup({
+		accounts: TWO_ACCOUNTS,
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+	});
+	await t.fire("session_start");
+	// A directory where config.json should be makes every write fail.
+	rmSync(CONFIG, { force: true });
+	mkdirSync(CONFIG);
+	try {
+		await t.command("only-active on");
+		assert.ok(
+			t.rec.notifies.some((n) => n.includes("applied for this session only")),
+			"an unsaved preference must be reported",
+		);
+		assert.ok(t.rec.notifies.at(-1)?.includes("only-active ON"), "the setting still applies");
+	} finally {
+		rmSync(CONFIG, { recursive: true, force: true });
+	}
 });
 
 test("failover under only-active preserves all registered routes", async () => {

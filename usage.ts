@@ -1038,7 +1038,11 @@ export function mergeUsageSnapshot(
 	};
 }
 
-export function formatUsageCompact(snapshot: UsageSnapshot, now = Date.now()): string {
+export function formatUsageCompact(
+	snapshot: UsageSnapshot,
+	now = Date.now(),
+	{ windows = true }: { windows?: boolean } = {},
+): string {
 	const who = shortAccount(snapshot.account);
 	const parts = [
 		who
@@ -1053,6 +1057,8 @@ export function formatUsageCompact(snapshot: UsageSnapshot, now = Date.now()): s
 	// `allowed: true`, and showing only the 0% is what makes a working account look dead.
 	if (snapshot.serviceable === true) parts.push("ok");
 	else if (snapshot.serviceable === false) parts.push("spent");
+	// Without windows the line keeps who/plan/verdict; another footer may already show the percentages.
+	if (!windows) return parts.join(" | ");
 	if (snapshot.primary) {
 		parts.push(
 			`${windowLabel(snapshot.primary, snapshot.family, "primary")} ${remainingPercent(snapshot.primary)}% left/${formatResetDuration(snapshot.primary.resetAt, now)}`,

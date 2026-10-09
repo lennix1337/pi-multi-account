@@ -1355,6 +1355,29 @@ test("Cursor background payloads use the host side-channel session identity", as
 // Usage footer
 // ---------------------------------------------------------------------------
 
+test("usage footer hides the quota windows when showUsageWindows is off", async () => {
+	const provider = "openai-codex-account-2";
+	const now = Date.now();
+	const t = setup({
+		current: { provider, id: "gpt-5.5" },
+		config: { showUsage: true, showUsageWindows: false },
+		seedState: {
+			stateVersion: 5,
+			exhaustedUntilByProvider: {},
+			exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {},
+			invalidatedByProvider: {},
+			usageByProvider: {
+				[provider]: { provider, family: "codex", fetchedAt: now, primary: { usedPercent: 1, resetAt: now + 61_000 } },
+			},
+			lastSwitches: [],
+		},
+	});
+	await t.fire("session_start");
+	const value = t.rec.statuses.at(-1)?.value ?? "";
+	assert.match(value, /^Codex A2 \| (?:\+\d+ ready|no spare)$/);
+});
+
 test("usage footer countdown refreshes while the session is idle", async () => {
 	const provider = "openai-codex-account-2";
 	const now = Date.now();

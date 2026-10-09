@@ -423,6 +423,7 @@ type ProviderFailoverConfig = {
 	invalidCooldownMs?: number;
 	transientCooldownMs?: number;
 	showUsage?: boolean;
+	showUsageWindows?: boolean;
 	usageRefreshMs?: number;
 	usageStatusRefreshMs?: number;
 	pendingPollMs?: number;
@@ -522,6 +523,7 @@ type RuntimeConfig = Required<
 		| "invalidCooldownMs"
 		| "transientCooldownMs"
 		| "showUsage"
+		| "showUsageWindows"
 		| "usageRefreshMs"
 		| "usageStatusRefreshMs"
 		| "pendingPollMs"
@@ -1662,6 +1664,7 @@ const DEFAULT_CONFIG: ProviderFailoverConfig = {
 	invalidCooldownMs: DEFAULT_INVALID_COOLDOWN_MS,
 	transientCooldownMs: DEFAULT_TRANSIENT_COOLDOWN_MS,
 	showUsage: true,
+	showUsageWindows: true,
 	usageRefreshMs: DEFAULT_USAGE_REFRESH_MS,
 	usageStatusRefreshMs: DEFAULT_USAGE_STATUS_REFRESH_MS,
 	pendingPollMs: PENDING_POLL_MS,
@@ -1837,6 +1840,7 @@ function normalizeConfig(raw: ProviderFailoverConfig): RuntimeConfig {
 			DEFAULT_TRANSIENT_COOLDOWN_MS,
 		),
 		showUsage: raw.showUsage ?? true,
+		showUsageWindows: raw.showUsageWindows ?? true,
 		usageRefreshMs: positiveOr(raw.usageRefreshMs, DEFAULT_USAGE_REFRESH_MS),
 		usageStatusRefreshMs: positiveOr(
 			raw.usageStatusRefreshMs,
@@ -5309,7 +5313,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			}
 			const display = displayUsageSnapshot(snapshot);
 			const spare = readyElsewhereCount(ctx, provider);
-			const text = `${formatUsageCompact(display)} | ${
+			const text = `${formatUsageCompact(display, Date.now(), { windows: config.showUsageWindows })} | ${
 				spare > 0 ? `+${spare} ready` : "no spare"
 			}`;
 			const color =

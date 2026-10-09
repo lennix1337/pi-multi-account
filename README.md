@@ -175,6 +175,7 @@ A default config is created at `~/.pi/agent/provider-failover.json` on first run
 | `providerOrder` | `["anthropic","openai-codex","qwen","ollama"]` | Preferred family order in the rotation. |
 | `cooldownMs` | 6 h | Default cooldown when no reset metadata is provided. |
 | `showUsage` | `true` | Show active Codex/Claude/xAI limits in Pi's footer. |
+| `showUsageWindows` | `true` | Include the per-window percentages (e.g. `5h 21% left/3h58m`) in that footer. Set `false` to keep only the account name and `+N ready`. |
 | `usageRefreshMs` | 5 min | Per-account usage cache TTL; every authenticated rotation account is refreshed independently, and Anthropic is clamped to at least 10 min to avoid endpoint throttling. |
 | `usageStatusRefreshMs` | 1 min | Re-render the footer and sweep idle sessions for stale usage/model catalogs; network refreshes remain limited by their five-minute (Anthropic: ten-minute) TTLs. |
 | `maxAutoContinuesPerPrompt` | `8` | Cap on auto-resume hops per task. |

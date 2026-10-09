@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `showUsageWindows` config (default `true`): set `false` to drop the quota percentages from the footer and keep the account name and `+N ready`.
 - `/multi-account` autocompletes as you type: subcommands first, then, after `use`/`switch`, every account matching the typed provider id or email: ready ones first, then cooled ones, the current account last, each with its status and usage. Completion reads only in-memory state and never touches the network.
 
 ### Fixed

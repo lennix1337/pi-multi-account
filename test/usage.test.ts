@@ -186,6 +186,16 @@ test("parses case-insensitive Codex response headers", () => {
 	assert.equal(formatUsageCompact(snapshot, NOW), "Codex A4 | 5h 27% left/30m | 7d 91% left/1d");
 });
 
+test("compact usage can leave the quota windows out", () => {
+	const snapshot = parseCodexUsageHeaders(
+		"openai-codex-account-4",
+		{ "x-codex-primary-used-percent": "73", "x-codex-primary-window-minutes": "300", "x-codex-primary-reset-at": String(NOW / 1000 + 1800) },
+		NOW,
+	);
+	assert.ok(snapshot);
+	assert.equal(formatUsageCompact(snapshot, NOW, { windows: false }), "Codex A4");
+});
+
 test("preserves Codex identity metadata when headers refresh quota windows", () => {
 	const body = parseCodexUsageBody(
 		"openai-codex-account-2",

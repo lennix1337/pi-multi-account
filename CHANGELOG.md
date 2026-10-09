@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - On Windows, publishing a numbered account slot into `models.json` could fail silently: replacing a file that another process (a second Pi session, an antivirus or indexer scan) holds open fails with `EPERM`, the error was swallowed, and the slot never reached Pi's model list. Every switch to that account then failed with "could not be activated" and `next` skipped it. `models.json` slot publication now goes through the locked, read-latest config transaction, every temp-file replacement (models, auth, OAuth sidecar, shared state) retries transient `EPERM`/`EACCES`/`EBUSY` for up to one second, and a failed publication is logged (`models_json_publish_failed` / `models_json_unpublish_failed`) instead of ignored.
+- `/multi-account next` lands on an account that can serve work now before one believed spent. It used to walk the ring blindly, so with one Codex account at 100% and another at 0% it could keep landing on the spent one. A cooled account is still reachable when no other is ready.
 
 ## [1.24.0] — 2026-10-03
 

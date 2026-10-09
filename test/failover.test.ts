@@ -3318,6 +3318,30 @@ test("manual next reaches an account blocked only by stale usage while free prov
 	]);
 });
 
+test("manual next lands on a ready account before one believed spent", async () => {
+	// Real report: next kept landing on a Codex account at 100% while another Codex account sat at
+	// 0%. A spent account stays reachable (it is the fallback when nothing else is ready), not first.
+	const accounts: Account = {
+		anthropic: { type: "oauth", access: "a", refresh: "ar" },
+		"openai-codex-account-2": { type: "oauth", access: "b", refresh: "br", accountId: "b" },
+		"openai-codex-account-4": { type: "oauth", access: "d", refresh: "dr", accountId: "d" },
+	};
+	// Cool each in turn, so one run has the spent account first in the ring.
+	for (const [spent, ready] of [
+		["openai-codex-account-2", "openai-codex-account-4"],
+		["openai-codex-account-4", "openai-codex-account-2"],
+	]) {
+		const t = setup({
+			accounts,
+			current: { provider: "anthropic", id: "claude-opus-5" },
+			seedCooldownsMsFromNow: { [spent]: 60 * 60 * 1000 },
+		});
+		await t.fire("session_start");
+		await t.command("next");
+		assert.equal(t.ctx.model.provider, ready, `next must skip the spent ${spent}`);
+	}
+});
+
 test("manual next never downgrades to a weaker model of the same account (no mini flap)", async () => {
 	// Real report: on gpt-5.4 with gpt-5.5 momentarily unavailable, repeated /multi-account next
 	// flapped gpt-5.4 ↔ gpt-5.4-mini. HARD RULE: failover switches the ACCOUNT, never demotes the

@@ -109,7 +109,7 @@ All three names are aliases for the same command: `/multi-account`, `/provider-f
 | `rediscover` | Force a re-scan of `auth.json`, rebuild the rotation, and refresh Codex model catalogs now. |
 | `add [anthropic\|codex\|kimi\|cursor\|ollama\|qwen]` | Print the next free account slot to select from the interactive `/login` picker. Subscription families (Anthropic, Codex, Kimi, Cursor) are logged in through `/login`; API-key families are filled in `auth.json`. |
 | `remove [anthropic\|codex\|kimi\|cursor\|ollama\|qwen\|<provider-id>]` | Remove an account from `auth.json` and rotation. Family name drops the highest numbered alias slot; a full provider id removes that exact slot. Aliases: `rm`, `delete`. |
-| `next` | Manually switch to the next compatible-quality fallback, deliberately overriding recorded cooldowns for one attempt. Use explicit `switch` to select a different tier. |
+| `next` | Manually switch to the next compatible-quality fallback. An account that can serve work now comes first; a cooled one is reached only when no other is ready, deliberately overriding its recorded cooldown for one attempt. Use explicit `switch` to select a different tier. |
 | `pin <provider/model>` | Persist a model preference for that provider's account group. A numbered alias applies to its siblings too. Requires an idle live parent; does not select the model. |
 | `unpin <provider-or-family>` | Remove one group's pin without changing its underlying `preferredModels` or catalog order. Idempotent; requires an idle live parent. |
 | `pins [list]` | Read-only sorted list of pins and known catalog/account/cooldown/quality applicability. Never refreshes credentials or probes providers. |

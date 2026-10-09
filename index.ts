@@ -6864,6 +6864,14 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			) {
 				ordered = [...ordered.slice(1), ordered[0]];
 			}
+			// Land on the next other account that can work now. One believed spent is only a fallback:
+			// it stays reachable when no other account is ready (and by `use <provider>`), never first.
+			const readyElsewhere = (s: Scored) =>
+				s.remaining === 0 && s.provider !== currentModel?.provider;
+			ordered = [
+				...ordered.filter(readyElsewhere),
+				...ordered.filter((s) => !readyElsewhere(s)),
+			];
 			return ordered.map((s) => s.model);
 		}
 

@@ -307,6 +307,8 @@ function setup(opts: {
 	seedCooldownsMsFromNow?: Record<string, number>;
 	seedState?: Record<string, unknown>;
 	setModelFailures?: string[];
+	/** Pi 1.1 rejects proxy api_key auth when a later registration drops apiKey. */
+	checkProxyAuth?: boolean;
 	setModelBlocks?: () => Promise<void>;
 	forceRefreshResults?: Record<
 		string,
@@ -447,6 +449,7 @@ function setup(opts: {
 			baseUrl: string | undefined;
 		}>,
 		catalogSnapshots: [] as any[],
+		usageSnapshots: [] as any[],
 		completionRouters: [] as Array<{
 			select: (request: any) => any;
 			onAttempt?: (attempt: any) => any;
@@ -630,6 +633,7 @@ function setup(opts: {
 			},
 			emit: (name: string, payload: any) => {
 				if (name === "pi:model-catalog:snapshot:v1") rec.catalogSnapshots.push(payload);
+				if (name === "pi:usage:snapshot:v1") rec.usageSnapshots.push(payload);
 				for (const handler of busEvents.get(name) ?? []) handler(payload);
 			},
 		},
@@ -675,6 +679,8 @@ function setup(opts: {
 			const target = `${model.provider}/${model.id}`;
 			rec.setModels.push(target);
 			if (opts.setModelFailures?.includes(target)) return false;
+			const config = providerConfigs.get(model.provider);
+			if (opts.checkProxyAuth && config?.baseUrl?.startsWith("http://127.0.0.1:") && !config.apiKey) return false;
 			if (opts.setModelBlocks) await opts.setModelBlocks();
 			ctx.model = mkModel(model.provider, model.id);
 			// Pi applies a model default/clamp before emitting model_select.
@@ -1354,6 +1360,42 @@ test("Cursor background payloads use the host side-channel session identity", as
 // ---------------------------------------------------------------------------
 // Usage footer
 // ---------------------------------------------------------------------------
+
+test("startup and next can activate a ready Codex slot after catalog sync without rediscover", async () => {
+	const t = setup({
+		accounts: { ...TWO_ACCOUNTS, "openai-codex": { type: "oauth", access: "base-token", refresh: "base-refresh" } },
+		current: { provider: "openai-codex", id: "gpt-5.5" },
+		config: { autoDiscoverModels: true },
+		hostCodexModels: ["gpt-5.5"],
+		seedCooldownsMsFromNow: { "openai-codex": 60 * 60_000, anthropic: 60 * 60_000 },
+		checkProxyAuth: true,
+	});
+	await t.fire("session_start");
+	assert.equal(t.ctx.model.provider, "openai-codex-account-2");
+	assert.ok(t.providerConfigs.get("openai-codex-account-2").apiKey);
+	assert.ok(!t.rec.notifies.some(text => text.includes("could not be activated")));
+	t.setCurrent("anthropic", "claude-opus-4-8");
+	await t.command("next");
+	assert.equal(t.ctx.model.provider, "openai-codex-account-2");
+});
+
+test("usage snapshots for the selected account omit credentials and identity even with the left footer hidden", async () => {
+	const provider = "openai-codex-account-2";
+	const now = Date.now();
+	const primary = { usedPercent: 85, resetAt: now + 60_000 };
+	const t = setup({
+		current: { provider, id: "gpt-5.5" },
+		config: { showUsage: false },
+		seedState: {
+			stateVersion: 5, exhaustedUntilByProvider: {}, exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {}, invalidatedByProvider: {}, lastSwitches: [],
+			usageByProvider: { [provider]: { provider, family: "codex", fetchedAt: now,
+				primary, account: "private@example.test", credentialHash: "private-hash" } },
+		},
+	});
+	await t.fire("session_start");
+	assert.deepEqual(t.rec.usageSnapshots.at(-1), { provider, family: "codex", fetchedAt: now, primary });
+});
 
 test("usage footer hides the quota windows when showUsageWindows is off", async () => {
 	const provider = "openai-codex-account-2";
@@ -3397,6 +3439,44 @@ test("/multi-account use autocompletes accounts as they are typed, ready ones fi
 	]);
 	// The completed line runs as typed: it lands on the account the list offered.
 	await t.command(all[0].value);
+	assert.equal(t.ctx.model.provider, "openai-codex-account-4");
+});
+
+test("manual next does not land on an account whose last usage reading says it is spent and refusing", async () => {
+	// Real report: `next` alternated between an account refusing with a weekly 429 and Anthropic.
+	// The stale reading (serviceable:false, weekly window at 100%) must still count as spent.
+	const now = Date.now();
+	const t = setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "a", refresh: "ar" },
+			"openai-codex-account-2": { type: "oauth", access: "b", refresh: "br", accountId: "b" },
+			"openai-codex-account-4": { type: "oauth", access: "d", refresh: "dr", accountId: "d" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-5" },
+		seedState: {
+			stateVersion: 5,
+			exhaustedUntilByProvider: {},
+			exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {},
+			invalidatedByProvider: {},
+			usageUntrustedUntilByProvider: { "openai-codex-account-2": now + 60 * 60_000 },
+			usageByProvider: {
+				"openai-codex-account-2": {
+					provider: "openai-codex-account-2",
+					family: "codex",
+					fetchedAt: now - 3 * 60 * 60_000,
+					account: "alice@example.com",
+					plan: "team",
+					serviceable: false,
+					primary: { usedPercent: 20, resetAt: now + 60 * 60_000, windowSeconds: 18_000 },
+					secondary: { usedPercent: 100, resetAt: now + 5 * 86_400_000, windowSeconds: 604_800 },
+				},
+			},
+			lastSwitches: [],
+		},
+	});
+	await t.fire("session_start");
+	await t.command("next");
 	assert.equal(t.ctx.model.provider, "openai-codex-account-4");
 });
 

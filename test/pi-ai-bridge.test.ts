@@ -67,7 +67,7 @@ process.env.PI_CURSOR_PROVIDER_ROOT = ${JSON.stringify(join(root, "no-cursor"))}
 const {default: extension} = await import(${JSON.stringify(pathToFileURL(join(ext, "index.ts")).href)});
 const registrations = new Map();
 extension({registerProvider: (id, config) => registrations.set(id, config),
- registerCommand() {}, on() {}, setModel: async () => true,
+ registerCommand() {}, events: {on: () => () => {}, emit() {}}, on() {}, setModel: async () => true,
  getThinkingLevel: () => "high", setThinkingLevel() {}, appendEntry() {}});
 const result = {};
 const anthropic = registrations.get("anthropic").oauth;

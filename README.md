@@ -196,6 +196,8 @@ A default config is created at `~/.pi/agent/provider-failover.json` on first run
 | `preferredModels` | `{}` | Optional manual strongest-first override per family; when present it wins over live catalog priority. A model pin leads this order without rewriting it. |
 | `pinnedModels` | `{}` | One explicit model ID per account group, managed by `pin` / `unpin`. Inactive when unavailable/incompatible; never grants account health or a different automatic quality band. |
 
+Companion quota displays can emit `pi:usage:request:v1` with `{ provider }` for the active account. This extension publishes `pi:usage:snapshot:v1` with `provider`, `family`, `fetchedAt`, and optional `primary`/`secondary` windows (`usedPercent`, `resetAt`), including for numbered accounts. These events contain quota data only, never credentials or credential hashes. `showUsage` and `showUsageWindows` control this extension's own footer, not the companion display.
+
 State (cooldowns, invalidations, recent switches, credential-free Codex model catalogs, and a diagnostic pending marker) is persisted to `~/.pi/agent/provider-failover-state.json`. The actual pending task is session-local: one Pi window never consumes or resumes another window's work. Pending work is discarded when its owning session closes.
 
 ### Session model ownership

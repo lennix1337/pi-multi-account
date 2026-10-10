@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Startup Codex model-catalog refresh preserves numbered accounts' loopback proxy authentication. Pi no longer rejects a ready account with "could not be activated" until `/multi-account rediscover` repairs the registry.
+- Companion quota footers can follow numbered accounts through credential-free `pi:usage:snapshot:v1` events, including when this extension's own footer is hidden. No OAuth tokens, proxy keys, or credential hashes are shared.
 - A command that changes a saved preference (`only-active`, `priority`, `clear`) now warns when `provider-failover.json` cannot be written, instead of silently applying it for the current session only. A failed shared-state write is logged (`state_write_failed`).
 - On Windows the Cursor bridge's first load handed Node's ESM loader a bare `C:\...` path, which it rejects as an unknown URL scheme; only the retry used a `file://` URL. Every attempt now uses one.
 - On Windows, publishing a numbered account slot into `models.json` could fail silently: replacing a file that another process (a second Pi session, an antivirus or indexer scan) holds open fails with `EPERM`, the error was swallowed, and the slot never reached Pi's model list. Every switch to that account then failed with "could not be activated" and `next` skipped it. `models.json` slot publication now goes through the locked, read-latest config transaction, every temp-file replacement (models, auth, OAuth sidecar, shared state) retries transient `EPERM`/`EACCES`/`EBUSY` for up to one second, and a failed publication is logged (`models_json_publish_failed` / `models_json_unpublish_failed`) instead of ignored.

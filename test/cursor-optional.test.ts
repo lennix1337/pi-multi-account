@@ -43,6 +43,7 @@ const notifies = [];
 const pi = {
 	registerProvider: (id, cfg) => { registeredProviders.push(id); modelCounts[id] = (cfg?.models ?? []).length; },
 	registerCommand: () => {},
+	events: { on: () => () => {}, emit: () => {} },
 	on: (name, handler) => { events[name] = handler; },
 	setModel: async () => true,
 	sendUserMessage: () => {},

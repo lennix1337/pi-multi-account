@@ -2958,6 +2958,7 @@ function registerCodexSlot(
 	pi.registerProvider(id, {
 		name: `ChatGPT Plus/Pro (Codex ${id})`,
 		baseUrl,
+		...(baseUrl.startsWith("http://127.0.0.1:") ? { apiKey: placeholderKeyFor("codex") } : {}),
 		api: "openai-codex-responses" as any,
 		oauth: codexOAuthOverride(id, `ChatGPT Plus/Pro (Codex ${id})`),
 		models: models as any,
@@ -2978,6 +2979,8 @@ function registerCodexCatalog(
 	pi.registerProvider(id, {
 		name,
 		baseUrl,
+		// Pi replaces provider registrations; catalog refresh must retain proxy auth.
+		...(baseUrl.startsWith("http://127.0.0.1:") ? { apiKey: placeholderKeyFor("codex") } : {}),
 		api: "openai-codex-responses" as any,
 		oauth: codexOAuthOverride(id, name),
 		models: [...models, ...configuredOperationModels(id)] as any,
@@ -5282,12 +5285,48 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		).length;
 	}
 
+	function publishUsageSnapshot(snapshot: UsageSnapshot | undefined) {
+		if (!snapshot) return;
+		// A proxy placeholder cannot authenticate a usage-endpoint request. Share quota only.
+		pi.events.emit("pi:usage:snapshot:v1", {
+			provider: snapshot.provider,
+			family: snapshot.family,
+			fetchedAt: snapshot.fetchedAt,
+			...(snapshot.primary ? { primary: { usedPercent: snapshot.primary.usedPercent, resetAt: snapshot.primary.resetAt } } : {}),
+			...(snapshot.secondary ? { secondary: { usedPercent: snapshot.secondary.usedPercent, resetAt: snapshot.secondary.resetAt } } : {}),
+		});
+	}
+
+	function renderUsageStatus(ctx: any, provider: string, snapshot: UsageSnapshot) {
+		const display = displayUsageSnapshot(snapshot);
+		const spare = readyElsewhereCount(ctx, provider);
+		const text = `${formatUsageCompact(display, Date.now(), { windows: config.showUsageWindows })} | ${
+			spare > 0 ? `+${spare} ready` : "no spare"
+		}`;
+		const color =
+			snapshot.family === "qwen"
+				? isInvalidated(provider)
+					? "error"
+					: providerRecoveryAt(provider) > Date.now()
+						? "warning"
+						: "success"
+				: usageColor(display);
+		// Theme API drift must not hide a usable plain-text status.
+		let rendered: string = text;
+		try {
+			if (ctx.ui.theme?.fg) rendered = ctx.ui.theme.fg(color, text);
+		} catch {
+			rendered = text;
+		}
+		ctx.ui.setStatus("multi-account-quota", rendered);
+	}
+
 	function updateUsageStatus(ctx: any, provider = ctx?.model?.provider) {
 		if (typeof ctx?.ui?.setStatus !== "function") return;
 		// Footer rendering touches host UI + formatting helpers; never let a render hiccup
 		// (theme shape change, formatter edge case) bubble up and break the turn it runs in.
 		try {
-			if (!config.showUsage || !provider || !usageFamily(provider)) {
+			if (!provider || !usageFamily(provider)) {
 				ctx.ui.setStatus("multi-account-quota", undefined);
 				return;
 			}
@@ -5296,7 +5335,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// blank footer, which is what the user saw when Codex's token rotated between usage fetches.
 			// Qwen may have no snapshot at all (nothing to fetch) — synthesize a bare one so its live
 			// availability/rate-limit status still shows.
-			const snapshot =
+			const snapshot: UsageSnapshot | undefined =
 				cachedUsage(provider) ??
 				usageByProvider.get(provider) ??
 				(usageFamily(provider) === "qwen"
@@ -5307,36 +5346,22 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 							plan: "",
 						}
 					: undefined);
-			if (!snapshot) {
+			publishUsageSnapshot(snapshot);
+			if (!config.showUsage || !snapshot) {
 				ctx.ui.setStatus("multi-account-quota", undefined);
 				return;
 			}
-			const display = displayUsageSnapshot(snapshot);
-			const spare = readyElsewhereCount(ctx, provider);
-			const text = `${formatUsageCompact(display, Date.now(), { windows: config.showUsageWindows })} | ${
-				spare > 0 ? `+${spare} ready` : "no spare"
-			}`;
-			const color =
-				snapshot.family === "qwen"
-					? isInvalidated(provider)
-						? "error"
-						: providerRecoveryAt(provider) > Date.now()
-							? "warning"
-							: "success"
-					: usageColor(display);
-			// A theme.fg that throws (host theme API drift) must not blank the whole footer — always
-			// fall back to plain text so setStatus is still called with something visible.
-			let rendered: string = text;
-			try {
-				if (ctx.ui.theme?.fg) rendered = ctx.ui.theme.fg(color, text);
-			} catch {
-				rendered = text;
-			}
-			ctx.ui.setStatus("multi-account-quota", rendered);
+			renderUsageStatus(ctx, provider, snapshot);
 		} catch {
 			/* footer is cosmetic — a render error must not affect failover */
 		}
 	}
+
+	pi.events.on("pi:usage:request:v1", (request: any) => {
+		if (request?.provider === completionRouterContext?.model?.provider) {
+			updateUsageStatus(completionRouterContext);
+		}
+	});
 
 	function usageSnapshotIsCurrent(snapshot: UsageSnapshot): boolean {
 		if (sessionClosed) return false;
@@ -6913,8 +6938,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			}
 			// Land on the next other account that can work now. One believed spent is only a fallback:
 			// it stays reachable when no other account is ready (and by `use <provider>`), never first.
+			// An account whose usage reading was distrusted after a refusal is spent even when its
+			// recorded cooldown has lapsed; otherwise `next` ping-pongs back to a refusing account.
 			const readyElsewhere = (s: Scored) =>
-				s.remaining === 0 && s.provider !== currentModel?.provider;
+				s.remaining === 0 &&
+				!usageUntrusted(s.provider, now) &&
+				s.provider !== currentModel?.provider;
 			ordered = [
 				...ordered.filter(readyElsewhere),
 				...ordered.filter((s) => !readyElsewhere(s)),

@@ -2821,12 +2821,12 @@ test("dead authorization with no fallback does not leave fake pending work", asy
 	assert.ok(!t.readState().pendingFrom);
 });
 
-test("manual next can override cooldowns without arming an automatic continuation", async () => {
+test("manual switch can override cooldowns without arming an automatic continuation", async () => {
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
 	});
-	await t.command("next");
+	await t.command("switch openai-codex-account-2");
 	assert.deepEqual(t.rec.setModels, ["openai-codex-account-2/gpt-5.5"]);
 	await t.fire("agent_end", { messages: [] });
 	assert.equal(
@@ -3149,7 +3149,7 @@ test("re-login as another user in the same Codex workspace clears the old user's
 	assert.equal(t.rec.setModels[0], `${provider}/gpt-5.5`);
 });
 
-test("manual next cycles through every account instead of ping-ponging between two", async () => {
+test("manual next cycles through the available accounts and skips cooling ones", async () => {
 	const accounts: Account = {
 		anthropic: { type: "oauth", access: "a", refresh: "ar" },
 		"anthropic-account-2": { type: "oauth", access: "a2", refresh: "a2r" },
@@ -3169,12 +3169,10 @@ test("manual next cycles through every account instead of ping-ponging between t
 	const t = setup({
 		accounts,
 		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
-		// All cooling, codex soonest — exactly the shape from the real failure logs.
+		// Only anthropic-account-2 and openai-codex-account-4 can work now; next must never visit the others.
 		seedCooldownsMsFromNow: {
 			anthropic: 4 * 60 * 60 * 1000,
-			"anthropic-account-2": 3 * 60 * 60 * 1000,
 			"openai-codex-account-2": 4 * 60 * 60 * 1000,
-			"openai-codex-account-4": 2 * 60 * 60 * 1000,
 		},
 	});
 	await t.fire("session_start");
@@ -3183,13 +3181,15 @@ test("manual next cycles through every account instead of ping-ponging between t
 		await t.command("next");
 		providers.push(t.ctx.model.provider);
 	}
+	const available = ["anthropic-account-2", "openai-codex-account-4"];
 	assert.ok(
-		providers.some((p) => p.startsWith("anthropic")),
-		`next must reach an anthropic slot; visited=${providers.join(",")}`,
+		providers.every((p) => available.includes(p)),
+		`next must visit only available accounts; visited=${providers.join(",")}`,
 	);
-	assert.ok(
-		new Set(providers).size >= 3,
-		`next must visit >=3 distinct accounts; visited=${providers.join(",")}`,
+	assert.equal(
+		new Set(providers).size,
+		available.length,
+		`next must cycle through every available account; visited=${providers.join(",")}`,
 	);
 });
 
@@ -3478,6 +3478,59 @@ test("manual next does not land on an account whose last usage reading says it i
 	await t.fire("session_start");
 	await t.command("next");
 	assert.equal(t.ctx.model.provider, "openai-codex-account-4");
+});
+
+test("manual next stays put when every other account is cooling", async () => {
+	// Real report: `next` moved from a working account into an OpenAI account at 100% and
+	// refusing, because manual rotation ignored cooldowns. `next` now means the next account that
+	// can work right now; when none can, the current account stays and the user is told so.
+	const now = Date.now();
+	const t = setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "a", refresh: "ar" },
+			"openai-codex": { type: "oauth", access: "b", refresh: "br", accountId: "b" },
+			"openai-codex-account-2": { type: "oauth", access: "c", refresh: "cr", accountId: "c" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-5" },
+		seedState: {
+			stateVersion: 5,
+			exhaustedUntilByProvider: {
+				"openai-codex": now + 60 * 60_000,
+				"openai-codex-account-2": now + 60 * 60_000,
+			},
+			exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {},
+			invalidatedByProvider: {},
+			lastSwitches: [],
+		},
+	});
+	await t.fire("session_start");
+	await t.command("next");
+	assert.equal(t.ctx.model.provider, "anthropic");
+	assert.deepEqual(t.rec.setModels, [], "next must not switch into a cooling account");
+});
+
+test("manual next skips a cooling account and lands on the next ready one", async () => {
+	const now = Date.now();
+	const t = setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "a", refresh: "ar" },
+			"openai-codex": { type: "oauth", access: "b", refresh: "br", accountId: "b" },
+			"openai-codex-account-2": { type: "oauth", access: "c", refresh: "cr", accountId: "c" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-5" },
+		seedState: {
+			stateVersion: 5,
+			exhaustedUntilByProvider: { "openai-codex": now + 60 * 60_000 },
+			exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {},
+			invalidatedByProvider: {},
+			lastSwitches: [],
+		},
+	});
+	await t.fire("session_start");
+	await t.command("next");
+	assert.equal(t.ctx.model.provider, "openai-codex-account-2");
 });
 
 test("manual next never downgrades to a weaker model of the same account (no mini flap)", async () => {
@@ -9452,7 +9505,7 @@ test("a bare throttle with no stated horizon still defers to the usage meter", a
 // ---------------------------------------------------------------------------
 
 test("a manually chosen account survives the preflight for one attempt", async () => {
-	// `next` deliberately ignores cooldowns, because the quota bookkeeping is a guess and trying
+	// `switch` deliberately ignores cooldowns, because the quota bookkeeping is a guess and trying
 	// the account is the only way to prove the guess wrong. But the preflight that runs on the
 	// user's very next message re-applied that same bookkeeping and moved them off — so the
 	// override held only until it was used, which is exactly when it mattered. One attempt must
@@ -9461,7 +9514,7 @@ test("a manually chosen account survives the preflight for one attempt", async (
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
 	});
-	await t.command("next");
+	await t.command("switch openai-codex-account-2");
 	assert.deepEqual(t.rec.setModels, ["openai-codex-account-2/gpt-5.5"]);
 
 	const before = t.rec.setModels.length;
@@ -9475,20 +9528,20 @@ test("a manually chosen account survives the preflight for one attempt", async (
 });
 
 test("the manual reprieve is spent after one attempt", async () => {
-	// It is one attempt, not a permanent pin: once the chosen account has had its chance, normal
-	// routing resumes, otherwise a user could strand themselves on a genuinely dead account.
+	// It is one attempt, not a permanent pin: once the chosen account has had its chance and
+	// refused, normal routing resumes, otherwise a user could strand themselves on a dead account.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
 	});
-	await t.command("next");
+	await t.command("switch openai-codex-account-2");
 	await t.input("first");
-	const before = t.rec.setModels.length;
+	await finishError(t, "openai-codex-account-2", "gpt-5.5", "429 rate_limit_error");
 	await t.input("second");
 
-	assert.ok(
-		t.rec.setModels.length > before,
-		"the second attempt must fall back to normal routing",
+	assert.notEqual(
+		t.ctx.model.provider,
+		"openai-codex-account-2",
+		"after the attempt is refused, the second message must not go back to the refusing account",
 	);
 });
 
@@ -9983,7 +10036,7 @@ test("a manually chosen account survives BOTH preflights of the same message", a
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
 	});
-	await t.command("next");
+	await t.command("switch openai-codex-account-2");
 	assert.deepEqual(t.rec.setModels, ["openai-codex-account-2/gpt-5.5"]);
 
 	const before = t.rec.setModels.length;
@@ -10004,20 +10057,20 @@ test("a manually chosen account survives BOTH preflights of the same message", a
 
 test("the reprieve is still spent after that one attempt", async () => {
 	// The double-preflight fix must not turn the reprieve into a permanent pin: once the attempt
-	// has happened, normal routing resumes so nobody is stranded on a dead account.
+	// has been refused, normal routing resumes so nobody is stranded on a dead account.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
 	});
-	await t.command("next");
+	await t.command("switch openai-codex-account-2");
 	await t.input("first");
+	await finishError(t, "openai-codex-account-2", "gpt-5.5", "429 rate_limit_error");
 	await t.fire("before_agent_start", {});
-	const before = t.rec.setModels.length;
 	await t.input("second");
 
-	assert.ok(
-		t.rec.setModels.length > before,
-		"the second message must go back to normal routing",
+	assert.notEqual(
+		t.ctx.model.provider,
+		"openai-codex-account-2",
+		"the second message must not go back to the refusing account",
 	);
 });
 
@@ -10097,7 +10150,7 @@ test("a month-long 'believed spent' notice admits it is a forecast, not a month-
 			lastSwitches: [],
 		},
 	});
-	await t.command("next");
+	await t.command("switch openai-codex-account-2");
 
 	const said = t.rec.notifies.join("\n");
 	assert.match(said, new RegExp(provider), "it must still name the account");

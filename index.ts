@@ -6910,10 +6910,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (scored.length === 0) return [];
 
 		// Manual `/multi-account next`: walk the rotation forward from the current account,
-		// wrapping around, so repeated presses cycle through EVERY account. This is an explicit user
-		// override: quota/cooldown metadata may be stale after an early provider reset, purchased
-		// credits, or a plan upgrade, so it must never reorder the manual ring or permanently starve
-		// an account. Automatic failover still prefers accounts known to be available right now.
+		// wrapping around, and land on the first account that can work now. Repeated presses cycle
+		// through the accounts that are available; a spent account is never a destination.
 		if (options.manualRoundRobin) {
 			const n = fallbacks.length;
 			const currentRotIndex = currentModel?.provider
@@ -6936,19 +6934,14 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			) {
 				ordered = [...ordered.slice(1), ordered[0]];
 			}
-			// Land on the next other account that can work now. One believed spent is only a fallback:
-			// it stays reachable when no other account is ready (and by `use <provider>`), never first.
 			// An account whose usage reading was distrusted after a refusal is spent even when its
-			// recorded cooldown has lapsed; otherwise `next` ping-pongs back to a refusing account.
+			// recorded cooldown has lapsed; otherwise `next` ping-pongs back to a refusing account. When
+			// no other account is ready this returns nothing, and the caller reports it and stays put.
 			const readyElsewhere = (s: Scored) =>
 				s.remaining === 0 &&
 				!usageUntrusted(s.provider, now) &&
 				s.provider !== currentModel?.provider;
-			ordered = [
-				...ordered.filter(readyElsewhere),
-				...ordered.filter((s) => !readyElsewhere(s)),
-			];
-			return ordered.map((s) => s.model);
+			return ordered.filter(readyElsewhere).map((s) => s.model);
 		}
 
 		return rankAutomaticRouteCandidates(scored, {

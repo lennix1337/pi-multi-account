@@ -26,6 +26,12 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createPayloadStream } from "./provider-payload-stream.ts";
+import {
+	AutomaticRecoveryArbiter,
+	isPolicyRefusal,
+	type AutomaticRecoveryLease,
+	type RecoveryCategory,
+} from "./recovery-safety.ts";
 import { mutateProxyAuth } from "./auth-file-transaction.ts";
 import { multiAccountCompletions, type AccountChoice } from "./command-completions.ts";
 import { mergeStateDeltas, mutateStateFile } from "./state-file-transaction.ts";
@@ -3896,6 +3902,17 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	let modelPreferenceChanged = !hasExplicitCliSelection;
 	let thinkingPreferenceChanged = !hasExplicitCliSelection;
 	const sessionInstanceId = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+	const recoveryArbiter = new AutomaticRecoveryArbiter((metadata) =>
+		pi.events.emit("optchat:recovery", metadata),
+	);
+	function recoverySessionId(ctx: any): string | undefined {
+		try {
+			const id = ctx?.sessionManager?.getSessionId?.();
+			return typeof id === "string" && id.length > 0 ? id : undefined;
+		} catch {
+			return undefined;
+		}
+	}
 	let config = loadConfig();
 	let sessionClosed = false;
 	let supersededRoot = false;
@@ -4182,6 +4199,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	const credentialIdentities = new Map<string, string>();
 
 	let currentPromptSwitch: SwitchRecord | undefined;
+	let continuationRecoveryLease: AutomaticRecoveryLease | undefined;
+	let contextGuardRecoveryLease: AutomaticRecoveryLease | undefined;
+	let contextGuardRecoveryEpoch: number | undefined;
 	// Number of auto-continuations issued for the CURRENT task. Crucially this is NOT
 	// reset by the self-triggered re-prompts failover issues (only by a genuine new user
 	// prompt — see before_agent_start), so config.maxAutoContinuesPerPrompt actually bounds
@@ -7786,6 +7806,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	): Promise<
 		{ compaction: any } | { cancel: true; reason: string } | undefined
 	> {
+		let recoveryLease: AutomaticRecoveryLease | undefined;
+		let retainRecoveryLease = false;
 		try {
 			if (!automaticFailoverEnabled() || !config.routeCompactionToHealthyAccount)
 				return undefined;
@@ -7823,6 +7845,18 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 						: "no live account for compaction; cancelled",
 				);
 			}
+			const parentLease = contextGuardRecoveryLease ?? continuationRecoveryLease;
+			recoveryLease = recoveryArbiter.tryAcquire(
+				{
+					category: "context_limit",
+					provider: ctx?.model?.provider,
+					model: ctx?.model?.id,
+					sessionId: recoverySessionId(ctx),
+				},
+				parentLease,
+			);
+			if (!recoveryLease) return compactionCancelled("another automatic recovery is active");
+			recoveryLease.markRecovering("context_limit", ctx?.model?.provider, ctx?.model?.id);
 			let thinkingLevel: any;
 			try {
 				thinkingLevel = (pi as any).getThinkingLevel?.();
@@ -7872,6 +7906,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					tried.push(`${model.provider} (host cannot compact)`);
 					continue;
 				}
+				if (!allowAction("summarize on healthy account", ctx)) {
+					return compactionCancelled("automatic recovery budget exhausted");
+				}
 				const attempt = new AbortController();
 				const onParentAbort = () => abortQuietly(attempt);
 				if (typeof event?.signal?.addEventListener === "function") {
@@ -7919,11 +7956,18 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 							reason: event?.reason,
 							from: ctx.model?.provider,
 						});
+						continuationRecoveryLease =
+							contextGuardRecoveryLease ?? continuationRecoveryLease ?? recoveryLease;
+						retainRecoveryLease = true;
 						return { compaction: result };
 					}
 					tried.push(`${model.provider} (empty)`);
 				} catch (error) {
 					abortQuietly(attempt);
+					if (isPolicyRefusal(error)) {
+						stopAutomaticRecoveryForPolicyRefusal(ctx, model.provider, model.id);
+						return compactionCancelled("provider policy refusal; automatic recovery stopped");
+					}
 					if (event?.signal?.aborted) {
 						return compactionCancelled("compaction aborted");
 					}
@@ -7961,6 +8005,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				"healthy-account compaction failed; cancelled",
 			);
 		} catch (error) {
+			if (isPolicyRefusal(error)) {
+				stopAutomaticRecoveryForPolicyRefusal(ctx, ctx?.model?.provider, ctx?.model?.id);
+				return compactionCancelled("provider policy refusal; automatic recovery stopped");
+			}
 			logEvent("compaction_failed", { error: String(error) });
 			if (event?.signal?.aborted) {
 				return compactionCancelled("compaction aborted");
@@ -7972,6 +8020,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			return compactionCancelled(
 				`healthy compaction failed: ${String(error).slice(0, 60)}`,
 			);
+		} finally {
+			if (!retainRecoveryLease) recoveryLease?.release();
 		}
 	}
 
@@ -8187,6 +8237,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		options: {
 			allowWhenAutoContinueDisabled?: boolean;
 			pendingMode?: PendingResumeMode;
+			recoveryLease?: AutomaticRecoveryLease;
 		} = {},
 	): Promise<boolean> {
 		const allowRecoveryResume =
@@ -8200,6 +8251,25 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		)
 			return false;
 		const dispatchSwitch = currentPromptSwitch;
+		const recoveryCategory: RecoveryCategory = /quota|rate limit|cooldown|exhausted/i.test(dispatchSwitch.reason)
+			? "quota"
+			: /context|compact/i.test(dispatchSwitch.reason)
+				? "context_limit"
+				: /overload|transient|timeout|unavailable/i.test(dispatchSwitch.reason)
+					? "transient"
+					: "unknown";
+		const recoveryLease = recoveryArbiter.tryAcquire(
+			{
+				category: recoveryCategory,
+				provider: ctx?.model?.provider,
+				model: ctx?.model?.id,
+				sessionId: recoverySessionId(ctx),
+			},
+			options.recoveryLease,
+		);
+		if (!recoveryLease) return false;
+		recoveryLease.markRecovering(recoveryCategory, ctx?.model?.provider, ctx?.model?.id);
+		try {
 		// Circuit breaker open → advisory mode. The account switch already happened (useful);
 		// we just don't attempt the auto-resume that has been failing. The user's next message
 		// runs on the fresh account. This is the floor: never worse than switching by hand.
@@ -8260,6 +8330,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				);
 		}
 		return false;
+		} finally {
+			if (!options.recoveryLease) recoveryLease.release();
+		}
 	}
 
 	// ----- the governor, continued -----------------------------------------
@@ -8481,8 +8554,17 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * one is how an old automatic chain resumed after `/multi-account next` had already found a
 	 * working account.
 	 */
-	function claimUserControl(reason: string) {
+	function claimUserControl(reason: string, isExplicitUserControl = false) {
 		chainEpoch++;
+		if (isExplicitUserControl) {
+			recoveryArbiter.resetForUserControl();
+			clearContextGuardCompactionWait();
+			releaseContextGuardRecovery();
+			continuationRecoveryLease?.release();
+			continuationRecoveryLease = undefined;
+			contextGuardWantsCompaction = false;
+			contextGuardContinuationPending = false;
+		}
 		if (reason.startsWith("manual")) manualRouteOwnsErrors = true;
 		autoContinuesThisPrompt = 0;
 		resetGovernor();
@@ -8496,6 +8578,47 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		endResumeWatch();
 		if (hasPendingResume()) clearPendingContinuation();
 		logEvent("user_control_claimed", { session: sessionInstanceId, reason, epoch: chainEpoch });
+	}
+
+	function stopAutomaticRecoveryForPolicyRefusal(
+		ctx: any,
+		provider?: string,
+		model?: string,
+	) {
+		const wasStopped = recoveryArbiter.policyRefusalStopped;
+		if (wasStopped) return;
+		recoveryArbiter.stopForPolicyRefusal({
+			provider,
+			model,
+			sessionId: recoverySessionId(ctx),
+		});
+		contextGuardWantsCompaction = false;
+		contextGuardContinuationPending = false;
+		contextGuardCompactionRetryAfter =
+			Date.now() + CONTEXT_GUARD_COMPACTION_FAILURE_BACKOFF_MS;
+		clearContextGuardCompactionWait();
+		try {
+			ctx?.abort?.();
+		} catch {
+			/* Best-effort: stop any host-owned retry loop after the terminal refusal. */
+		}
+		clearPendingContinuation();
+		releaseContextGuardRecovery();
+		continuationRecoveryLease?.release();
+		continuationRecoveryLease = undefined;
+		currentPromptSwitch = undefined;
+		continuationDispatchedForAgentTurn = false;
+		expectingInjectedContinuation = false;
+		if (!wasStopped) {
+			try {
+				ctx?.ui?.notify?.(
+					"Automatic provider recovery stopped after a policy refusal. Retry explicitly or send a new message to start a fresh recovery run.",
+					"warning",
+				);
+			} catch {
+				/* UI notification is best-effort. */
+			}
+		}
 	}
 
 	function schedulePendingWake(ctx: any) {
@@ -8527,6 +8650,35 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			Math.min(delay, config.pendingPollMs),
 		);
 		pendingWakeTimer.unref?.();
+	}
+
+	function pendingResumeRecoveryLease(ctx: any, reason: string): AutomaticRecoveryLease | undefined {
+		const category: RecoveryCategory = /quota|rate limit|exhausted|cooldown/i.test(reason)
+			? "quota"
+			: /context|compact/i.test(reason)
+				? "context_limit"
+				: /overload|transient|timeout|unavailable/i.test(reason)
+					? "transient"
+					: "unknown";
+		const lease = recoveryArbiter.tryAcquire({
+			category,
+			provider: ctx?.model?.provider,
+			model: ctx?.model?.id,
+			sessionId: recoverySessionId(ctx),
+		});
+		if (lease) {
+			lease.markRecovering(category, ctx?.model?.provider, ctx?.model?.id);
+			// A provider failure can arrive while the resumed turn is still awaited below. Publish
+			// this root so message_end can acquire a nested lease instead of suppressing that failure.
+			continuationRecoveryLease = lease;
+		} else logEvent("automatic_recovery_suppressed", { reason: "another automatic recovery is active" });
+		return lease;
+	}
+
+	function releasePendingResumeRecoveryLease(lease: AutomaticRecoveryLease) {
+		if (continuationRecoveryLease?.token === lease.token)
+			continuationRecoveryLease = undefined;
+		lease.release();
 	}
 
 	async function attemptPendingResume(ctx: any) {
@@ -8598,7 +8750,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (isSameModelResumeReason(pendingSnapshot?.reason ?? "")) {
 			const now = Date.now();
 			if (providerRecoveryAt(sourceModel.provider, now) <= now && (pendingSnapshot?.retryAt ?? now) <= now) {
-				const resumeReason = pendingSnapshot?.reason;
+				const resumeReason = pendingSnapshot?.reason ?? "";
+				const recoveryLease = pendingResumeRecoveryLease(ctx, resumeReason);
+				if (!recoveryLease) {
+					schedulePendingWake(ctx);
+					return;
+				}
+				try {
 				clearPendingContinuation();
 				const same = ref(sourceModel.provider, sourceModel.id);
 				// Deliberately NOT routed through the governor: this is not a rotation, it is
@@ -8649,6 +8807,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					);
 				}
 				return;
+				} finally {
+					releasePendingResumeRecoveryLease(recoveryLease);
+				}
 			}
 			schedulePendingWake(ctx);
 			return;
@@ -8689,6 +8850,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		);
 		if (otherCandidates.length === 0) {
 			if (sourceRecovered) {
+				const recoveryLease = pendingResumeRecoveryLease(ctx, pendingReason);
+				if (!recoveryLease) {
+					schedulePendingWake(ctx);
+					return;
+				}
+				try {
 				clearPendingContinuation();
 				// The original account came back and there is no alternative: this is also a
 				// same-account resume with no switch record.
@@ -8713,6 +8880,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					);
 				}
 				return;
+				} finally {
+					releasePendingResumeRecoveryLease(recoveryLease);
+				}
 			}
 			// Nothing to move to. The wait itself achieved nothing, so slow it down before the
 			// next look — otherwise this is the 1 Hz poll that filled four megabytes of log.
@@ -8722,30 +8892,40 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 
 		const reason = pendingReason || "account cooldown expired";
-		const switched = await activateFallback(
-			ctx,
-			sourceModel,
-			otherCandidates,
-			reason,
-		);
-		if (epoch !== chainEpoch) return; // stopped while the switch was in flight
-		if (!switched || !currentPromptSwitch) {
-			growPendingWakeBackoff();
+		const recoveryLease = pendingResumeRecoveryLease(ctx, reason);
+		if (!recoveryLease) {
 			schedulePendingWake(ctx);
 			return;
 		}
-		// A rotation happened. Whether it was worth anything is decided by the dispatch below;
-		// either way it counts against the budget, because a rotation that starts no turn is
-		// precisely the move that used to be free and therefore unbounded.
-		pendingResumeHops++;
-		clearPendingContinuation();
-		const dispatched = await maybeDispatchContinuation(ctx, {
-			allowWhenAutoContinueDisabled: allowRecoveryResume,
-			pendingMode,
-		});
-		if (epoch !== chainEpoch) return;
-		if (dispatched) resetPendingWakeBackoff();
-		else growPendingWakeBackoff();
+		try {
+			const switched = await activateFallback(
+				ctx,
+				sourceModel,
+				otherCandidates,
+				reason,
+			);
+			if (epoch !== chainEpoch) return; // stopped while the switch was in flight
+			if (!switched || !currentPromptSwitch) {
+				growPendingWakeBackoff();
+				schedulePendingWake(ctx);
+				return;
+			}
+			// A rotation happened. Whether it was worth anything is decided by the dispatch below;
+			// either way it counts against the budget, because a rotation that starts no turn is
+			// precisely the move that used to be free and therefore unbounded.
+			pendingResumeHops++;
+			clearPendingContinuation();
+			const dispatched = await maybeDispatchContinuation(ctx, {
+				allowWhenAutoContinueDisabled: allowRecoveryResume,
+				pendingMode,
+				recoveryLease,
+			});
+			if (epoch !== chainEpoch) return;
+			if (dispatched) resetPendingWakeBackoff();
+			else growPendingWakeBackoff();
+		} finally {
+			releasePendingResumeRecoveryLease(recoveryLease);
+		}
 	}
 
 	function setPendingContinuation(
@@ -9161,7 +9341,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			try {
 				const pins = persistModelPin(CONFIG_PATH, scope, modelId, canCommit);
 				config = { ...config, pinnedModels: pins };
-				claimUserControl("model pin preference changed");
+				claimUserControl("model pin preference changed", true);
 				logEvent("model_pin_set", { scope, model: modelId ?? null });
 				ctx.ui.notify(command === "unpin"
 					? `pi-multi-account: removed model pin for ${scope}; the underlying preferredModels/catalog order is unchanged`
@@ -9655,7 +9835,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				);
 				return;
 			}
-			claimUserControl(`manual switch ${target}`);
+			claimUserControl(`manual switch ${target}`, true);
 			// Manual switch is an EXPLICIT override, so give the target a clean slate:
 			//  - clear any cooldown (the user is overriding a rate-limit wait), AND
 			//  - clear a STALE invalidation. An account can stay invalidated long after its real
@@ -9763,7 +9943,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				);
 				return;
 			}
-			claimUserControl("manual best");
+			claimUserControl("manual best", true);
 			const candidates = findFallbackModels(ctx, ctx.model, {
 				availableNowOnly: true,
 				includeCurrent: true,
@@ -9917,7 +10097,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 		if (command === "next") {
 			if (ctx.model) {
-				claimUserControl("manual next");
+				claimUserControl("manual next", true);
 				// Manual rotation is a user override, NOT a rate-limit event: cooling the account
 				// we're leaving (the old 5-minute cooldown) drained the pool — after one lap every
 				// provider was "cooling" and the round-robin collapsed onto whatever was left. Pass
@@ -10266,7 +10446,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	}
 
 	function contextGuardActive(): boolean {
-		return automaticFailoverEnabled() && config.contextGuard.enabled;
+		return automaticFailoverEnabled() && config.contextGuard.enabled && !recoveryArbiter.policyRefusalStopped;
 	}
 
 	safeOn("context", (event: any, ctx: any) => {
@@ -10408,12 +10588,26 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	let contextGuardCompactionTimer: ReturnType<typeof setTimeout> | undefined;
 
 	/** The compaction we asked for has reported back (either way): let the next one be asked for. */
-	function settleContextGuardCompaction() {
+	function clearContextGuardCompactionWait() {
 		contextGuardCompactionInFlight = false;
 		if (contextGuardCompactionTimer) {
 			clearTimeout(contextGuardCompactionTimer);
 			contextGuardCompactionTimer = undefined;
 		}
+	}
+
+	function releaseContextGuardRecovery(lease = contextGuardRecoveryLease) {
+		if (!lease) return;
+		if (contextGuardRecoveryLease === lease) {
+			contextGuardRecoveryLease = undefined;
+			contextGuardRecoveryEpoch = undefined;
+		}
+		lease.release();
+	}
+
+	function settleContextGuardCompaction() {
+		clearContextGuardCompactionWait();
+		releaseContextGuardRecovery();
 	}
 
 	/**
@@ -10425,29 +10619,45 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		kind: "context_guard_compaction_failed" | "context_guard_compaction_unanswered",
 		error?: unknown,
 		ctx?: any,
+		lease = contextGuardRecoveryLease,
+		epoch = contextGuardRecoveryEpoch,
 	) {
-		const resumeAfterFailure = contextGuardContinuationPending;
+		if (epoch !== undefined && epoch !== chainEpoch) {
+			clearContextGuardCompactionWait();
+			releaseContextGuardRecovery(lease);
+			return;
+		}
+		if (isPolicyRefusal(error))
+			stopAutomaticRecoveryForPolicyRefusal(ctx, ctx?.model?.provider, ctx?.model?.id);
+		const resumeAfterFailure =
+			contextGuardContinuationPending && !recoveryArbiter.policyRefusalStopped;
 		const hadDemand = contextGuardWantsCompaction || contextGuardCompactionInFlight;
 		contextGuardWantsCompaction = false;
 		contextGuardContinuationPending = false;
 		if (hadDemand) {
 			contextGuardCompactionRetryAfter =
 				Date.now() + CONTEXT_GUARD_COMPACTION_FAILURE_BACKOFF_MS;
-			settleContextGuardCompaction();
+			clearContextGuardCompactionWait();
 			logEvent(kind, {
 				...(error === undefined ? {} : { error: String(error) }),
 				backoffMs: CONTEXT_GUARD_COMPACTION_FAILURE_BACKOFF_MS,
 			});
 		} else {
-			settleContextGuardCompaction();
+			clearContextGuardCompactionWait();
 		}
 		// Compaction failed or was cancelled; the task is not done. Resume on the next tick so a
 		// host flush of "Queued for after compaction" can claim the session first.
 		if (resumeAfterFailure && ctx && !userAbortedChain) {
 			queueMicrotask(() => {
+				if ((epoch !== undefined && epoch !== chainEpoch) || recoveryArbiter.policyRefusalStopped) {
+					releaseContextGuardRecovery(lease);
+					return;
+				}
 				contextGuardContinuationPending = true;
-				dispatchContextGuardContinuation(ctx);
+				dispatchContextGuardContinuation(ctx, lease, epoch);
 			});
+		} else {
+			releaseContextGuardRecovery(lease);
 		}
 	}
 
@@ -10479,11 +10689,25 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (!ctx?.isIdle?.()) return undefined;
 		if (ctx?.hasPendingMessages?.()) return undefined;
 		if (hasPendingResume()) return undefined;
+		const recoveryLease = recoveryArbiter.tryAcquire({
+			category: "context_limit",
+			provider: ctx?.model?.provider,
+			model: ctx?.model?.id,
+			sessionId: recoverySessionId(ctx),
+		});
+		if (!recoveryLease) return undefined;
+		recoveryLease.markRecovering("context_limit", ctx?.model?.provider, ctx?.model?.id);
 		// Asking for a summary is an action like any other. In a healthy session it produces a
 		// provider request, which clears the governor's counter, so gating it costs nothing there
 		// — and in a session where compaction is failing repeatedly, it is one of the mechanisms
 		// that must be allowed to stop.
-		if (!allowAction("ask for a summary", ctx)) return undefined;
+		if (!allowAction("ask for a summary", ctx)) {
+			recoveryLease.release();
+			return undefined;
+		}
+		contextGuardRecoveryLease = recoveryLease;
+		const recoveryEpoch = chainEpoch;
+		contextGuardRecoveryEpoch = recoveryEpoch;
 		contextGuardCompactionInFlight = true;
 		contextGuardContinuationPending = true;
 		contextGuardLastCompactionAt = Date.now();
@@ -10501,8 +10725,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		try {
 			ctx.compact({
 				onComplete: () => {
-					settleContextGuardCompaction();
-					dispatchContextGuardContinuation(ctx);
+					clearContextGuardCompactionWait();
+					dispatchContextGuardContinuation(ctx, recoveryLease, recoveryEpoch);
 				},
 				onError: (error: Error) => {
 					// "Nothing to compact" is a normal answer, not a reason to retry on
@@ -10514,11 +10738,19 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 						"context_guard_compaction_failed",
 						String(error?.message ?? error),
 						ctx,
+						recoveryLease,
+						recoveryEpoch,
 					);
 				},
 			});
 		} catch (error) {
-			failContextGuardCompaction("context_guard_compaction_failed", error, ctx);
+			failContextGuardCompaction(
+				"context_guard_compaction_failed",
+				error,
+				ctx,
+				recoveryLease,
+				recoveryEpoch,
+			);
 		}
 		return undefined;
 	});
@@ -10529,7 +10761,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		contextGuardElided.clear();
 		contextGuardWantsCompaction = false;
 		contextGuardCompactionRetryAfter = 0;
-		settleContextGuardCompaction();
+		clearContextGuardCompactionWait();
 		contextGuardLastRaw = 0;
 		contextGuardTrimmedLastRequest = false;
 		return undefined;
@@ -10577,7 +10809,30 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * during session_compact would merely append it to history and never run it. A user message
 	 * after the callback both starts a real turn and keeps the normal continuation budget/marker.
 	 */
-	function dispatchContextGuardContinuation(ctx: any) {
+	function dispatchContextGuardContinuation(
+		ctx: any,
+		parentLease?: AutomaticRecoveryLease,
+		epoch = contextGuardRecoveryEpoch,
+	) {
+		if (epoch !== undefined && epoch !== chainEpoch) {
+			releaseContextGuardRecovery(parentLease);
+			return;
+		}
+		const recoveryLease = recoveryArbiter.tryAcquire(
+			{
+				category: "context_limit",
+				provider: ctx?.model?.provider,
+				model: ctx?.model?.id,
+				sessionId: recoverySessionId(ctx),
+			},
+			parentLease,
+		);
+		if (!recoveryLease) {
+			releaseContextGuardRecovery(parentLease);
+			return;
+		}
+		let continuationQueued = false;
+		try {
 		if (!contextGuardContinuationPending) return;
 		contextGuardContinuationPending = false;
 		if (!config.enabled || !config.continueAfterCompaction) {
@@ -10620,11 +10875,14 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			return;
 		}
 		if (!allowAction("carry on after context-guard compaction", ctx)) return;
+		recoveryLease.markRecovering("context_limit", ctx?.model?.provider, ctx?.model?.id);
 		expectingInjectedContinuation = true;
 		try {
 			pi.sendUserMessage(CONTINUE_AFTER_COMPACTION_PROMPT, {
 				deliverAs: "followUp",
 			});
+			continuationQueued = true;
+			continuationRecoveryLease = parentLease ?? recoveryLease;
 			autoContinuesThisPrompt++;
 			logEvent("compaction_continue", {
 				compactionReason: "context_guard",
@@ -10638,10 +10896,17 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				error: String(error).slice(0, 200),
 			});
 		}
+		} finally {
+			if (!continuationQueued) {
+				if (parentLease) releaseContextGuardRecovery(parentLease);
+				else recoveryLease.release();
+			}
+		}
 	}
 
 	safeOn("session_compact", (event: any, ctx: any) => {
 		if (!automaticFailoverEnabled() || !config.continueAfterCompaction) return undefined;
+		if (recoveryArbiter.policyRefusalStopped || contextGuardContinuationPending) return undefined;
 		// Only automatic compactions. A manual /compact (or the context guard's own request at a
 		// settled boundary) is a deliberate pause, not an interruption to paper over.
 		if (event?.reason !== "threshold" && event?.reason !== "overflow") return undefined;
@@ -10665,39 +10930,58 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			return undefined;
 		}
 
-		if (!allowAction("carry on after compaction", ctx)) return undefined;
-		// This custom follow-up starts a new host run without passing through `input`.
-		// Mark it before queueing so `before_agent_start` cannot mistake it for fresh owner
-		// intent and reset the failover evidence/budget that survived the compaction.
-		const wasExpectingInjectedContinuation = expectingInjectedContinuation;
-		expectingInjectedContinuation = true;
+		const parentLease = contextGuardRecoveryLease ?? continuationRecoveryLease;
+		const recoveryLease = recoveryArbiter.tryAcquire(
+			{
+				category: "context_limit",
+				provider: ctx?.model?.provider,
+				model: ctx?.model?.id,
+				sessionId: recoverySessionId(ctx),
+			},
+			parentLease,
+		);
+		if (!recoveryLease) return undefined;
+		let continuationQueued = false;
 		try {
-			// Queued synchronously: `sendCustomMessage` reaches `agent.followUp()` before its first
-			// await, so the queue is populated by the time `_runAutoCompaction` reads
-			// `hasQueuedMessages()` a few lines later.
-			pi.sendMessage(
-				{
-					customType: CONTINUE_AFTER_COMPACTION_TYPE,
-					content: CONTINUE_AFTER_COMPACTION_PROMPT,
-					// Visible on purpose: the agent carrying on by itself must be something the user
-					// can see a reason for in the transcript, not something that just happens.
-					display: true,
-				} as any,
-				{ deliverAs: "followUp" },
-			);
-			autoContinuesThisPrompt++;
-			logEvent("compaction_continue", {
-				compactionReason: event?.reason,
-				model: `${ctx?.model?.provider}/${ctx?.model?.id}`,
-				hop: autoContinuesThisPrompt,
-				budget: config.maxAutoContinuesPerPrompt,
-			});
-		} catch (error) {
-			expectingInjectedContinuation = wasExpectingInjectedContinuation;
-			logEvent("compaction_continue_failed", {
-				compactionReason: event?.reason,
-				error: String(error).slice(0, 200),
-			});
+			if (!allowAction("carry on after compaction", ctx)) return undefined;
+			recoveryLease.markRecovering("context_limit", ctx?.model?.provider, ctx?.model?.id);
+			// This custom follow-up starts a new host run without passing through `input`.
+			// Mark it before queueing so `before_agent_start` cannot mistake it for fresh owner
+			// intent and reset the failover evidence/budget that survived the compaction.
+			const wasExpectingInjectedContinuation = expectingInjectedContinuation;
+			expectingInjectedContinuation = true;
+			try {
+				// Queued synchronously: `sendCustomMessage` reaches `agent.followUp()` before its first
+				// await, so the queue is populated by the time `_runAutoCompaction` reads
+				// `hasQueuedMessages()` a few lines later.
+				pi.sendMessage(
+					{
+						customType: CONTINUE_AFTER_COMPACTION_TYPE,
+						content: CONTINUE_AFTER_COMPACTION_PROMPT,
+						// Visible on purpose: the agent carrying on by itself must be something the user
+						// can see a reason for in the transcript, not something that just happens.
+						display: true,
+					} as any,
+					{ deliverAs: "followUp" },
+				);
+				continuationQueued = true;
+				continuationRecoveryLease = parentLease ?? recoveryLease;
+				autoContinuesThisPrompt++;
+				logEvent("compaction_continue", {
+					compactionReason: event?.reason,
+					model: `${ctx?.model?.provider}/${ctx?.model?.id}`,
+					hop: autoContinuesThisPrompt,
+					budget: config.maxAutoContinuesPerPrompt,
+				});
+			} catch (error) {
+				expectingInjectedContinuation = wasExpectingInjectedContinuation;
+				logEvent("compaction_continue_failed", {
+					compactionReason: event?.reason,
+					error: String(error).slice(0, 200),
+				});
+			}
+		} finally {
+			if (!continuationQueued) recoveryLease.release();
 		}
 		return undefined;
 	});
@@ -11732,6 +12016,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	// the summary on a healthy account instead. If that cannot finish, we CANCEL — never return
 	// undefined onto a spent account, because Pi's default has no timeout of its own.
 	safeOn("session_before_compact", async (event: any, ctx: any) => {
+		if (recoveryArbiter.policyRefusalStopped) {
+			if (event?.reason === "manual") return undefined;
+			return compactionCancelled("automatic compaction stopped after provider policy refusal");
+		}
 		if (!automaticFailoverEnabled() || isFailoverExempt(ctx.model?.provider)) return undefined;
 		if (event?.reason === "overflow") lastContextOverflowAt = Date.now();
 		const result = await runHealthyCompaction(event, ctx);
@@ -11833,7 +12121,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		// Slash commands and shell shortcuts belong to Pi itself. Holding them in the cooldown queue
 		// makes /login, /model, /export, and even recovery commands appear completely broken.
 		if (/^\s*[/!]/.test(text)) return { action: "continue" as const };
-		claimUserControl("interactive input");
+		claimUserControl("interactive input", true);
 		noteRecoveryProgress(); // a fresh user prompt → clean slate, re-enable auto-continue
 		// A manual choice is owed ONE message. This is the next one, so a reprieve that already
 		// carried a message retires here — before the readiness check consults it.
@@ -12086,7 +12374,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		// A manual model change is user control, not a permanent "never fail over" pin.
 		// Cancel stale pending work; if the selected model then returns a real limit, normal
 		// failover still applies to that completed request.
-		claimUserControl("manual model selection");
+		claimUserControl("manual model selection", true);
 		if (queuedUserInputs.length > 0) {
 			runBackground("manual model selection queued input resume", ctx, () =>
 				attemptQueuedInputResume(ctx),
@@ -12194,6 +12482,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		// in which case the original assistant still identifies the provider that actually failed.
 		if (manualRouteOwnsErrors && (!isCurrentModelProvider ||
 			(ctx.model?.id && !sameModelIdentity(modelId, ctx.model.id)))) return;
+		if (isPolicyRefusal(errorText)) {
+			stopAutomaticRecoveryForPolicyRefusal(ctx, provider, modelId);
+			return;
+		}
 		const errorKey = `${provider}/${modelId}:${message.timestamp ?? "unknown"}:${errorText}`;
 		if (handledAssistantErrors.has(errorKey)) return;
 		handledAssistantErrors.add(errorKey);
@@ -12221,23 +12513,46 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			classified: failureKind,
 			error: errorText,
 		});
-
+		const bodylessRateLimit = /^429 status code \(no body\)$/i.test(errorText.trim());
+		if (
+			!bodylessRateLimit &&
+			!(["auth", "limit", "model", "transient", "cursor_stall"] as string[]).includes(failureKind)
+		) return;
+		if (!managed && isFailoverExempt(provider)) {
+			logEvent("failover_suppressed", {
+				provider,
+				model: modelId,
+				reason: "neverFailoverProviders",
+			});
+			return;
+		}
+		const recoveryCategory: RecoveryCategory = failureKind === "limit"
+			? "quota"
+			: failureKind === "transient" || failureKind === "cursor_stall"
+				? "transient"
+				: "unknown";
+		const recoveryLease = recoveryArbiter.tryAcquire(
+			{
+				category: recoveryCategory,
+				provider,
+				model: modelId,
+				sessionId: recoverySessionId(ctx),
+			},
+			continuationRecoveryLease ?? contextGuardRecoveryLease,
+		);
+		if (!recoveryLease) {
+			logEvent("automatic_recovery_suppressed", { reason: "another automatic recovery is active" });
+			return;
+		}
+		const previousPromptSwitch = currentPromptSwitch;
+		recoveryLease.markRecovering(recoveryCategory, provider, modelId);
+		try {
 		// Unmanaged active provider (e.g. plain `openai` API quota): we cannot manage its
 		// cooldown/refresh lifecycle, but we rescue the task by switching to a managed account on
 		// any actionable error. scope:"model" + a short cooldown so we never poison a provider we
 		// don't own.
 		if (!managed) {
-			// Opt-out for unmanaged providers that run their own retry logic (usually a companion
-			// extension owning retries for that provider). Switching accounts underneath it would
-			// fight those retries, so leave the turn alone entirely.
-			if (isFailoverExempt(provider)) {
-				logEvent("failover_suppressed", {
-					provider,
-					model: modelId,
-					reason: "neverFailoverProviders",
-				});
-				return;
-			}
+			// Providers with their own retry policy were handled before recovery arbitration.
 			if (failureKind === "transient" || failureKind === "cursor_stall") {
 				retryTemporaryFailure(ctx, failedModel, errorText);
 				return;
@@ -12371,9 +12686,25 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (failureKind === "transient" || failureKind === "cursor_stall") {
 			retryTemporaryFailure(ctx, failedModel, errorText);
 		}
+		} finally {
+			if (!recoveryArbiter.policyRefusalStopped && currentPromptSwitch !== previousPromptSwitch) {
+				const retainedLease =
+					[contextGuardRecoveryLease, continuationRecoveryLease].find(
+						(lease) => lease?.token === recoveryLease.token,
+					) ?? recoveryLease;
+				if (continuationRecoveryLease?.token !== retainedLease.token) {
+					continuationRecoveryLease?.release();
+				}
+				continuationRecoveryLease = retainedLease;
+			} else {
+				recoveryLease.release();
+			}
+		}
 	});
 
 	safeOn("agent_end", async (event, ctx) => {
+		const recoveryLease = continuationRecoveryLease ?? contextGuardRecoveryLease;
+		try {
 		if (!isAccountChatModel(ctx.model)) return;
 		if (!automaticFailoverEnabled()) return;
 		const stop = lastAssistantStopReason((event as any).messages ?? []);
@@ -12431,7 +12762,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			if (!currentPromptSwitch) return;
 		}
 		if (!config.enabled || !config.autoContinue || userAbortedChain) return;
-		await maybeDispatchContinuation(ctx);
+		await maybeDispatchContinuation(ctx, { recoveryLease });
+		} finally {
+			if (continuationRecoveryLease?.token === recoveryLease?.token) {
+				continuationRecoveryLease = undefined;
+			}
+			releaseContextGuardRecovery(recoveryLease);
+		}
 	});
 
 	// Pi `await`s the factory. Returning the Cursor setup promise means

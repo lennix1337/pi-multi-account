@@ -301,6 +301,7 @@ let messageTimestamp = 1;
 function setup(opts: {
 	accounts?: Account;
 	current?: { provider: string; id: string };
+	sessionId?: string;
 	config?: Record<string, unknown>;
 	idle?: boolean;
 	aborted?: boolean;
@@ -450,6 +451,7 @@ function setup(opts: {
 		}>,
 		catalogSnapshots: [] as any[],
 		usageSnapshots: [] as any[],
+		recoveryEvents: [] as any[],
 		completionRouters: [] as Array<{
 			select: (request: any) => any;
 			onAttempt?: (attempt: any) => any;
@@ -492,6 +494,7 @@ function setup(opts: {
 	}> = [];
 
 	const ctx: any = {
+		sessionManager: { getSessionId: () => opts.sessionId ?? "test-session" },
 		model: opts.current
 			? mkModel(opts.current.provider, opts.current.id)
 			: undefined,
@@ -634,6 +637,7 @@ function setup(opts: {
 			emit: (name: string, payload: any) => {
 				if (name === "pi:model-catalog:snapshot:v1") rec.catalogSnapshots.push(payload);
 				if (name === "pi:usage:snapshot:v1") rec.usageSnapshots.push(payload);
+				if (name === "optchat:recovery") rec.recoveryEvents.push(payload);
 				for (const handler of busEvents.get(name) ?? []) handler(payload);
 			},
 		},
@@ -8920,6 +8924,69 @@ test("preserveInterruptedContext: false restores the old drop-everything behavio
 // Auto-continue on hosts without pi.continueAgent (0.80.3+)
 // ---------------------------------------------------------------------------
 
+test("pending same-account resume shares its recovery lease with nested provider failures", async () => {
+	let markContinueStarted!: () => void;
+	let releaseContinue!: () => void;
+	const continueStarted = new Promise<void>((resolve) => {
+		markContinueStarted = resolve;
+	});
+	const blockedContinue = new Promise<void>((resolve) => {
+		releaseContinue = resolve;
+	});
+	let t!: ReturnType<typeof setup>;
+	t = setup({
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		config: { transientCooldownMs: 500, pendingPollMs: 200 },
+		continueBlocks: async () => {
+			t.setIdle(false);
+			markContinueStarted();
+			await blockedContinue;
+			t.setIdle(true);
+		},
+	});
+	try {
+		await t.fire("session_start");
+		await finishError(
+			t,
+			"anthropic",
+			"claude-opus-4-8",
+			"Server error 503: overloaded",
+		);
+		await Promise.race([
+			continueStarted,
+			wait(3000).then(() => assert.fail("pending resume did not start")),
+		]);
+		const pendingResumeRoot = [...t.rec.recoveryEvents]
+			.reverse()
+			.find((event: any) => event.phase === "started");
+		assert.ok(pendingResumeRoot, "the pending resume must own a recovery root");
+
+		await t.fire("message_end", {
+			message: assistantError(
+				"anthropic",
+				"claude-opus-4-8",
+				"429 rate limit",
+			),
+		});
+		assert.ok(
+			t.rec.setModels.includes("openai-codex-account-2/gpt-5.5"),
+			"a nested quota failure during pending resume must reach the next ready account",
+		);
+		const nestedQuotaEvent = [...t.rec.recoveryEvents]
+			.reverse()
+			.find((event: any) => event.category === "quota");
+		assert.ok(nestedQuotaEvent, "the nested failure must emit quota recovery metadata");
+		assert.equal(
+			nestedQuotaEvent.incidentId,
+			pendingResumeRoot.incidentId,
+			"nested recovery must reuse the pending-resume root incident",
+		);
+	} finally {
+		releaseContinue();
+		await t.fire("session_shutdown");
+	}
+});
+
 test("a same-account pending resume auto-continues on a host without pi.continueAgent", async () => {
 	// The regression: `currentPromptSwitch` is set only when we ROTATE accounts. A transient
 	// overload deliberately retries the SAME account, so there is no switch record — and the
@@ -11605,6 +11672,150 @@ test("a context-guard compaction continues only after its completion callback", 
 	assert.match(t.rec.sent[0].prompt, /compacted automatically/i);
 });
 
+test("a context-guard policy refusal cannot auto-continue or start another compaction", async () => {
+	const t = setup({
+		current: { provider: "openai-codex", id: "gpt-5.6-sol" },
+		compactSilent: true,
+	});
+	t.ctx.model.contextWindow = 272_000;
+	t.ctx.getSystemPrompt = () => "";
+
+	await t.fire("context", { messages: bigConversation(50) });
+	t.setIdle(true);
+	await t.fire("agent_settled", {});
+	const onError = t.rec.compacts[0].onError as
+		| ((error: Error) => void)
+		| undefined;
+	assert.ok(onError, "the context guard must expose its compaction failure callback");
+	onError(new Error("Request rejected by the provider's content safety policy"));
+	await wait(0);
+
+	assert.equal(
+		t.rec.sent.length,
+		0,
+		"a policy refusal must not queue the context-guard continuation",
+	);
+	const stoppedRecovery = t.rec.recoveryEvents.find((event: any) => event.phase === "stopped");
+	assert.ok(stoppedRecovery, "the registered compaction handler must emit a stopped recovery event");
+	assert.match(
+		stoppedRecovery.incidentId,
+		/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+	);
+	assert.equal(stoppedRecovery.category, "policy_refusal");
+	assert.equal(stoppedRecovery.sessionId, "test-session");
+	assert.ok(t.rec.recoveryEvents.every((event: any) => event.incidentId === stoppedRecovery.incidentId));
+	const automaticCompaction = await t.fire("session_before_compact", {
+		reason: "threshold",
+		preparation: {
+			messagesToSummarize: [],
+			firstKeptEntryId: "e1",
+			tokensBefore: 250_000,
+		},
+		signal: { aborted: false },
+	});
+	assert.equal(automaticCompaction?.cancel, true, "the refusal must stop automatic compaction");
+
+	const manualCompaction = await t.fire("session_before_compact", {
+		reason: "manual",
+		preparation: {
+			messagesToSummarize: [],
+			firstKeptEntryId: "e1",
+			tokensBefore: 250_000,
+		},
+		signal: { aborted: false },
+	});
+	assert.equal(manualCompaction, undefined, "a deliberate manual compaction remains available");
+});
+
+test("nested provider failure during awaited failover continuation retains its root lease", async () => {
+	let releaseContinuation!: () => void;
+	let markContinuationStarted!: () => void;
+	const continuationGate = new Promise<void>((resolve) => {
+		releaseContinuation = resolve;
+	});
+	const continuationStarted = new Promise<void>((resolve) => {
+		markContinuationStarted = resolve;
+	});
+	const t = setup({
+		accounts: {
+			...TWO_ACCOUNTS,
+			"anthropic-account-2": { type: "oauth", access: "a-tok-3", refresh: "a-ref-3" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		continueBlocks: async () => {
+			markContinuationStarted();
+			await continuationGate;
+		},
+	});
+	const firstFailure = assistantError("anthropic", "claude-opus-4-8", "429 rate limit exceeded");
+	await t.fire("after_provider_response", { status: 429, headers: {} });
+	await t.fire("message_end", { message: firstFailure });
+	const incidentId = t.rec.recoveryEvents[0]?.incidentId;
+	assert.ok(incidentId, "the initial failover must own a root incident");
+	assert.notEqual(t.ctx.model.provider, "anthropic");
+
+	t.setIdle(true);
+	const agentEnding = t.fire("agent_end", { messages: [firstFailure] });
+	await continuationStarted;
+	const providerB = t.ctx.model.provider;
+	const modelB = t.ctx.model.id;
+	const secondFailure = assistantError(providerB, modelB, "429 rate limit exceeded");
+	await t.fire("after_provider_response", { status: 429, headers: {} });
+	await t.fire("message_end", { message: secondFailure });
+
+	assert.notEqual(
+		t.ctx.model.provider,
+		providerB,
+		"the nested quota must still route to a third ready account while continuation is awaited",
+	);
+	assert.ok(
+		t.rec.recoveryEvents.some(
+			(event: any) => event.incidentId === incidentId && event.provider === providerB,
+		),
+		"the nested provider failure must join the still-active root instead of being suppressed",
+	);
+	assert.deepEqual(
+		t.rec.recoveryEvents.filter((event: any) => event.phase === "started").map((event: any) => event.incidentId),
+		[incidentId],
+		"nested failover must not start a competing root",
+	);
+
+	releaseContinuation();
+	await agentEnding;
+});
+
+test("provider policy refusal stops failover until genuine user input", async () => {
+	const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+	const refusal = assistantError(
+		"anthropic",
+		"claude-opus-4-8",
+		"Request rejected by the provider's content safety policy",
+	);
+	await t.fire("message_end", { message: refusal });
+	assert.equal(t.rec.aborts, 1, "the policy refusal must abort Pi's native retry signal");
+	assert.equal(t.ctx.signal.aborted, true, "the host-visible turn signal must be disarmed");
+	assert.deepEqual(t.rec.setModels, [], "a provider policy refusal must not route to a ready account");
+	assert.equal(t.rec.recoveryEvents.at(-1)?.category, "policy_refusal");
+	assert.equal(t.rec.recoveryEvents.at(-1)?.sessionId, "test-session");
+
+	await t.fire("input", { type: "input", text: "synthetic recovery", source: "extension" });
+	const quotaError = assistantError(
+		"anthropic",
+		"claude-opus-4-8",
+		"429 rate limit exceeded",
+	);
+	await t.fire("message_end", { message: quotaError });
+	assert.deepEqual(t.rec.setModels, [], "extension-owned input must not reset the refusal latch");
+
+	await t.input("Retry the request");
+	// The test host reuses one context object; Pi gives a new user turn a fresh AbortSignal.
+	t.ctx.signal.aborted = false;
+	await t.fire("message_end", {
+		message: assistantError("anthropic", "claude-opus-4-8", "429 rate limit exceeded"),
+	});
+	assert.ok(t.rec.setModels.length > 0, "genuine user input must re-enable automatic recovery");
+});
+
 test("continueAfterCompaction also opts out of context-guard wake", async () => {
 	const t = setup({
 		current: { provider: "openai-codex", id: "gpt-5.6-sol" },
@@ -11860,6 +12071,60 @@ test("the auto-continue budget is shared with failover, not doubled", async () =
 	assert.equal(continuations(t).length, 2, "within budget");
 	await fireCompact(t);
 	assert.equal(continuations(t).length, 2, "a task must not be able to keep itself alive forever");
+});
+
+test("a mixed context, quota, and continuation chain ends at the shared global recovery budget", async () => {
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		config: { maxAutoContinuesPerPrompt: 100, continueAfterCompaction: true },
+	});
+	t.ctx.model.contextWindow = 272_000;
+	t.ctx.getSystemPrompt = () => "";
+	await t.fire("after_provider_response", { status: 200, headers: {} });
+	await t.fire("context", { messages: bigConversation(50) });
+	t.setIdle(true);
+	await t.fire("agent_settled", {});
+	await wait(0);
+	assert.equal(t.rec.sent.length, 1, "context recovery starts one injected continuation");
+
+	await t.fire("before_agent_start", {});
+	const quotaFailure = assistantError("anthropic", "claude-opus-4-8", "429 rate limit exceeded");
+	await t.fire("after_provider_response", { status: 429, headers: {} });
+	await t.fire("message_end", { message: quotaFailure });
+	assert.notEqual(t.ctx.model.provider, "anthropic", "quota failover routes to the ready account");
+	t.setIdle(true);
+	await t.fire("agent_end", { messages: [quotaFailure] });
+	assert.equal(t.rec.continueCalls.length, 1, "the quota hop resumes the interrupted task");
+
+	const initialChain = t.rec.recoveryEvents.slice();
+	const rootIds = new Set(initialChain.map((event: any) => event.incidentId));
+	assert.equal(rootIds.size, 1, "context, quota, and the first resume share one recovery root");
+	assert.ok(initialChain.some((event: any) => event.category === "context_limit"));
+	assert.ok(initialChain.some((event: any) => event.category === "quota"));
+
+	for (let attempt = 0; attempt < 50; attempt++) {
+		// Simulate an actual quota response between automatic continuations. It resets the
+		// shorter no-request guard, but not the global no-success recovery budget.
+		await t.fire("after_provider_response", { status: 429, headers: {} });
+		await fireCompact(t);
+		if (t.rec.notifies.some((message: string) => /automatic failover has STOPPED itself/.test(message))) break;
+		await t.fire("before_agent_start", {});
+		await t.fire("agent_end", {
+			messages: [{ role: "assistant", stopReason: "stop" }],
+		});
+	}
+
+	const stopped = t.rec.notifies.find((message: string) => /automatic failover has STOPPED itself/.test(message));
+	assert.ok(stopped, "repeated fresh roots must eventually hit the global no-success budget");
+	assert.match(stopped, /40 automatic steps without one provider answering successfully/);
+	assert.ok(
+		continuations(t).length < 50,
+		"the continuation loop must terminate even when per-prompt compaction budget is larger",
+	);
+	assert.ok(
+		new Set(t.rec.recoveryEvents.filter((event: any) => event.phase === "started").map((event: any) => event.incidentId)).size > 1,
+		"the mixed chain must cross into fresh roots while the session-wide governor still bounds total work",
+	);
 });
 
 test("contextGuard and continueAfterCompaction can each be turned off alone", async () => {
@@ -12345,6 +12610,7 @@ test("a second process that cannot own the canonical port leaves the owner's fil
 	// finds on disk, shadow and all.
 	const second = setup({
 		reuseSlotProxyPort: true,
+		sessionId: "non-owner-session",
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		accounts: JSON.parse(readFileSync(AUTH, "utf8")),
 	});

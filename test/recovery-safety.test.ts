@@ -68,6 +68,12 @@ test("a refusal inside recovery stops that root incident without completing it",
 	assert.equal(events.at(-1)?.sessionId, "session-2");
 });
 
+test("explicit OptChat policy-stop codes remain terminal without relying on message wording", () => {
+	assert.equal(isPolicyRefusal({ code: "OPTCHAT_POLICY_REFUSAL", message: "Compaction stopped" }), true);
+	assert.equal(isPolicyRefusal(Object.assign(new Error("Stopped"), { code: "OPTCHAT_POLICY_REFUSAL" })), true);
+	assert.equal(isPolicyRefusal({ code: "429", message: "Quota exhausted" }), false);
+});
+
 test("policy-refusal classification excludes unrelated provider errors", () => {
 	assert.equal(isPolicyRefusal(new Error("Request rejected by the provider's content safety policy")), true);
 	assert.equal(isPolicyRefusal("Your request was rejected as a result of our safety system."), true);

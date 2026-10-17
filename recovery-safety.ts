@@ -52,6 +52,7 @@ const POLICY_REFUSAL_PATTERNS = [
 
 /** Detect provider safety refusals, without treating ordinary quota/auth failures as terminal. */
 export function isPolicyRefusal(error: unknown): boolean {
+	if (error && typeof error === "object" && "code" in error && error.code === "OPTCHAT_POLICY_REFUSAL") return true;
 	const text =
 		error instanceof Error
 			? `${error.name}: ${error.message}`

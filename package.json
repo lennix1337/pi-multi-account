@@ -72,6 +72,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
+    "test:recovery": "node --test test/recovery-safety.test.ts test/quota-recovery-session.test.ts test/policy-refusal-core-retry.integration.test.ts",
     "pack:check": "node scripts/check-package.mjs && node scripts/check-tracked-privacy.mjs",
     "release:check": "npm run check && npm test && npm run pack:check",
     "prepublishOnly": "npm run release:check"

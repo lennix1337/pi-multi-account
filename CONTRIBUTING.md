@@ -34,7 +34,7 @@ CI runs the same checks on every pull request; they must pass before review.
 
 ## Coding guidelines
 
-- The whole extension lives in `index.ts`. Match the surrounding style.
+- `index.ts` orchestrates the extension; focused modules handle transactions, recovery, catalogs, usage, and Cursor integration. Match the existing responsibility boundaries and surrounding style. See [AGENTS.md](AGENTS.md) for agent-specific maintenance guidance.
 - Prefer small, well-commented guards over clever one-liners — failover logic is
   safety-critical (a bad loop can peg a machine).
 - Update `CHANGELOG.md` under a new version / `Unreleased` heading describing the

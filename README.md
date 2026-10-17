@@ -19,6 +19,16 @@ When the account you are using hits a quota or rate limit, `pi-multi-account` tr
 - **Keeps YOUR reasoning level across automatic switches.** Whatever the session runs at — your Pi default, `/thinking`, or a per-agent `--thinking low` — is preserved and restored after every account/model switch, so it never drifts downward when a weaker fallback model clamps it. Manual `/model` selections adopt Pi's per-model thinking default in `auto` mode; an explicit CLI `--thinking` or forced `reasoningLevel` remains authoritative. The extension does not otherwise override your level, and extreme levels such as `xhigh` / Max / Ultra are never forced.
 - **Shows live limits for the active account** in Pi's footer: remaining 5-hour/session and weekly allowance plus reset countdowns for Codex, Anthropic, and Ollama Cloud accounts, SuperGrok / xAI subscription credit usage for `/login xai` OAuth (not Cursor Grok, not `XAI_API_KEY`), and GLM Coding Plan CN 5-hour/weekly credit quota for `zai-coding-cn`. GLM CN uses the raw Coding Plan API key only at `https://open.bigmodel.cn/api/monitor/usage/quota/limit`; global `zai` keys are not sent there. Missing or malformed quota is unknown, never assumed unused.
 
+## Windows startup and configuration safety
+
+Native account-slot publication yields between atomic replacement retries when Windows temporarily locks `models.json`. This lets same-process readers release their handles instead of freezing the UI during synchronous backoff. Writes preserve unrelated provider settings and model overrides, reject stale publishers, and drain before shutdown removes shared proxy routes. Only the canonical interactive publisher writes shared routes; child sessions keep local routing.
+
+An isolated reader-contention benchmark changed from a failed ~1,057 ms synchronous write to a successful ~92 ms yielding write. This measures file publication, not total launch time. The user confirmed faster interactive startup after restart; no end-to-end launch timing was recorded. Restart Pi or run `/reload` after updating the extension.
+
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and release procedures, [AGENTS.md](AGENTS.md) for repository-specific agent guidance, and [CHANGELOG.md](CHANGELOG.md) for unreleased changes. A Git commit on this fork does not imply an npm release.
+
 ## Install
 
 ```bash

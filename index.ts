@@ -36,7 +36,7 @@ import { mutateProxyAuth } from "./auth-file-transaction.ts";
 import { multiAccountCompletions, type AccountChoice } from "./command-completions.ts";
 import { mergeStateDeltas, mutateStateFile } from "./state-file-transaction.ts";
 import { normalizeModelPins, persistModelPin, validModelPinScope } from "./model-pins.ts";
-import { mutateConfigFile } from "./config-file-transaction.ts";
+import { mutateConfigFile, mutateConfigFileAsync } from "./config-file-transaction.ts";
 import { replaceFileSync } from "./replace-file.ts";
 import { createHash } from "node:crypto";
 import {
@@ -925,8 +925,9 @@ function nativeModelEntries(models: unknown[]): NativeModelEntry[] {
  * Failover state lives in provider-failover-state.json, our own file.
  * Merge-only: existing user entries and unrelated keys are preserved verbatim.
  */
-function provisionNativeSlot(provider: string, entry: NativeProviderEntry): void {
+async function provisionNativeSlot(provider: string, entry: NativeProviderEntry, canCommit: () => boolean): Promise<void> {
 	try {
+		if (!canCommit()) return;
 		const models = nativeModelEntries(entry.models);
 		try {
 			writeFileSync(MODELS_CONFIG_PATH, "{}\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -935,7 +936,7 @@ function provisionNativeSlot(provider: string, entry: NativeProviderEntry): void
 		}
 		// Locked, read-latest, per-process temp file: concurrent Pi sessions publishing slots can
 		// neither clobber each other's entries nor race on one shared temp path.
-		mutateConfigFile(
+		await mutateConfigFileAsync(
 			MODELS_CONFIG_PATH,
 			(parsed) => {
 				const providers =
@@ -962,7 +963,7 @@ function provisionNativeSlot(provider: string, entry: NativeProviderEntry): void
 				}
 				return { providers: { ...providers, [provider]: normalized } };
 			},
-			undefined,
+			canCommit,
 			2,
 		);
 	} catch (error: any) {
@@ -3915,6 +3916,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	}
 	let config = loadConfig();
 	let sessionClosed = false;
+	const pendingNativePublications = new Set<Promise<void>>();
 	let supersededRoot = false;
 	let manualRouteOwnsErrors = false;
 	const automaticFailoverEnabled = () => config.enabled && !subagentChild && !sessionClosed;
@@ -6343,7 +6345,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				slotIds,
 				notify: (message, level) => ctx?.ui?.notify?.(message, level),
 				log: (kind, data) => logEvent(kind, data),
-				onProvision: (slots, port, models) => {
+				onProvision: async (slots, port, models) => {
 					// Registration above is process-local and remains useful in a delegated child. The
 					// files below are shared with its parent and only the canonical publisher may touch
 					// them; otherwise a short-lived child leaves a dead Cursor route behind.
@@ -6360,7 +6362,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					// the parent. Without it a provisioned slot reports
 					// `credentials_not_configured` and every child call dies at auth.
 					for (const slot of slots) {
-						provisionNativeSlot(slot, {
+						await publishNativeSlot(slot, {
 							api: "openai-completions",
 							baseUrl: `http://127.0.0.1:${port}/v1`,
 							apiKey: CURSOR_PROXY_PLACEHOLDER_KEY,
@@ -6370,7 +6372,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					// Same trap as numbered Anthropic/Codex: Pi ignores a models.json placeholder
 					// while an OAuth blob sits under the same key. Measured 2026-08-30 after restart:
 					// `pi -p --no-extensions --model cursor/cursor-grok-4.6` → "No API key found for cursor".
-					shadowChildFacingAuth(slots);
+					if (!sessionClosed && ownsSharedChildPublication()) shadowChildFacingAuth(slots);
 				},
 			});
 		} catch (error) {
@@ -6474,7 +6476,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					// An in-memory OAuth spare belongs in /login, not in models.json. Kimi has
 					// no child OAuth proxy, so only a real API-key slot is usable by a bare child.
 					if (ownsSharedChildPublication() && auth[id]?.type === "api_key" && isEntryUsable(auth[id])) {
-						provisionNativeSlot(id, {
+						void publishNativeSlot(id, {
 							api: "anthropic-messages",
 							baseUrl: KIMI_BASE_URL,
 							models: kimiModels.map((modelId) => kimiModelDef(modelId, id)),
@@ -6496,7 +6498,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * entries there. Replaying the Kimi publication here also repairs legacy string-only model
 	 * arrays once ownership is known.
 	 */
-	function publishOwnedNativeAliases(ctx?: any): void {
+	async function publishOwnedNativeAliases(ctx?: any): Promise<void> {
 		if (!ownsSharedChildPublication()) return;
 		const auth = readAuthFile();
 		for (const id of registeredSlots) {
@@ -6505,7 +6507,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			const kimiModels = [
 				...new Set([...DEFAULT_KIMI_MODELS, ...hostModelIdsFor(ctx, KIMI_BASE)]),
 			];
-			provisionNativeSlot(id, {
+			await publishNativeSlot(id, {
 				api: "anthropic-messages",
 				baseUrl: KIMI_BASE_URL,
 				models: kimiModels.map((modelId) => kimiModelDef(modelId, id)),
@@ -9516,7 +9518,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			const changed = refreshDiscovery(true, ctx);
 			runBackground("rediscover slot proxy republish", ctx, async () => {
 				await publishProxiedSlots(ctx);
-				publishOwnedNativeAliases(ctx);
+				await publishOwnedNativeAliases(ctx);
 			});
 			runBackground("rediscover account metadata refresh", ctx, async () => {
 				await refreshRotationUsage(ctx);
@@ -11057,6 +11059,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			!slotProxyForeignOwner && slotProxyPort === SLOT_PROXY_PORT;
 	}
 
+	async function publishNativeSlot(provider: string, entry: NativeProviderEntry): Promise<void> {
+		if (sessionClosed) return;
+		const pending = provisionNativeSlot(provider, entry, () => !sessionClosed && ownsSharedChildPublication());
+		pendingNativePublications.add(pending);
+		try { await pending; } finally { pendingNativePublications.delete(pending); }
+	}
+
 	function readyProxyOwner(coordinator: SharedProxyCoordinator): object | undefined {
 		return [...coordinator.members].reverse().find(([, member]) => member.ready)?.[0];
 	}
@@ -11599,7 +11608,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			const baseUrl = oauth ? publishedRouteFor(port, id) :
 				family === "anthropic" ? "https://api.anthropic.com" : "https://chatgpt.com/backend-api";
 			if (family === "anthropic") {
-				provisionNativeSlot(id, {
+				await publishNativeSlot(id, {
 					api: "anthropic-messages",
 					baseUrl,
 					apiKey: oauth ? placeholderKeyFor(family) : undefined,
@@ -11620,7 +11629,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				// a generic `openai-responses` slot would not. The cost is that Pi insists on
 				// reading an account id out of the key, which is why that family's placeholder is
 				// JWT-shaped.
-				provisionNativeSlot(id, {
+				await publishNativeSlot(id, {
 					api: "openai-codex-responses",
 					baseUrl,
 					apiKey: oauth ? placeholderKeyFor(family) : undefined,
@@ -11628,6 +11637,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				});
 			}
 		}
+		if (sessionClosed || !ownsSharedChildPublication()) return;
 		activateSharedProxy();
 		logEvent("slot_proxy_published", { port, slots });
 	}
@@ -11899,7 +11909,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		// without this extension can actually run on the account the rotation chose.
 		await publishProxiedSlots(ctx);
 		if (!config.childProxy) activateSharedProxy();
-		publishOwnedNativeAliases(ctx);
+		await publishOwnedNativeAliases(ctx);
 		// Not installed → silent skip (refreshCursorSlots warns only on the explicit path).
 		if (config.includeCursor) await refreshCursorSlots(readAuthFile(), ctx);
 		applyOnlyActiveFilter(ctx);
@@ -11997,6 +12007,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		contextGuardCompactionRetryAfter = 0;
 		settleContextGuardCompaction();
 		endResumeWatch();
+		// Let cancelled async writers release their file locks before synchronous route cleanup.
+		await Promise.all(pendingNativePublications);
 		// Release this root's membership; only the final root closes shared child routes.
 		stopSlotProxy();
 		watchdogAborting = false;

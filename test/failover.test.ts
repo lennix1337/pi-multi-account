@@ -12669,6 +12669,33 @@ test("a slot published against a parent-owned loopback route counts as usable", 
 	}
 });
 
+test("shutdown drains pending model publications before cleaning shared routes", async () => {
+	rmSync(MODELS, { force: true });
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-5" },
+		accounts: { anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" } },
+	});
+	let unlock: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await t.fire("session_start");
+		const provider = JSON.parse(readFileSync(MODELS, "utf8")).providers.anthropic;
+		assert.match(provider.baseUrl, /^http:\/\/127\.0\.0\.1:/);
+		mkdirSync(`${MODELS}.lock`);
+		await t.command("rediscover");
+		// A contending publisher releases its lock asynchronously. Blocking cleanup
+		// before our pending writer drains would starve this timer and abandon routes.
+		unlock = setTimeout(() => rmSync(`${MODELS}.lock`, { recursive: true, force: true }), 20);
+		await t.fire("session_shutdown");
+		const remaining = JSON.parse(readFileSync(MODELS, "utf8")).providers?.anthropic;
+		assert.equal(remaining?.baseUrl, undefined, "shutdown must not leave a dead proxy behind");
+	} finally {
+		clearTimeout(unlock);
+		rmSync(`${MODELS}.lock`, { recursive: true, force: true });
+		await t.fire("session_shutdown");
+		rmSync(MODELS, { force: true });
+	}
+});
+
 test("user modelOverrides survive proxy publication, rediscovery, and shutdown cleanup", async () => {
 	rmSync(MODELS, { force: true });
 	const modelOverrides = {
@@ -12705,8 +12732,13 @@ test("user modelOverrides survive proxy publication, rediscovery, and shutdown c
 		provider.models = [{ id: "claude-opus-5", contextWindow: 1_000_000 }];
 		writeFileSync(MODELS, JSON.stringify({ providers: { anthropic: provider } }));
 		await t.command("rediscover");
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		provider = JSON.parse(readFileSync(MODELS, "utf8")).providers.anthropic;
+		// Rediscovery publishes in the background; wait for the async file transaction,
+		// not a single event-loop turn (which need not finish lock acquisition).
+		for (let attempt = 0; attempt < 200; attempt++) {
+			provider = JSON.parse(readFileSync(MODELS, "utf8")).providers.anthropic;
+			if (provider.baseUrl.startsWith("http://127.0.0.1:")) break;
+			await new Promise<void>((resolve) => setTimeout(resolve, 10));
+		}
 		assert.match(provider.baseUrl, /^http:\/\/127\.0\.0\.1:/);
 		assert.deepEqual(provider.modelOverrides, modelOverrides);
 	} finally {

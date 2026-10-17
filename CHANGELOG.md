@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Startup responsiveness
+
+- Publish native model slots asynchronously under the same read-latest file lock. Windows sharing-violation retries now yield so Pi's own asynchronous readers can close their handles instead of freezing the UI for a second and still failing with `EPERM`. Startup waits for publication; shutdown cancels and drains outstanding publications before removing child routes. Existing synchronous auth/state transactions retain their contracts.
+
 ### Added
 
 - `showUsageWindows` config (default `true`): set `false` to drop the quota percentages from the footer and keep the account name and `+N ready`.

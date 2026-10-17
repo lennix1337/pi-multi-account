@@ -121,7 +121,7 @@ export async function setupCursorSubscription(
 		 * proxy. Called after the proxy is up and again when the real catalog lands.
 		 * Pass model objects (or ids); the host writes Pi-schema objects, never strings.
 		 */
-		onProvision?: (slotIds: string[], port: number, models: unknown[]) => void;
+		onProvision?: (slotIds: string[], port: number, models: unknown[]) => void | Promise<void>;
 	},
 ): Promise<number | undefined> {
 	const mod = await loadCursorModules();
@@ -142,15 +142,15 @@ export async function setupCursorSubscription(
 	};
 	proxyPort = await mod.ensureCursorProxy(resolveAccessToken);
 	const ids = [...new Set([CURSOR_BASE, ...options.slotIds])];
-	options.onProvision?.(ids, proxyPort, mod.FALLBACK_MODELS as unknown[]);
+	await options.onProvision?.(ids, proxyPort, mod.FALLBACK_MODELS as unknown[]);
 	for (const id of ids) {
 		mod.registerCursorProvider(pi, id, proxyPort, mod.FALLBACK_MODELS, {
 			rejectDuplicateLogin: options.rejectDuplicateLogin,
-			onModelsDiscovered: (models: unknown[]) => {
+			onModelsDiscovered: async (models: unknown[]) => {
 				mod.registerCursorProvider(pi, id, proxyPort!, models as any[], {
 					rejectDuplicateLogin: options.rejectDuplicateLogin,
 				});
-				options.onProvision?.(ids, proxyPort!, models);
+				await options.onProvision?.(ids, proxyPort!, models);
 			},
 		});
 	}
@@ -173,7 +173,7 @@ export async function setupCursorSubscription(
 						rejectDuplicateLogin: options.rejectDuplicateLogin,
 					});
 				}
-				options.onProvision?.(ids, proxyPort!, models as unknown[]);
+				await options.onProvision?.(ids, proxyPort!, models as unknown[]);
 				options.log?.("cursor_catalog", {
 					outcome: "discovered",
 					provider: id,

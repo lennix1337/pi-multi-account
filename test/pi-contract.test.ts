@@ -23,6 +23,7 @@ import {
   describeContractDrift,
   observedAssumptions,
   piAutoPersistsSelectedModel,
+  piHasContextWithSystem,
 } from "../pi-contract.ts";
 
 // ---------------------------------------------------------------------------
@@ -229,4 +230,12 @@ test("drift names the file, the problem, and why nothing warned us", () => {
   // changing underneath us.
   assert.match(message, /carries no version|no version/);
   assert.equal(/settings\.json/.test(message), false, "a healthy file must not appear in the report");
+});
+
+test("context_with_system is used only on hosts that emit it (Pi 0.87.0+)", () => {
+  assert.equal(piHasContextWithSystem("0.86.1"), false);
+  assert.equal(piHasContextWithSystem("0.87.0"), true);
+  assert.equal(piHasContextWithSystem("v0.99.2"), true);
+  assert.equal(piHasContextWithSystem("1.3.0"), true);
+  assert.equal(piHasContextWithSystem("unknown"), false);
 });

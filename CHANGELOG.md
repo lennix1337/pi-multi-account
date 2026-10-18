@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Context guard
+
+- On Pi 0.87+ the guard runs in `context_with_system`, so it measures the request that is actually sent. In the `context` phase it measured Pi's raw transcript before extensions such as OptChat replaced it: it reported "75% of the 400,000-token window" and queued a summary while the request held 136k tokens. The notice now says "guard limit" and shows the model's own window when the cap is smaller.
+
 ### Startup responsiveness
 
 - Publish native model slots asynchronously under the same read-latest file lock. Windows sharing-violation retries now yield so Pi's own asynchronous readers can close their handles instead of freezing the UI for a second and still failing with `EPERM`. Startup waits for publication; shutdown cancels and drains outstanding publications before removing child routes. Existing synchronous auth/state transactions retain their contracts.

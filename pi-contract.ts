@@ -122,6 +122,28 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 const SESSION_SCOPED_MODEL_SELECTION_SINCE = Object.freeze([0, 84, 3] as const);
+const CONTEXT_WITH_SYSTEM_SINCE = Object.freeze([0, 87, 0] as const);
+
+/** Sign of `version` - `since` (negative, 0, positive); undefined for a non-semver host. */
+function compareVersion(version: string, since: readonly number[]): number | undefined {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version.trim());
+  if (!match) return undefined;
+  const actual = match.slice(1, 4).map(Number);
+  for (let index = 0; index < since.length; index++) {
+    const delta = actual[index] - since[index];
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+/**
+ * Whether the host emits `context_with_system` (Pi 0.87.0+): the last request-time transform,
+ * run after every `context` handler on the conversation that is actually sent. Unknown hosts
+ * answer false, so callers keep the `context` hook every supported Pi has.
+ */
+export function piHasContextWithSystem(version: string): boolean {
+  return (compareVersion(version, CONTEXT_WITH_SYSTEM_SINCE) ?? -1) >= 0;
+}
 
 /**
  * Whether an ordinary Pi model switch is expected to rewrite the saved global default.
@@ -132,14 +154,7 @@ const SESSION_SCOPED_MODEL_SELECTION_SINCE = Object.freeze([0, 84, 3] as const);
  * worse than omitting an optional legacy diagnostic.
  */
 export function piAutoPersistsSelectedModel(version: string): boolean {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version.trim());
-  if (!match) return false;
-  const actual = match.slice(1, 4).map(Number) as [number, number, number];
-  for (let index = 0; index < SESSION_SCOPED_MODEL_SELECTION_SINCE.length; index++) {
-    const delta = actual[index] - SESSION_SCOPED_MODEL_SELECTION_SINCE[index];
-    if (delta !== 0) return delta < 0;
-  }
-  return false;
+  return (compareVersion(version, SESSION_SCOPED_MODEL_SELECTION_SINCE) ?? 0) < 0;
 }
 
 /**

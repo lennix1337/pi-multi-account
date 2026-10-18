@@ -100,6 +100,7 @@ import {
 	describeContractDrift,
 	observedAssumptions,
 	piAutoPersistsSelectedModel,
+	piHasContextWithSystem,
 	type ShapeVerdict,
 } from "./pi-contract.ts";
 import {
@@ -10451,7 +10452,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return automaticFailoverEnabled() && config.contextGuard.enabled && !recoveryArbiter.policyRefusalStopped;
 	}
 
-	safeOn("context", (event: any, ctx: any) => {
+	// Measure the request that actually goes out. Where Pi has `context_with_system` (0.87+), that
+	// phase runs after every `context` handler and after context-owning extensions loaded before
+	// this one: OptChat replaces the whole conversation there, so in the `context` phase the guard
+	// measured (and "trimmed") a 300k-token transcript while the provider received 136k.
+	const contextGuardPhase = piHasContextWithSystem(PI_HOST_VERSION) ? "context_with_system" : "context";
+	safeOn(contextGuardPhase, (event: any, ctx: any) => {
 		if (!contextGuardActive()) return undefined;
 		contextGuardHookSeen = true; // proof the host still calls us before each request
 		if (typeof ctx?.compact !== "function")
@@ -10466,10 +10472,24 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (!Array.isArray(messages) || messages.length === 0) return undefined;
 
 		let systemPrompt = "";
-		try {
-			systemPrompt = ctx?.getSystemPrompt?.() ?? "";
-		} catch {
-			systemPrompt = ""; // a provider-less context still deserves a measurement
+		if (contextGuardPhase === "context_with_system") {
+			// Here the prompt travels inside the list as system messages, which may differ from Pi's own.
+			systemPrompt = messages
+				.filter((message: any) => message?.role === "system")
+				.map((message: any) =>
+					typeof message.content === "string"
+						? message.content
+						: Array.isArray(message.content)
+							? message.content.map((block: any) => (typeof block?.text === "string" ? block.text : "")).join("")
+							: "",
+				)
+				.join("\n");
+		} else {
+			try {
+				systemPrompt = ctx?.getSystemPrompt?.() ?? "";
+			} catch {
+				systemPrompt = ""; // a provider-less context still deserves a measurement
+			}
 		}
 		const raw = estimateRawTokens(messages as GuardMessage[], systemPrompt);
 		const tracker = contextGuardTracker(ctx);
@@ -10534,7 +10554,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				try {
 					ctx?.ui?.notify?.(
 						`pi-multi-account: context reached ${Math.round(decision.percent * 100)}% of the ` +
-							`${decision.window.toLocaleString("en-US")}-token window mid-run; older tool output is ` +
+							`${decision.window.toLocaleString("en-US")}-token guard limit mid-run` +
+							(Number(ctx?.model?.contextWindow) > decision.window
+								? ` (model window ${Number(ctx.model.contextWindow).toLocaleString("en-US")})`
+								: "") +
+							`; older tool output is ` +
 							`being left out of requests and a summary is queued. Nothing was removed from the transcript.`,
 						"info",
 					);

@@ -778,9 +778,10 @@ function setup(opts: {
 		const handlers = events[event];
 		if (!handlers || handlers.length === 0) return undefined;
 		if (event === "context") {
+			// Like Pi's emitContext: `context` handlers, then `context_with_system` ones on the result.
 			let messages = payload?.messages;
 			let changed = false;
-			for (const handler of handlers) {
+			for (const handler of [...handlers, ...(events.context_with_system ?? [])]) {
 				const out = await handler({ ...payload, messages }, ctx);
 				if (out?.messages) {
 					messages = out.messages;
@@ -874,6 +875,8 @@ function setup(opts: {
 		providerConfigs,
 		completionRouter: () => rec.completionRouters.at(-1),
 		hasHandler: (event: string) => (events[event]?.length ?? 0) > 0,
+		/** Register a handler AHEAD of ours, as an extension loaded earlier (e.g. OptChat) would be. */
+		prependHandler: (event: string, handler: any) => (events[event] ??= []).unshift(handler),
 	};
 }
 
@@ -11574,6 +11577,23 @@ function bigConversation(turns: number) {
 	}
 	return messages;
 }
+
+test("the context guard measures the request a context-owning extension actually sends", async () => {
+	// OptChat replaces the whole conversation in `context_with_system`. The guard used to measure
+	// Pi's raw transcript in `context` and warned "75% of the window" while 136k of 1M went out.
+	const t = setup({ current: { provider: "anthropic", id: "claude-opus-5-5" } });
+	t.ctx.model.contextWindow = 1_000_000;
+	const notices: string[] = [];
+	t.ctx.ui.notify = (message: string) => notices.push(message);
+	assert.ok(t.hasHandler("context_with_system"), "on Pi 0.87+ the guard must run in context_with_system");
+	const projected = [{ role: "system", content: "prompt" }, ...bigConversation(5)];
+	t.prependHandler("context_with_system", () => ({ messages: projected }));
+
+	const result = await t.fire("context", { messages: bigConversation(70) }); // ~350k raw tokens
+
+	assert.equal(result?.messages, projected, "the projected request goes out untouched");
+	assert.deepEqual(notices.filter((n) => n.includes("context reached")), []);
+});
 
 test("the context guard trims a mid-run request instead of letting it overflow", async () => {
 	const t = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" } });

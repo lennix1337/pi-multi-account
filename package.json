@@ -45,6 +45,7 @@
     "provider-payload-stream.ts",
     "auth-file-transaction.ts",
     "state-file-transaction.ts",
+    "command-arguments.ts",
     "command-completions.ts",
     "config-file-transaction.ts",
     "replace-file.ts",

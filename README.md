@@ -116,6 +116,7 @@ All three names are aliases for the same command: `/multi-account`, `/provider-f
 | `status` (default) | Show enabled state, current model, rotation, login slots, cooldowns, invalidations, pending resume. |
 | `limits [refresh]` | Show active-account session/weekly limits; `refresh` bypasses the cache. Aliases: `usage`, `quota`. |
 | `accounts [refresh]` | List every configured slot with provider-reported alias/email, plan, limits, and live routing status. Uses cached metadata unless `refresh` is explicit. |
+| `models` | List each account's model order; states explicitly when no account is in the rotation. Alias: `model`. |
 | `rediscover` | Force a re-scan of `auth.json`, rebuild the rotation, and refresh Codex model catalogs now. |
 | `add [anthropic\|codex\|kimi\|cursor\|ollama\|qwen]` | Print the next free account slot to select from the interactive `/login` picker. Subscription families (Anthropic, Codex, Kimi, Cursor) are logged in through `/login`; API-key families are filled in `auth.json`. |
 | `remove [anthropic\|codex\|kimi\|cursor\|ollama\|qwen\|<provider-id>]` | Remove an account from `auth.json` and rotation. Family name drops the highest numbered alias slot; a full provider id removes that exact slot. Aliases: `rm`, `delete`. |
@@ -130,6 +131,9 @@ All three names are aliases for the same command: `/multi-account`, `/provider-f
 | `reset` | Clear all cooldowns, invalidations and any pending auto-resume. |
 | `reload` | Reload config from disk and re-discover accounts. |
 | `enable` / `disable` | Turn failover on/off for the current Pi process. |
+| `log [N\|on\|off]` | Show the last `N` debug-log events (a whole number from 1 to 200, default 40) or turn logging on/off for this session. Aliases: `logs`, `debug`. |
+
+Unknown subcommands, surplus arguments and malformed `log N`, `limits`, or `only-active` arguments are rejected with a usage warning before discovery refresh or any state change. Subcommand names are case-insensitive; `on`, `off` and `refresh` must be lowercase. `help` and `-h` are not subcommands; use `status`.
 
 ### Model pins
 

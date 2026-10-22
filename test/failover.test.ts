@@ -8787,6 +8787,80 @@ test("/multi-account log off then on toggles recording without crashing", async 
 	assert.ok(readDebugLog().length > 0, "with logging on again, events resume");
 });
 
+test("/multi-account rejects unknown subcommands before refreshing discovery or printing status", async () => {
+	const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+	for (const input of ["statu", "help", "bogus now"]) {
+		t.rec.notifies.length = 0;
+		await t.command(input);
+		assert.equal(t.rec.notifies.length, 1, `${input}: exactly one usage notice`);
+		assert.match(t.rec.notifies[0], /unknown subcommand/i);
+		assert.match(t.rec.notifies[0], /Nothing was changed/);
+		assert.doesNotMatch(t.rec.notifies[0], /Rotation \(/, `${input}: status block is not printed`);
+	}
+});
+
+test("/multi-account rejects surplus arguments before any mutation, and keeps aliases and bare status", async () => {
+	const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+	for (const input of ["next now", "reset now", "stop now", "clear now", "status extra", "accounts refresh junk", "switch codex extra", "limits refresh junk", "limits junk", "only-active maybe", "only-active on off"]) {
+		t.rec.notifies.length = 0;
+		const abortsBefore = t.rec.aborts;
+		await t.command(input);
+		assert.equal(t.rec.notifies.length, 1, `${input}: exactly one notice`);
+		assert.match(t.rec.notifies[0], /usage: \/multi-account/, input);
+		assert.deepEqual(t.rec.setModels, [], `${input}: no account switch`);
+		assert.equal(t.rec.aborts, abortsBefore, `${input}: no abort`);
+	}
+	// "usage" and "quota" reach quota fetching, so they are covered by the pure validator test instead.
+	// fetch is stubbed fail-closed so nothing here can reach a provider.
+	const originalFetch = globalThis.fetch;
+	let blockedFetches = 0;
+	globalThis.fetch = (async () => {
+		blockedFetches++;
+		throw new Error("network is not allowed in this test");
+	}) as typeof fetch;
+	try {
+		for (const input of ["", "status", "STATUS", "account", "model", "logs", "debug", "focus", "order", "live"]) {
+			t.rec.notifies.length = 0;
+			await t.command(input);
+			assert.ok(t.rec.notifies.length > 0, `${input}: alias or bare form still answers`);
+			assert.doesNotMatch(t.rec.notifies.join("\n"), /unknown subcommand/, input);
+		}
+		assert.equal(blockedFetches, 0, "no alias in this test may fetch");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("/multi-account log accepts only on, off or a whole number from 1 to 200", async () => {
+	rmSync(DEBUG_LOG, { force: true });
+	const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
+	for (const input of ["log banana", "log 0", "log -5", "log 1.5", "log 40abc", "log 201", "log 99999999999999999999", "log 20 30", "log ON"]) {
+		t.rec.notifies.length = 0;
+		await t.command(input);
+		assert.equal(t.rec.notifies.length, 1, `${input}: one notice`);
+		assert.match(t.rec.notifies[0], /usage: \/multi-account log \[N\|on\|off\] \(N is a whole number from 1 to 200\)/, input);
+	}
+	for (const [input, shown] of [["log", 40], ["log 1", 1], ["log 200", 200]] as const) {
+		t.rec.notifies.length = 0;
+		await t.command(input);
+		assert.match(t.rec.notifies.join("\n"), new RegExp(`debug log \\(last ${shown} events\\)`), input);
+	}
+});
+
+test("/multi-account models states explicitly when no account is in the rotation", async () => {
+	const t = setup({ accounts: {} });
+	await t.command("models");
+	const text = t.rec.notifies.join("\n");
+	assert.match(text, /no accounts in rotation/);
+	assert.match(text, /\/login/);
+	assert.match(text, /Live Codex discovery/);
+
+	const populated = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
+	await populated.command("models");
+	assert.doesNotMatch(populated.rec.notifies.join("\n"), /no accounts in rotation/);
+});
+
 // ---------------------------------------------------------------------------
 // v1.13.6 regression tests:
 //  - API-key providers: repeated same-key 401s eventually invalidate (was an

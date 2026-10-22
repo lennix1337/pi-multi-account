@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `/multi-account` rejects unknown subcommands and surplus or malformed arguments (for example `reset now`, `limits junk`, `log banana`, `log 0`, `log 201`) with a usage warning before it refreshes discovery or changes any state; `log N` accepts only a whole number from 1 to 200 instead of silently falling back to 40, and `models` reports an empty rotation explicitly. Help is strict: `help`/`-h` are now unknown subcommands (use `status`), and uppercase arguments such as `log ON` or `limits Refresh` are rejected. Documented aliases and optional arguments are unchanged.
 - Startup Codex model-catalog refresh preserves numbered accounts' loopback proxy authentication. Pi no longer rejects a ready account with "could not be activated" until `/multi-account rediscover` repairs the registry.
 - Companion quota footers can follow numbered accounts through credential-free `pi:usage:snapshot:v1` events, including when this extension's own footer is hidden. No OAuth tokens, proxy keys, or credential hashes are shared.
 - A command that changes a saved preference (`only-active`, `priority`, `clear`) now warns when `provider-failover.json` cannot be written, instead of silently applying it for the current session only. A failed shared-state write is logged (`state_write_failed`).

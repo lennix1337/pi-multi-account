@@ -33,6 +33,7 @@ import {
 	type RecoveryCategory,
 } from "./recovery-safety.ts";
 import { mutateProxyAuth } from "./auth-file-transaction.ts";
+import { commandArgumentsProblem } from "./command-arguments.ts";
 import { multiAccountCompletions, type AccountChoice } from "./command-completions.ts";
 import { mergeStateDeltas, mutateStateFile } from "./state-file-transaction.ts";
 import { normalizeModelPins, persistModelPin, validModelPinScope } from "./model-pins.ts";
@@ -9413,6 +9414,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	}
 
 	async function handleCommand(args: string, ctx: any) {
+		const inputProblem = commandArgumentsProblem(args);
+		if (inputProblem) {
+			ctx.ui.notify(inputProblem, "warning");
+			return;
+		}
 		const parts = args.trim().split(/\s+/);
 		const [commandRaw, arg1] = parts;
 		const command = (commandRaw || "status").toLowerCase();
@@ -9489,10 +9495,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				);
 				return;
 			}
-			const n = Math.min(
-				200,
-				Math.max(1, Number.parseInt(arg1 ?? "", 10) || 40),
-			);
+			// commandArgumentsProblem already rejected anything but a whole number from 1 to 200.
+			const n = arg1 === undefined ? 40 : Number(arg1);
 			const tail = readDebugLogTail(n);
 			ctx.ui.notify(
 				tail
@@ -9568,15 +9572,20 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			const lines = [
 				`pi-multi-account models (prefer-latest: ${config.preferLatestModel ? "ON" : "OFF"}) — ★ = selected first:`,
 			];
+			let listedAccounts = 0;
 			for (const target of activeFallbacks()) {
 				const parsed = parseTarget(target);
 				if (!parsed) continue;
+				listedAccounts++;
 				const ordered = resolveTargets(ctx, target, ctx.model).map(
 					(m: any, i: number) => (i === 0 ? `★${m.id}` : m.id),
 				);
 				lines.push(
 					`  ${parsed.provider}: ${ordered.join(", ") || "(no models registered — check /login)"}`,
 				);
+			}
+			if (listedAccounts === 0) {
+				lines.push("  no accounts in rotation — run /login, then /multi-account rediscover");
 			}
 			const overrides = Object.entries(config.preferredModels);
 			if (overrides.length > 0) {

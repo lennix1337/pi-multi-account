@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `failoverWarmupModels` config (default `{}`), keyed by account group, e.g. `{ "anthropic": "claude-haiku-5-5" }`: after an automatic failover lands on that group, the first call runs on the warm-up model and, once it returns successfully, the route switches to the model the failover chose (for example `claude-opus-5-5`) for every later call. The warm-up model is never remembered as the user's model; a manual model change cancels the pending switch; a failure during warm-up ranks the next fallback against the chosen model; an account without the warm-up model skips it.
 - `showUsageWindows` config (default `true`): set `false` to drop the quota percentages from the footer and keep the account name and `+N ready`.
 - `/multi-account` autocompletes as you type: subcommands first, then, after `use`/`switch`, every account matching the typed provider id or email: ready ones first, then cooled ones, the current account last, each with its status and usage. Completion reads only in-memory state and never touches the network.
 

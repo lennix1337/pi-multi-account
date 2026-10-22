@@ -7961,6 +7961,68 @@ test("ordinary Opus/Sol failover cannot promote itself into Astra or Fable", asy
 	await t.fire("session_shutdown");
 });
 
+function assistantReply(provider: string, model: string) {
+	return { ...okAssistant(provider, model), content: [{ type: "text", text: "ok" }], stopReason: "toolUse" };
+}
+
+function warmupSetup(config: Record<string, unknown> = { failoverWarmupModels: { anthropic: "claude-haiku-5-5" } }) {
+	return setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "a", refresh: "ar" },
+			"openai-codex-account-2": { type: "oauth", access: "c", refresh: "cr", accountId: "codex-2" },
+		},
+		current: { provider: "openai-codex-account-2", id: "gpt-5.6-sol" },
+		hostCodexModels: ["gpt-5.6-sol"],
+		hostModelsByProvider: { anthropic: ["claude-opus-5-5", "claude-haiku-5-5"] },
+		config: { providerPriority: ["anthropic", "openai-codex"], ...config },
+	});
+}
+
+test("failover warm-up: the first call after a switch runs on the warm-up model, the next on the flagship", async () => {
+	const t = warmupSetup();
+	await t.fire("session_start");
+	await finishError(t, "openai-codex-account-2", "gpt-5.6-sol", "You have hit your ChatGPT usage limit (team plan).");
+	assert.equal(t.rec.setModels.at(-1), "anthropic/claude-haiku-5-5");
+	assert.notEqual(t.readState().lastUserModel?.id, "claude-haiku-5-5", "warm-up is not a user preference");
+	const before = t.rec.setModels.length;
+	await t.fire("message_end", { message: assistantReply("anthropic", "claude-haiku-5-5") });
+	assert.deepEqual(t.rec.setModels.slice(before), ["anthropic/claude-opus-5-5"]);
+	await t.fire("message_end", { message: assistantReply("anthropic", "claude-opus-5-5") });
+	assert.equal(t.rec.setModels.length, before + 1, "upgrade happens once");
+	await t.fire("session_shutdown");
+});
+
+test("failover warm-up is opt-in and yields to a manual model choice", async () => {
+	const off = warmupSetup({});
+	await off.fire("session_start");
+	await finishError(off, "openai-codex-account-2", "gpt-5.6-sol", "You have hit your ChatGPT usage limit (team plan).");
+	assert.equal(off.rec.setModels.at(-1), "anthropic/claude-opus-5-5");
+	assert.ok(!off.rec.setModels.some((model) => /haiku/.test(model)));
+	await off.fire("session_shutdown");
+
+	const t = warmupSetup();
+	await t.fire("session_start");
+	await finishError(t, "openai-codex-account-2", "gpt-5.6-sol", "You have hit your ChatGPT usage limit (team plan).");
+	assert.equal(t.rec.setModels.at(-1), "anthropic/claude-haiku-5-5");
+	await t.setModel("anthropic", "claude-haiku-5-5");
+	const before = t.rec.setModels.length;
+	await t.fire("message_end", { message: assistantReply("anthropic", "claude-haiku-5-5") });
+	assert.equal(t.rec.setModels.length, before, "a manual selection cancels the pending upgrade");
+	await t.fire("session_shutdown");
+});
+
+test("failover warm-up is skipped when the account has no such model", async () => {
+	const t = warmupSetup({ failoverWarmupModels: { anthropic: "claude-haiku-9" } });
+	// Pi's registry, unlike the fixture's permissive default, has no unknown model ids.
+	const find = t.ctx.modelRegistry.find;
+	t.ctx.modelRegistry.find = (provider: string, id: string) =>
+		id === "claude-haiku-9" ? undefined : find(provider, id);
+	await t.fire("session_start");
+	await finishError(t, "openai-codex-account-2", "gpt-5.6-sol", "You have hit your ChatGPT usage limit (team plan).");
+	assert.equal(t.rec.setModels.at(-1), "anthropic/claude-opus-5-5");
+	await t.fire("session_shutdown");
+});
+
 test("manually selected Astra stays apex: exact sibling first, then native Fable", async () => {
 	const t = setup({
 		accounts: {

@@ -501,6 +501,11 @@ type ProviderFailoverConfig = {
 	// Explicit per-account-group model preference. It never selects a foreground model,
 	// bypasses a cooldown, or authorizes an automatic quality-tier change.
 	pinnedModels?: Record<string, string>;
+	// Per-account-group model for the FIRST call after an automatic failover lands there, e.g.
+	// { "anthropic": "claude-haiku-5-5" }. That one call runs on the warm-up model; once it
+	// returns successfully the route switches back to the account's normal (flagship) model for
+	// every later call. Opt-in; skipped when the target account does not have the model.
+	failoverWarmupModels?: Record<string, string>;
 	// Forward-progress watchdog tunables (see constants above). 0/absent ⇒ built-in default.
 	resumeIdleTimeoutMs?: number;
 	stuckWatchdogMs?: number;
@@ -552,6 +557,7 @@ type RuntimeConfig = Required<
 		| "reasoningLevel"
 		| "preferredModels"
 		| "pinnedModels"
+		| "failoverWarmupModels"
 		| "resumeIdleTimeoutMs"
 		| "stuckWatchdogMs"
 		| "compactionWatchdogMs"
@@ -1697,6 +1703,7 @@ const DEFAULT_CONFIG: ProviderFailoverConfig = {
 	reasoningLevel: "auto",
 	preferredModels: {},
 	pinnedModels: {},
+	failoverWarmupModels: {},
 	resumeIdleTimeoutMs: RESUME_IDLE_TIMEOUT_MS,
 	stuckWatchdogMs: STUCK_WATCHDOG_MS,
 	compactionWatchdogMs: COMPACTION_WATCHDOG_MS,
@@ -1920,6 +1927,7 @@ function normalizeConfig(raw: ProviderFailoverConfig): RuntimeConfig {
 					)
 				: {},
 		pinnedModels: normalizeModelPins(raw.pinnedModels),
+		failoverWarmupModels: normalizeModelPins(raw.failoverWarmupModels),
 		resumeIdleTimeoutMs: positiveOr(
 			raw.resumeIdleTimeoutMs,
 			RESUME_IDLE_TIMEOUT_MS,
@@ -4323,6 +4331,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		appliedLevel: ReasoningLevel;
 	};
 	let automaticModelTarget: ModelRef | undefined;
+	// A failover warm-up model selected by the extension, not the user: never remembered.
+	let automaticWarmupTarget: ModelRef | undefined;
+	// Set while the first post-failover call runs on `config.failoverWarmupModels`; its first
+	// successful reply moves the route to `target`, the model the failover actually chose.
+	let pendingWarmupUpgrade:
+		| { provider: string; warmupId: string; target: { provider: string; id: string } }
+		| undefined;
 	let lastObservedModelKey: string | undefined;
 	let lastObservedThinkingLevel: ReasoningLevel | undefined;
 	let pendingModelThinkingChange: ThinkingChangeEvidence | undefined;
@@ -7104,6 +7119,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			if (options.armContinuation !== false) {
 				pinFailoverProbe(fallback.provider);
 			}
+			const warmupId =
+				!options.manual && options.armContinuation !== false
+					? await startFailoverWarmup(ctx, fallback)
+					: undefined;
+			if (stale()) return false;
 			const record = { from, to, reason, at: Date.now() };
 			currentPromptSwitch =
 				options.armContinuation === false ? undefined : record;
@@ -7116,12 +7136,94 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				),
 			});
 			ctx.ui.notify(
-				`Provider failover [v${VERSION}]: ${from} → ${to} (${reason})`,
+				`Provider failover [v${VERSION}]: ${from} → ${to} (${reason})` +
+					(warmupId ? `; first call on ${fallback.provider}/${warmupId}, then ${fallback.id}` : ""),
 				"warning",
 			);
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * Run the first call after an automatic failover on the account group's configured warm-up
+	 * model. Returns the warm-up id when it is now active; the switch otherwise stays on `target`.
+	 */
+	async function startFailoverWarmup(ctx: any, target: { provider: string; id: string }) {
+		pendingWarmupUpgrade = undefined;
+		const configured =
+			config.failoverWarmupModels[accountGroup(target.provider, config.qwenProvider)];
+		if (!configured || sameModelIdentity(configured, target.id)) return undefined;
+		const warmup = findModelIncludingHidden(ctx, target.provider, configured);
+		if (!warmup) {
+			logEvent("failover_warmup_skipped", {
+				provider: target.provider,
+				model: configured,
+				reason: "model not available on this account",
+			});
+			return undefined;
+		}
+		const warmupRef = ref(target.provider, warmup.id);
+		automaticWarmupTarget = warmupRef;
+		let ok = false;
+		try {
+			ok = await setModelEnsuringVisible(warmup, ctx);
+		} catch {
+			ok = false;
+		}
+		if (!ok) {
+			if (automaticWarmupTarget === warmupRef) automaticWarmupTarget = undefined;
+			logEvent("failover_warmup_skipped", {
+				provider: target.provider,
+				model: warmup.id,
+				reason: "setModel failed",
+			});
+			return undefined;
+		}
+		restoreDesiredThinking(ctx);
+		pendingWarmupUpgrade = {
+			provider: target.provider,
+			warmupId: warmup.id,
+			target: { provider: target.provider, id: target.id },
+		};
+		logEvent("failover_warmup", { warmup: warmupRef, then: ref(target.provider, target.id) });
+		return warmup.id as string;
+	}
+
+	/** After the warm-up call succeeded, move the route to the model the failover chose. */
+	async function finishFailoverWarmup(ctx: any, message: any) {
+		const pending = pendingWarmupUpgrade;
+		if (
+			!pending ||
+			message?.provider !== pending.provider ||
+			!sameModelIdentity(String(message?.model ?? ""), pending.warmupId)
+		)
+			return;
+		pendingWarmupUpgrade = undefined;
+		if (
+			ctx.model?.provider !== pending.provider ||
+			!sameModelIdentity(String(ctx.model?.id ?? ""), pending.warmupId)
+		)
+			return; // something else already moved the route
+		const target =
+			findModelIncludingHidden(ctx, pending.target.provider, pending.target.id) ?? pending.target;
+		const targetRef = ref(pending.target.provider, pending.target.id);
+		automaticModelTarget = targetRef;
+		let ok = false;
+		try {
+			ok = await setModelEnsuringVisible(target, ctx);
+		} catch {
+			ok = false;
+		}
+		if (!ok) {
+			if (automaticModelTarget === targetRef) automaticModelTarget = undefined;
+			logEvent("failover_warmup_upgrade_failed", { target: targetRef });
+			ctx.ui.notify(`Provider failover: could not switch from warm-up ${pending.warmupId} to ${targetRef}`, "warning");
+			return;
+		}
+		restoreDesiredThinking(ctx);
+		logEvent("failover_warmup_done", { from: ref(pending.provider, pending.warmupId), to: targetRef });
+		ctx.ui.notify(`Provider failover: warm-up call done on ${pending.warmupId}; next calls use ${targetRef}`, "info");
 	}
 
 	async function switchToFallback(
@@ -7140,6 +7242,16 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	) {
 		if (!isAccountChatModel(failedModel) || (ctx.model && !isAccountChatModel(ctx.model))) return false;
 		if (!options.manual && (isFailoverExempt(failedModel?.provider) || isFailoverExempt(ctx.model?.provider))) return false;
+		// A failure during the warm-up call is the chosen route's failure: rank the next
+		// fallback against the flagship it stood in for, not the cheaper warm-up model.
+		const warmup = pendingWarmupUpgrade;
+		pendingWarmupUpgrade = undefined;
+		if (
+			warmup &&
+			failedModel?.provider === warmup.provider &&
+			sameModelIdentity(String(failedModel?.id ?? ""), warmup.warmupId)
+		)
+			failedModel = findModelIncludingHidden(ctx, warmup.target.provider, warmup.target.id) ?? warmup.target;
 		const switchEpoch = chainEpoch;
 		if (!automaticFailoverEnabled() || !failedModel?.provider || !failedModel?.id)
 			return false;
@@ -12395,6 +12507,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 		if (appliedThinkingLevel) lastObservedThinkingLevel = appliedThinkingLevel;
 		lastObservedModelKey = selected;
+		if (automaticWarmupTarget === selected) {
+			automaticWarmupTarget = undefined;
+			return;
+		}
 		if (automaticModelTarget === selected) {
 			automaticModelTarget = undefined;
 			rememberUserModel(model);
@@ -12406,6 +12522,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			thinkingClamp = undefined;
 		}
 		modelPreferenceChanged = true;
+		pendingWarmupUpgrade = undefined;
 		rememberUserModel(model);
 		// A manual model change is user control, not a permanent "never fail over" pin.
 		// Cancel stale pending work; if the selected model then returns a real limit, normal
@@ -12494,6 +12611,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			noteProviderSuccessObserved();
 			noteRecoveryProgress();
 			if (message.provider) noteAuthSuccess(message.provider, message.model);
+			if (pendingWarmupUpgrade && !staleError()) await finishFailoverWarmup(ctx, message);
 			return;
 		}
 		if (userAbortedChain || ctx.signal?.aborted) return; // user is cancelling — don't fail over

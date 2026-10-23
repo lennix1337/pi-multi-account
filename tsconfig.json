@@ -11,5 +11,5 @@
     "noEmit": true
   },
   "include": ["./**/*.ts"],
-  "exclude": ["./cursor/**", "./node_modules/**"]
+  "exclude": ["./cursor/**", "./node_modules/**", "./scratchpad/**"]
 }

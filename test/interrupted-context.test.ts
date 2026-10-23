@@ -19,9 +19,10 @@ import test from "node:test";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-const { preserveInterruptedTurns, renderHandoffRecord } = (await import(
+const { interruptedTurnNote, preserveInterruptedTurns, renderHandoffRecord } = (await import(
 	"../index.ts"
 )) as {
+	interruptedTurnNote: (branch: any[]) => string;
 	preserveInterruptedTurns: (messages: any[]) => any[];
 	renderHandoffRecord: (
 		message: any,
@@ -310,4 +311,46 @@ test("every interrupted turn in a long session is preserved, not just the last o
 		false,
 		"no interrupted assistant may be left for pi-ai to drop",
 	);
+});
+
+const asBranch = (messages: any[]) => messages.map((message) => ({ type: "message", message }));
+
+test("an empty quota-rejected turn has no record, and the note says so instead of pointing at one", () => {
+	// Real shape from a persisted session: stopReason "error", content: [] (rejected at request start).
+	const branch = asBranch([
+		{ role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 },
+		{ role: "assistant", provider: "openai-codex", model: "gpt-6.1-sol", stopReason: "error", errorMessage: "You have hit your ChatGPT usage limit", content: [], timestamp: 2 },
+	]);
+	assert.equal(renderHandoffRecord(branch[1].message, new Map()), undefined);
+	const note = interruptedTurnNote(branch);
+	assert.match(note, /no \[handoff:interrupted-turn\] record to read/);
+	assert.ok(!note.includes("The turn below ran on"));
+});
+
+test("a turn with content yields the full record as the note", () => {
+	const note = interruptedTurnNote(asBranch(interruptedTranscript()));
+	assert.ok(note.startsWith("[handoff:interrupted-turn] The turn below ran on"));
+	assert.ok(note.includes(SECRET_OUTPUT) && note.includes("npm run db:seed") && note.includes("migration 0042 applied"));
+});
+
+test("no note when the branch does not end in an interrupted turn", () => {
+	assert.equal(interruptedTurnNote([]), "");
+	assert.equal(
+		interruptedTurnNote(asBranch([{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }], timestamp: 1 }])),
+		"",
+	);
+});
+
+test("the context hook does not duplicate a record the continuation prompt already carries, but still folds orphaned results", () => {
+	const transcript = interruptedTranscript();
+	const record = renderHandoffRecord(transcript[1], new Map([["call_migrate", transcript[2]]]))!;
+	const withPrompt = [
+		...transcript,
+		{ role: "user", content: [{ type: "text", text: `Provider failover activated.
+
+${record}` }], timestamp: 4 },
+	];
+	const out = preserveInterruptedTurns(withPrompt);
+	assert.equal(JSON.stringify(out).split("The turn below ran on").length - 1, 1, "exactly one copy of the record");
+	assert.equal(out.some((m: any) => m.role === "assistant" || m.role === "toolResult"), false, "no orphans, no dropped assistant left");
 });

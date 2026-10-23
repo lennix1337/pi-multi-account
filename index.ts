@@ -1356,7 +1356,20 @@ const DEFAULT_IGNORE_PATTERNS = [
 	"input is too long",
 ];
 
+// The prompt must never point at a record it cannot guarantee. The handoff record is derived from
+// the interrupted assistant message, so it does not exist when that turn stopped before producing
+// anything (a quota rejection at request start), and a host that replaces the transcript in the
+// `context_with_system` phase (OptChat) discards it even when it does. The record therefore travels
+// INSIDE the injected user message (see interruptedTurnNote), which is persisted and cannot be lost.
 const DEFAULT_CONTINUATION_PROMPT = [
+	"Provider failover activated: switched to {to} after {from} hit a quota or rate limit.",
+	"Continue the interrupted task from where it stopped.",
+	"Anything the interrupted turn already did was attempted, so verify the current state instead of redoing it, and do not restart the task from the beginning.",
+].join(" ");
+
+// The default shipped through 1.x claimed a record that was not always there. Configs written by
+// earlier versions persist that text verbatim, so it is recognised and replaced by the default above.
+const LEGACY_CONTINUATION_PROMPT = [
 	"Provider failover activated: switched to {to} after {from} hit a quota or rate limit.",
 	"Continue the interrupted task from where it stopped.",
 	"The interrupted turn itself is preserved verbatim in this session as a [handoff:interrupted-turn] record — read it before acting:",
@@ -1543,7 +1556,14 @@ export function preserveInterruptedTurns(messages: any[]): any[] {
 	for (const message of interrupted) {
 		const record = renderHandoffRecord(message, resultsByCallId);
 		if (!record) continue;
-		rendered.set(message, record);
+		// The continuation prompt carries the same record inline; a second copy is dead weight.
+		const alreadyDelivered = messages
+			.slice(messages.indexOf(message) + 1)
+			.some(
+				(later: any) =>
+					later?.role === "user" && handoffBlockText(later.content).includes(record),
+			);
+		rendered.set(message, alreadyDelivered ? "" : record);
 		for (const block of Array.isArray(message.content) ? message.content : []) {
 			if (block?.type === "toolCall" && block.id != null)
 				foldedResultIds.add(String(block.id));
@@ -1554,6 +1574,7 @@ export function preserveInterruptedTurns(messages: any[]): any[] {
 	const out: any[] = [];
 	for (const message of messages) {
 		const record = rendered.get(message);
+		if (record === "") continue; // delivered inline by the continuation prompt
 		if (record) {
 			out.push({
 				role: "user",
@@ -1573,6 +1594,29 @@ export function preserveInterruptedTurns(messages: any[]): any[] {
 		out.push(message);
 	}
 	return out;
+}
+
+/**
+ * What the continuation prompt tells the next account about the turn that just failed, read from
+ * the session branch. Returns "" when the branch does not end in an interrupted turn.
+ * With content, it is the full handoff record (so the instruction can never point at something the
+ * host's context pipeline drops); without, it states plainly that there is nothing to read.
+ */
+export function interruptedTurnNote(branch: any[]): string {
+	const messages = (Array.isArray(branch) ? branch : [])
+		.filter((entry: any) => entry?.type === "message" && entry.message)
+		.map((entry: any) => entry.message);
+	const last = [...messages].reverse().find((message: any) => message?.role === "assistant");
+	if (!last || (last.stopReason !== "error" && last.stopReason !== "aborted")) return "";
+	const results = new Map<string, any>();
+	for (const message of messages) {
+		if (message?.role === "toolResult" && message.toolCallId != null)
+			results.set(String(message.toolCallId), message);
+	}
+	return (
+		renderHandoffRecord(last, results) ??
+		`The interrupted turn had written no output and issued no tool calls before it stopped, so there is no ${HANDOFF_MARKER} record to read: nothing from that turn was lost. The earlier transcript is the complete state.`
+	);
 }
 
 const DEFAULT_PROVIDER_ORDER: ProviderFamily[] = [
@@ -1894,7 +1938,10 @@ function normalizeConfig(raw: ProviderFailoverConfig): RuntimeConfig {
 			DEFAULT_IGNORE_PATTERNS,
 		),
 		continuationPrompt:
-			raw.continuationPrompt?.trim() || DEFAULT_CONTINUATION_PROMPT,
+			!raw.continuationPrompt?.trim() ||
+			raw.continuationPrompt.trim() === LEGACY_CONTINUATION_PROMPT
+				? DEFAULT_CONTINUATION_PROMPT
+				: raw.continuationPrompt.trim(),
 		maxRecheckIntervalMs: positiveOr(
 			raw.maxRecheckIntervalMs,
 			MAX_RECHECK_INTERVAL_MS,
@@ -8186,14 +8233,25 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				? ref(ctx.model.provider, ctx.model.id)
 				: "the active account");
 		const sameModelRetry = source?.from === to;
-		const prompt = sameModelRetry
+		const basePrompt = sameModelRetry
 			? resumeFrom?.allowWhenAutoContinueDisabled
-				? `Provider quota recovery activated: ${to} is usable again after every compatible account was limited. Continue the interrupted task from where it stopped. The interrupted turn is preserved verbatim in this session as a [handoff:interrupted-turn] record — read it before acting and do not restart the task from the beginning.`
-				: `Provider retry activated: retrying ${to} after a temporary failure; no account or model switch occurred. Continue the interrupted task from where it stopped. The interrupted turn is preserved verbatim in this session as a [handoff:interrupted-turn] record — read it before acting and do not restart the task from the beginning.`
+				? `Provider quota recovery activated: ${to} is usable again after every compatible account was limited. Continue the interrupted task from where it stopped and do not restart the task from the beginning.`
+				: `Provider retry activated: retrying ${to} after a temporary failure; no account or model switch occurred. Continue the interrupted task from where it stopped and do not restart the task from the beginning.`
 			: config.continuationPrompt
 					.replaceAll("{from}", String(source?.from ?? "the previous account"))
 					.replaceAll("{to}", String(to))
 					.replaceAll("{reason}", source?.reason ?? "provider failover");
+		let note = "";
+		if (config.preserveInterruptedContext) {
+			try {
+				note = interruptedTurnNote(ctx.sessionManager?.getBranch?.() ?? []);
+			} catch {
+				note = "The interrupted turn could not be inspected, so its handoff record is unavailable. Inspect the existing transcript and verify actual tool outcomes before repeating effects; do not assume nothing was lost.";
+			}
+		}
+		const prompt = note ? `${basePrompt}
+
+${note}` : basePrompt;
 		try {
 			expectingInjectedContinuation = true;
 			// The host throws "Agent is already processing. Specify streamingBehavior ('steer' or

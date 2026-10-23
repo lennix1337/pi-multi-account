@@ -6580,6 +6580,74 @@ test("host build WITHOUT pi.continueAgent still auto-resumes the failover (injec
 	);
 });
 
+test("the injected continuation never points at a [handoff:interrupted-turn] record that does not exist (empty quota-rejected turn, session branch as in OptChat)", async () => {
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		omitContinueAgent: true,
+	});
+	// The real failure shape: the quota rejection arrives at request start, so the assistant
+	// message is `content: []` and renderHandoffRecord() has nothing to render.
+	const failed = assistantError("anthropic", "claude-opus-4-8", "429 rate_limit_error");
+	t.ctx.sessionManager.getBranch = () => [
+		{ type: "message", message: failed },
+	];
+	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
+	assert.equal(t.rec.sent.length, 1);
+	const prompt = t.rec.sent[0].prompt;
+	assert.ok(
+		!/preserved verbatim in this session as a \[handoff:interrupted-turn\] record/.test(prompt),
+		`the prompt claims a record the empty turn cannot have: ${prompt}`,
+	);
+	assert.match(prompt, /no \[handoff:interrupted-turn\] record to read/);
+});
+
+test("the injected continuation carries the handoff record inline, so a host that replaces the transcript still delivers it", async () => {
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		omitContinueAgent: true,
+	});
+	const failed = {
+		...assistantError("anthropic", "claude-opus-4-8", "429 rate_limit_error"),
+		content: [
+			{ type: "text", text: "Applied migration 0042; seeding is next." },
+			{ type: "toolCall", id: "call_seed", name: "bash", arguments: { command: "npm run db:seed" } },
+		],
+	};
+	t.ctx.sessionManager.getBranch = () => [{ type: "message", message: failed }];
+	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
+	const prompt = t.rec.sent[0].prompt;
+	assert.ok(prompt.includes("[handoff:interrupted-turn] The turn below ran on"), "record is inline");
+	assert.ok(prompt.includes("Applied migration 0042; seeding is next."));
+	assert.ok(prompt.includes("npm run db:seed") && prompt.includes("result: NONE"));
+});
+
+test("an unreadable branch is disclosed without claiming a missing record or lost-free continuation", async () => {
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		omitContinueAgent: true,
+	});
+	t.ctx.sessionManager.getBranch = () => { throw new Error("branch unavailable"); };
+	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
+	assert.equal(t.rec.sent.length, 1);
+	assert.match(t.rec.sent[0].prompt, /could not be inspected/);
+	assert.match(t.rec.sent[0].prompt, /verify actual tool outcomes/);
+	assert.ok(!t.rec.sent[0].prompt.includes("nothing from that turn was lost"));
+});
+
+test("a legacy persisted continuationPrompt that claims the record is replaced by the truthful default", async () => {
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		omitContinueAgent: true,
+		config: {
+			continuationPrompt:
+				"Provider failover activated: switched to {to} after {from} hit a quota or rate limit. Continue the interrupted task from where it stopped. The interrupted turn itself is preserved verbatim in this session as a [handoff:interrupted-turn] record — read it before acting: it contains the reasoning and output of that turn plus every tool call it issued, marking which ones never returned a result. Anything shown there was already attempted, so verify the current state instead of redoing it, and do not restart the task from the beginning.",
+		},
+	} as any);
+	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
+	assert.ok(!t.rec.sent[0].prompt.includes("preserved verbatim in this session"));
+	assert.match(t.rec.sent[0].prompt, /Provider failover activated: switched to /);
+});
+
 test("a genuinely maxed monthly Codex account is benched for its REAL reset, so failover advances to a healthy Qwen/Alibaba account instead of ping-ponging between spent Codex slots", async () => {
 	const now = Date.now();
 	const accounts: Account = {

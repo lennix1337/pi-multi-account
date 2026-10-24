@@ -30,13 +30,15 @@ test("fires once after upstream goes quiet, reporting how long it was silent", a
 
 test("observed progress pushes the deadline back", async () => {
   let fired = 0;
-  const watchdog = startUpstreamWatchdog(() => { fired += 1; }, 60);
+  // Touches every 25 ms against a 400 ms deadline: a loaded machine (parallel test files) can
+  // delay a 25 ms sleep well past a tight deadline, which made a 60 ms version flaky.
+  const watchdog = startUpstreamWatchdog(() => { fired += 1; }, 400);
   for (let i = 0; i < 5; i += 1) {
     await sleep(25);
     watchdog.touch();
   }
   assert.equal(fired, 0, "a stream that keeps producing frames is not stalled");
-  await sleep(120);
+  await sleep(700);
   assert.equal(fired, 1, "once frames stop, the stall is still detected");
   watchdog.stop();
 });

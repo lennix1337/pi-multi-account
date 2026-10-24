@@ -11,6 +11,8 @@ test("provider policy refusal aborts Pi's native agent retry", { timeout: 15000 
 		await import("@earendil-works/pi-coding-agent");
 	const { createAssistantMessageEventStream } = await import("@earendil-works/pi-ai");
 	const { default: multiAccount } = await import("../index.ts");
+	const { VERSION } = await import("@earendil-works/pi-coding-agent");
+	const { piAbortStopsAgentRetry } = await import("../pi-contract.ts");
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousOffline = process.env.PI_OFFLINE;
 	process.env.PI_OFFLINE = "1";
@@ -143,7 +145,13 @@ test("provider policy refusal aborts Pi's native agent retry", { timeout: 15000 
 		const controlRequests = await run(false);
 		assert.equal(controlRequests.length, 2, "the configured Pi agent retry is exercised without the extension");
 		const protectedRequests = await run(true);
-		assert.equal(protectedRequests.length, 1, "the policy refusal aborts the host retry, not only extension continuation");
+		if (piAbortStopsAgentRetry(VERSION)) {
+			assert.equal(protectedRequests.length, 1, "the policy refusal aborts the host retry, not only extension continuation");
+		} else {
+			// Documented host limitation (README): before 0.86.0 Pi keeps its own retry after an abort.
+			// Pinned so a host that gains the fix flips this test and the contract boundary moves.
+			assert.equal(protectedRequests.length, 2, `Pi ${VERSION} still sends its own retry after the abort`);
+		}
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

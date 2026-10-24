@@ -39,6 +39,9 @@ Restart Pi or run `/reload` after installation.
 
 Requires Node 22+ and Agent Pi / pi-ai **>=0.85.1, <0.88.0; >=0.99.0, <0.100.0; or >=1.0.0, <2.0.0**.
 CI covers Pi **0.85.1, 0.86.1, 0.87.1, 0.99.2 and 1.0.0**; Pi 0.99+ requires Node >=22.19.0.
+On Pi 0.85.x a provider policy refusal stops this extension's recovery, but Pi still sends its own
+configured agent retry once, because an extension abort cancels that retry only from Pi 0.86.0.
+Before Pi 0.87 the context guard measures Pi's `context` transcript, not a later projection.
 Both Pi SDK packages are peers supplied by the running host. OAuth, catalogs and transports
 use public host-bound imports; do not install a private runtime pi-ai copy alongside this extension.
 Standalone SDK callers must supply matching Pi SDK versions. Pi 0.99+ support retains numbered

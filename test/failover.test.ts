@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { VERSION as PI_HOST_VERSION } from "@earendil-works/pi-coding-agent";
-import { piAutoPersistsSelectedModel } from "../pi-contract.ts";
+import { piAutoPersistsSelectedModel, piHasContextWithSystem } from "../pi-contract.ts";
 import { childFacingAuthEntryForSlot } from "../slot-proxy-auth.ts";
 import { publishedRouteFor } from "../slot-proxy.ts";
 import { XAI_SUBSCRIPTION_USAGE_URL, ZAI_CODING_CN_USAGE_URL } from "../usage.ts";
@@ -11789,6 +11789,12 @@ test("the context guard measures the request a context-owning extension actually
 	t.ctx.model.contextWindow = 1_000_000;
 	const notices: string[] = [];
 	t.ctx.ui.notify = (message: string) => notices.push(message);
+	if (!piHasContextWithSystem(PI_HOST_VERSION)) {
+		// Pi < 0.87 has no request-time phase after `context`, so the guard measures there.
+		assert.ok(t.hasHandler("context"), `on Pi ${PI_HOST_VERSION} the guard must run in context`);
+		assert.equal(t.hasHandler("context_with_system"), false, "no handler for a phase this host never emits");
+		return;
+	}
 	assert.ok(t.hasHandler("context_with_system"), "on Pi 0.87+ the guard must run in context_with_system");
 	const projected = [{ role: "system", content: "prompt" }, ...bigConversation(5)];
 	t.prependHandler("context_with_system", () => ({ messages: projected }));

@@ -23,6 +23,7 @@ import {
   describeContractDrift,
   observedAssumptions,
   piAutoPersistsSelectedModel,
+  piAbortStopsAgentRetry,
   piHasContextWithSystem,
 } from "../pi-contract.ts";
 
@@ -230,6 +231,13 @@ test("drift names the file, the problem, and why nothing warned us", () => {
   // changing underneath us.
   assert.match(message, /carries no version|no version/);
   assert.equal(/settings\.json/.test(message), false, "a healthy file must not appear in the report");
+});
+
+test("an extension abort cancels Pi's own retry only from Pi 0.86.0", () => {
+  assert.equal(piAbortStopsAgentRetry("0.85.1"), false);
+  assert.equal(piAbortStopsAgentRetry("0.86.0"), true);
+  assert.equal(piAbortStopsAgentRetry("1.0.0"), true);
+  assert.equal(piAbortStopsAgentRetry("unknown"), false);
 });
 
 test("context_with_system is used only on hosts that emit it (Pi 0.87.0+)", () => {

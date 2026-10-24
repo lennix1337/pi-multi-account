@@ -123,6 +123,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 const SESSION_SCOPED_MODEL_SELECTION_SINCE = Object.freeze([0, 84, 3] as const);
 const CONTEXT_WITH_SYSTEM_SINCE = Object.freeze([0, 87, 0] as const);
+const ABORT_STOPS_AGENT_RETRY_SINCE = Object.freeze([0, 86, 0] as const);
 
 /** Sign of `version` - `since` (negative, 0, positive); undefined for a non-semver host. */
 function compareVersion(version: string, since: readonly number[]): number | undefined {
@@ -143,6 +144,16 @@ function compareVersion(version: string, since: readonly number[]): number | und
  */
 export function piHasContextWithSystem(version: string): boolean {
   return (compareVersion(version, CONTEXT_WITH_SYSTEM_SINCE) ?? -1) >= 0;
+}
+
+/**
+ * Whether `ctx.abort()` from an extension also cancels Pi's own agent retry (Pi 0.86.0+, which
+ * fixed retry state surviving cancellation). On older hosts a provider policy refusal still stops
+ * this extension's recovery, but Pi itself sends its configured retry once more. Unknown hosts
+ * answer false so nobody is promised a stop the host may not deliver.
+ */
+export function piAbortStopsAgentRetry(version: string): boolean {
+  return (compareVersion(version, ABORT_STOPS_AGENT_RETRY_SINCE) ?? -1) >= 0;
 }
 
 /**

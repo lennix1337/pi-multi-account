@@ -430,6 +430,11 @@ type ProviderFailoverConfig = {
 	probeCooldownMs?: number;
 	invalidCooldownMs?: number;
 	transientCooldownMs?: number;
+	/**
+	 * How long automatic recovery slows down once it keeps failing (the breaker) or has spent its
+	 * per-prompt budget. Recovery then resumes by itself; it never waits for a user message.
+	 */
+	breakerCooldownMs?: number;
 	showUsage?: boolean;
 	showUsageWindows?: boolean;
 	usageRefreshMs?: number;
@@ -535,6 +540,7 @@ type RuntimeConfig = Required<
 		| "probeCooldownMs"
 		| "invalidCooldownMs"
 		| "transientCooldownMs"
+		| "breakerCooldownMs"
 		| "showUsage"
 		| "showUsageWindows"
 		| "usageRefreshMs"
@@ -1187,6 +1193,8 @@ const COMPACTION_UNFIT_PATTERNS = [
 // real forward progress, a new user prompt, /multi-account reset, or after a cooldown.
 const BREAKER_FAILURE_THRESHOLD = 3; // consecutive failed recoveries before tripping
 const BREAKER_COOLDOWN_MS = 10 * 60 * 1000; // how long advisory mode lasts once tripped
+// Longest gap between automatic retries of a route that keeps failing temporarily.
+const TRANSIENT_RETRY_MAX_DELAY_MS = 15 * 60 * 1000;
 
 const ANTHROPIC_BASE = "anthropic";
 const CODEX_BASE = "openai-codex";
@@ -1293,6 +1301,10 @@ const DEFAULT_TRANSIENT_ERROR_PATTERNS = [
 	"stream disconnected",
 	"websocket error",
 	"server error",
+	// Anthropic SDK connection failure and undici's closed stream: both seen live as "unhandled",
+	// which left the session idle until the user typed.
+	"connection error",
+	"terminated",
 ];
 
 /** Cursor watchdog text from `cursor/proxy.ts`. A Run failure, never quota evidence. */
@@ -1722,6 +1734,7 @@ const DEFAULT_CONFIG: ProviderFailoverConfig = {
 	probeCooldownMs: DEFAULT_PROBE_COOLDOWN_MS,
 	invalidCooldownMs: DEFAULT_INVALID_COOLDOWN_MS,
 	transientCooldownMs: DEFAULT_TRANSIENT_COOLDOWN_MS,
+	breakerCooldownMs: BREAKER_COOLDOWN_MS,
 	showUsage: true,
 	showUsageWindows: true,
 	usageRefreshMs: DEFAULT_USAGE_REFRESH_MS,
@@ -1899,6 +1912,7 @@ function normalizeConfig(raw: ProviderFailoverConfig): RuntimeConfig {
 			raw.transientCooldownMs,
 			DEFAULT_TRANSIENT_COOLDOWN_MS,
 		),
+		breakerCooldownMs: positiveOr(raw.breakerCooldownMs, BREAKER_COOLDOWN_MS),
 		showUsage: raw.showUsage ?? true,
 		showUsageWindows: raw.showUsageWindows ?? true,
 		usageRefreshMs: positiveOr(raw.usageRefreshMs, DEFAULT_USAGE_REFRESH_MS),
@@ -7741,20 +7755,21 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	}
 
 	// A failed auto-recovery (a wedged/aborted resume, a resume that errored out). After
-	// BREAKER_FAILURE_THRESHOLD in a row, trip the breaker: pause auto-continue and tell the
-	// user we are now only advising manual switches — never hanging on a doomed auto-resume.
+	// BREAKER_FAILURE_THRESHOLD in a row, trip the breaker: pause auto-continue for
+	// breakerCooldownMs instead of hammering a failing route. The armed wake survives and resumes
+	// by itself when the breaker closes; recovery never waits for a user message.
 	function noteRecoveryFailure(ctx: any) {
 		recoveryFailures++;
 		logEvent("recovery_failure", { count: recoveryFailures });
 		if (recoveryFailures >= BREAKER_FAILURE_THRESHOLD && !isBreakerOpen()) {
-			breakerOpenUntil = Date.now() + BREAKER_COOLDOWN_MS;
+			breakerOpenUntil = Date.now() + config.breakerCooldownMs;
 			logEvent("breaker_open", {
 				failures: recoveryFailures,
-				cooldownMs: BREAKER_COOLDOWN_MS,
+				cooldownMs: config.breakerCooldownMs,
 			});
 			ctx?.ui?.notify?.(
-				`pi-multi-account [v${VERSION}]: automatic resume failed ${recoveryFailures}× in a row, so it is pausing auto-continue for ${formatDelay(BREAKER_COOLDOWN_MS)} (safe mode) to avoid making things worse. ` +
-					"Temporary errors do not change your provider or model. Confirmed quota limits retain their separate failover policy. Send a new message to retry; /multi-account reset re-enables auto-continue immediately.",
+				`pi-multi-account [v${VERSION}]: automatic resume failed ${recoveryFailures}× in a row, so it is pausing auto-continue for ${formatDelay(config.breakerCooldownMs)} (safe mode) and then retries by itself. ` +
+					"Temporary errors do not change your provider or model. Confirmed quota limits retain their separate failover policy. A new message or /multi-account reset retries immediately.",
 				"warning",
 			);
 		}
@@ -8406,6 +8421,26 @@ ${note}` : basePrompt;
 		}
 	}
 
+	/** A spent per-prompt budget parks the continuation instead of dropping it. */
+	function parkIfDispatchBudgetSpent(ctx: any, allowRecoveryResume: boolean, mode: PendingResumeMode) {
+		if (autoContinuesThisPrompt < config.maxAutoContinuesPerPrompt) return;
+		if (!config.autoContinue && !allowRecoveryResume) return;
+		if (userAbortedChain || ctx.signal?.aborted || !currentPromptSwitch) return;
+		if (!ctx.model?.provider || !ctx.model?.id) return;
+		parkPendingResume(ctx, ctx.model, currentPromptSwitch.reason, mode);
+	}
+
+	/** Safe mode delays the continuation onto the fresh account; the wake fires when it closes. */
+	function deferDispatchForBreaker(ctx: any, reason: string, allowRecoveryResume: boolean, mode: PendingResumeMode) {
+		ctx.ui?.notify?.(
+			`Provider failover: switched to ${ctx.model?.provider ?? "a fresh account"}; auto-continue resumes by itself in ~${formatDelay(breakerOpenUntil - Date.now())} (safe mode after repeated failures). A new message or /multi-account reset continues now.`,
+			"warning",
+		);
+		if (!ctx.model?.provider || !ctx.model?.id) return;
+		if (!config.autoContinue && !allowRecoveryResume) return;
+		setPendingContinuation(ctx, ctx.model, reason || "safe mode after repeated failures", { mode, quiet: true });
+	}
+
 	async function maybeDispatchContinuation(
 		ctx: any,
 		options: {
@@ -8422,8 +8457,10 @@ ${note}` : basePrompt;
 			ctx.signal?.aborted ||
 			!currentPromptSwitch ||
 			autoContinuesThisPrompt >= config.maxAutoContinuesPerPrompt
-		)
+		) {
+			parkIfDispatchBudgetSpent(ctx, allowRecoveryResume, options.pendingMode ?? "auto-continue");
 			return false;
+		}
 		const dispatchSwitch = currentPromptSwitch;
 		const recoveryCategory: RecoveryCategory = /quota|rate limit|cooldown|exhausted/i.test(dispatchSwitch.reason)
 			? "quota"
@@ -8448,10 +8485,7 @@ ${note}` : basePrompt;
 		// we just don't attempt the auto-resume that has been failing. The user's next message
 		// runs on the fresh account. This is the floor: never worse than switching by hand.
 		if (isBreakerOpen()) {
-			ctx.ui?.notify?.(
-				`Provider failover: switched to ${ctx.model?.provider ?? "a fresh account"} but auto-continue is paused (safe mode after repeated failures). Send your message to continue here, or /multi-account reset to re-enable auto-continue.`,
-				"warning",
-			);
+			deferDispatchForBreaker(ctx, dispatchSwitch.reason, allowRecoveryResume, options.pendingMode ?? "auto-continue");
 			return false;
 		}
 		// Never resume onto an account that is ITSELF cooling down. We may have just switched to a
@@ -8692,7 +8726,12 @@ ${note}` : basePrompt;
 		// recovery time across every rotation account means one free account elsewhere holds this
 		// at the floor indefinitely, which is how a wait that never changed anything re-checked
 		// once a second for four minutes.
-		return Math.max(pendingWakeBackoffMs, nextAt - now, (pendingResume?.retryAt ?? now) - now);
+		return Math.max(
+			pendingWakeBackoffMs,
+			nextAt - now,
+			(pendingResume?.retryAt ?? now) - now,
+			breakerOpenUntil - now,
+		);
 	}
 
 	/** A wake that changed nothing waits twice as long as the last one, up to the poll interval. */
@@ -8800,7 +8839,6 @@ ${note}` : basePrompt;
 		pendingWakeTimer = undefined;
 		if (
 			governorStopped() ||
-			isBreakerOpen() ||
 			!hasPendingResume() ||
 			userAbortedChain ||
 			!automaticFailoverEnabled() ||
@@ -8859,41 +8897,34 @@ ${note}` : basePrompt;
 		const epoch = chainEpoch;
 		if (
 			!hasPendingResume() ||
-			isBreakerOpen() ||
 			userAbortedChain ||
 			!automaticFailoverEnabled() ||
 			!pendingResumeEnabled()
 		)
 			return;
-		if (!ctx.isIdle()) {
+		// The breaker delays the wake; it never drops it (see nextPendingWakeDelayMs).
+		if (!ctx.isIdle() || isBreakerOpen()) {
 			schedulePendingWake(ctx);
 			return;
 		}
-		if (autoContinuesThisPrompt >= config.maxAutoContinuesPerPrompt) {
-			clearPendingContinuation();
-			ctx.ui.notify(
-				`Provider failover: pending resume cancelled after ${autoContinuesThisPrompt} auto-continues.`,
-				"warning",
+		const parkedSource = pendingResume?.from ? parseTarget(pendingResume.from) : undefined;
+		if (
+			autoContinuesThisPrompt >= config.maxAutoContinuesPerPrompt ||
+			pendingResumeHops >= config.maxAutoContinuesPerPrompt
+		) {
+			if (pendingResumeHops >= config.maxAutoContinuesPerPrompt)
+				logEvent("pending_resume_exhausted", {
+					hops: pendingResumeHops,
+					budget: config.maxAutoContinuesPerPrompt,
+				});
+			parkPendingResume(
+				ctx,
+				parkedSource ?? ctx.model,
+				pendingResume?.reason ?? "recovery budget spent",
+				pendingResume?.mode ?? "auto-continue",
 			);
 			return;
 		}
-		// Rotations that started no turn are the ones `autoContinuesThisPrompt` cannot see, and
-		// they are exactly what the ping-pong was made of. Stop, and say so in terms of what the
-		// user can do about it — the alternative is a wait that looks identical to a hang.
-		if (pendingResumeHops >= config.maxAutoContinuesPerPrompt) {
-			clearPendingContinuation();
-			logEvent("pending_resume_exhausted", {
-				hops: pendingResumeHops,
-				budget: config.maxAutoContinuesPerPrompt,
-			});
-			ctx.ui.notify(
-				`Provider failover: stopped after ${pendingResumeHops} account switches that all landed on a spent account. ` +
-					"Nothing was sent. Run /multi-account status to see when the first account recovers, or send a message to try again.",
-				"warning",
-			);
-			return;
-		}
-
 		refreshDiscovery();
 		reconcileCooldownsFromUsage(ctx, {
 			allowWhenHidden: pendingResume?.mode === "quota-recovery",
@@ -9109,12 +9140,17 @@ ${note}` : basePrompt;
 		options: {
 			mode?: PendingResumeMode;
 			retryDelayMs?: number;
+			/** Earliest wake for any reason, not only temporary failures (parking, safe mode). */
+			notBeforeMs?: number;
+			/** The caller already told the user what happens next. */
+			quiet?: boolean;
 		} = {},
 	) {
 		// A stop that leaves an armed resume behind in the state file is not a stop: the next
 		// session reads it, `status` reports work pending, and the user is told something is
-		// waiting to continue when nothing is.
-		if (governorStopped() || isBreakerOpen() || userAbortedChain) return;
+		// waiting to continue when nothing is. The breaker is NOT a stop: it only delays the
+		// wake (see nextPendingWakeDelayMs), so recovery resumes by itself when it closes.
+		if (governorStopped() || userAbortedChain) return;
 		const from = ref(failedModel.provider, failedModel.id);
 		const alreadyPending = hasPendingResume();
 		const mode = options.mode ?? "auto-continue";
@@ -9126,7 +9162,9 @@ ${note}` : basePrompt;
 			// Backoff belongs to this attempt, never shared account/quota health.
 			retryAt: isTransientPendingReason(reason)
 				? Date.now() + (options.retryDelayMs ?? config.transientCooldownMs)
-				: undefined,
+				: options.notBeforeMs !== undefined
+					? Date.now() + options.notBeforeMs
+					: undefined,
 		};
 		logEvent("pending_resume_set", {
 			session: sessionInstanceId,
@@ -9155,7 +9193,7 @@ ${note}` : basePrompt;
 			return;
 		}
 		schedulePendingWake(ctx);
-		if (!alreadyPending) {
+		if (!alreadyPending && !options.quiet) {
 			const busy = isBusyRetryPendingReason(reason);
 			const transient = isTransientPendingReason(reason);
 			ctx.ui.notify(
@@ -9189,12 +9227,20 @@ ${note}` : basePrompt;
 			consecutiveFailures: failures,
 			error: errorText,
 		});
-		if (failures > BREAKER_FAILURE_THRESHOLD || isBreakerOpen()) {
+		// Temporary failures never end recovery: past the threshold the same route keeps being
+		// retried, with the delay doubling up to TRANSIENT_RETRY_MAX_DELAY_MS.
+		const slowDown = failures > BREAKER_FAILURE_THRESHOLD;
+		const delayMs = slowDown
+			? Math.min(
+					TRANSIENT_RETRY_MAX_DELAY_MS,
+					retryDelayMs * 2 ** Math.min(20, failures - 1 - BREAKER_FAILURE_THRESHOLD),
+				)
+			: retryDelayMs;
+		if (failures === BREAKER_FAILURE_THRESHOLD + 1) {
 			ctx.ui.notify(
-				`Provider retry: stopped after ${failures} failed attempts on ${failedModel.provider}/${failedModel.id}. Provider and model were NOT changed; this is not quota exhaustion. Send a new message to retry.`,
+				`Provider retry: ${failures} failed attempts on ${failedModel.provider}/${failedModel.id}; it keeps retrying by itself, slower each time (up to every ${formatDelay(TRANSIENT_RETRY_MAX_DELAY_MS)}). Provider and model were NOT changed; this is not quota exhaustion.`,
 				"warning",
 			);
-			return;
 		}
 		if (!config.autoContinue) {
 			ctx.ui.notify(`Provider retry: temporary error on ${failedModel.provider}/${failedModel.id}; automatic retry is disabled. Provider and model were NOT changed.`, "warning");
@@ -9204,8 +9250,26 @@ ${note}` : basePrompt;
 			ctx,
 			failedModel,
 			`${TRANSIENT_PENDING_PREFIX} ${errorText.slice(0, 120)}`,
-			{ retryDelayMs },
+			{ retryDelayMs: delayMs, quiet: slowDown },
 		);
+	}
+
+	/**
+	 * A spent auto-continue or rotation budget parks the work instead of cancelling it: the
+	 * budgets stop a fast loop, and a wake breakerCooldownMs later is not one. The governor still
+	 * stops a session whose automatic steps never reach or never get an answer from a provider.
+	 */
+	function parkPendingResume(ctx: any, model: { provider: string; id: string }, reason: string, mode: PendingResumeMode) {
+		const spent = autoContinuesThisPrompt;
+		const hops = pendingResumeHops;
+		autoContinuesThisPrompt = 0;
+		pendingResumeHops = 0;
+		logEvent("pending_resume_parked", { autoContinues: spent, hops, delayMs: config.breakerCooldownMs });
+		ctx.ui.notify(
+			`Provider failover: recovery used its budget (${Math.max(spent, hops)} attempts); it resumes by itself in ~${formatDelay(config.breakerCooldownMs)}. A new message or /multi-account reset continues now.`,
+			"warning",
+		);
+		setPendingContinuation(ctx, model, reason, { mode, notBeforeMs: config.breakerCooldownMs, quiet: true });
 	}
 
 	// ----- cold-start input hold -------------------------------------------

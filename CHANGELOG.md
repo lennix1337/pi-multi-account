@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Recovery never waits for a message
+
+- Work now resumes by itself once a provider answers again, as in Claude Code. Before, three places ended automatic recovery and left the session idle until the user typed: a temporary error stopped after four attempts (seen live on 2026-10-24 with four Anthropic `overloaded_error` replies in 20 s), the circuit breaker dropped the armed wake, and a spent `maxAutoContinuesPerPrompt` or rotation budget cancelled it. Temporary errors now keep retrying the same route with a doubling delay up to 15 minutes; the breaker and a spent budget pause recovery for `breakerCooldownMs` (default 10 minutes) and then resume. The governor still stops a session whose automatic steps never reach or never get an answer from a provider.
+- `Connection error.` (Anthropic SDK) and `terminated` (a closed stream) are temporary errors. Both were logged as `unhandled` and stranded the turn.
+
 ### Context guard
 
 - On Pi 0.87+ the guard runs in `context_with_system`, so it measures the request that is actually sent. In the `context` phase it measured Pi's raw transcript before extensions such as OptChat replaced it: it reported "75% of the 400,000-token window" and queued a summary while the request held 136k tokens. The notice now says "guard limit" and shows the model's own window when the cap is smaller.

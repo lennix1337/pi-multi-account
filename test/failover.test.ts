@@ -6013,7 +6013,7 @@ test("a Cursor transport stall retries the exact route even with healthy alterna
 	}
 });
 
-test("a lone stalled Cursor route stops after bounded retries without quota cooldown", async () => {
+test("a lone stalled Cursor route keeps retrying, slower, without quota cooldown", async () => {
 	installCursorProvider();
 	try {
 		const t = setup({
@@ -6026,20 +6026,18 @@ test("a lone stalled Cursor route stops after bounded retries without quota cool
 		await t.fire("session_start");
 		await t.fire("agent_start");
 
-		for (let attempt = 1; attempt <= 4; attempt++) {
+		for (let attempt = 1; attempt <= 6; attempt++) {
 			await t.fire("message_end", {
 				message: assistantError(
 					"cursor", "cursor-grok-4.6",
 					"Provider finish_reason: error\nCursor Run stalled: no useful output for 5m; stream timed out",
 				),
 			});
-			assert.equal(t.readState().pendingFrom, attempt < 4 ? "cursor/cursor-grok-4.6" : undefined);
+			assert.equal(t.readState().pendingFrom, "cursor/cursor-grok-4.6", `attempt ${attempt} keeps the wake armed`);
 		}
 		assert.deepEqual(t.rec.setModels, []);
 		assert.equal(t.readState().exhaustedUntilByProvider?.cursor, undefined);
-		assert.ok(t.rec.notifies.some((message) => /stopped after 4 failed attempts.*NOT changed/.test(message)));
-		await wait(1100);
-		assert.equal(t.rec.continueCalls.length, 0, "the stopped wake cannot revive itself");
+		assert.ok(t.rec.notifies.some((message) => /keeps retrying.*NOT changed/.test(message)));
 	} finally {
 		uninstallCursorProvider();
 	}
@@ -6149,7 +6147,11 @@ test("Cursor stall evidence survives tool-use progress until the task actually f
 			await t.fire("message_end", { message: stall("cursor") });
 		}
 		assert.deepEqual(t.rec.setModels, []);
-		assert.equal(t.readState().pendingFrom, undefined, "four stalls stop even across successful tools");
+		assert.ok(
+			t.rec.notifies.some((message) => /4 failed attempts.*keeps retrying/.test(message)),
+			"the fourth stall is counted as the fourth even across successful tools, and slows down",
+		);
+		assert.equal(t.readState().pendingFrom, "cursor/cursor-grok-4.6", "slowing down never drops the wake");
 	} finally {
 		uninstallCursorProvider();
 	}
@@ -7424,7 +7426,7 @@ test("the watchdog never aborts a resumed turn while a tool (build/test) is runn
 // v1.13.0 circuit breaker: repeated recovery failures drop to safe advisory mode
 // ---------------------------------------------------------------------------
 
-test("after repeated resume failures the breaker opens and auto-continue stops (advisory mode)", async () => {
+test("after repeated resume failures the breaker opens, pauses auto-continue and keeps a wake for later", async () => {
 	const accounts: Account = {
 		anthropic: { type: "oauth", access: "a", refresh: "ar" },
 		"openai-codex-account-2": {
@@ -7455,6 +7457,10 @@ test("after repeated resume failures the breaker opens and auto-continue stops (
 		t.rec.continueCalls.length,
 		continueCallsAtTrip,
 		"while the breaker is open, no more auto-resume attempts are made (no worse than manual)",
+	);
+	assert.ok(
+		t.readState().pendingFrom,
+		"the breaker only delays recovery: a wake stays armed for when it closes",
 	);
 });
 
@@ -9286,7 +9292,9 @@ test("one Pi window never resumes another window's pending task", async () => {
 	await t.fire("session_shutdown");
 });
 
-test("repeated 500s on an automatic same-model retry trip the breaker instead of looping eight times", async () => {
+test("repeated 500s on an automatic same-model retry slow down at the breaker and then resume by themselves", async () => {
+	// The user's rule: work resumes on its own once a provider answers again, like Claude Code.
+	// The breaker may slow recovery down; it must never leave the session waiting for a message.
 	const provider = "openai-codex-account-2";
 	const error = "500 server error";
 	const t = setup({
@@ -9299,7 +9307,7 @@ test("repeated 500s on an automatic same-model retry trip the breaker instead of
 			},
 		},
 		current: { provider, id: "gpt-5.5" },
-		config: { transientCooldownMs: 25, pendingPollMs: 25 },
+		config: { transientCooldownMs: 25, pendingPollMs: 25, breakerCooldownMs: 2_500 },
 		omitContinueAgent: true,
 	});
 	await t.fire("session_start");
@@ -9314,11 +9322,58 @@ test("repeated 500s on an automatic same-model retry trip the breaker instead of
 
 	assert.ok(
 		t.rec.notifies.some((message) => /safe mode|pausing auto-continue/i.test(message)),
-		"three failed retries must visibly stop automatic continuation",
+		"three failed retries visibly slow automatic continuation down",
 	);
-	assert.equal(t.readState().pendingFrom, undefined, "the breaker must leave no wake armed");
+	assert.equal(t.readState().pendingFrom, `${provider}/gpt-5.5`, "the breaker keeps the wake armed");
+	assert.deepEqual(t.rec.setModels, [], "a temporary failure never changes the route");
 	await wait(1100);
-	assert.equal(t.rec.sent.length, 3, "no fourth synthetic user prompt may be injected");
+	assert.equal(t.rec.sent.length, 3, "nothing is sent while the breaker is open");
+	await wait(2_000);
+	assert.equal(t.rec.sent.length, 4, "the retry resumes by itself once the breaker closes");
+	await t.fire("session_shutdown");
+});
+
+for (const errorText of ["Connection error.", "terminated"]) {
+	test(`"${errorText}" is a temporary failure retried on the same route`, async () => {
+		// Both were logged live as "unhandled" and left the session idle until the user typed.
+		const provider = "openai-codex-account-2";
+		const t = setup({
+			accounts: { [provider]: { type: "oauth", access: "b", refresh: "br", accountId: "codex-2" } },
+			current: { provider, id: "gpt-5.5" },
+			config: { transientCooldownMs: 25, pendingPollMs: 25 },
+			omitContinueAgent: true,
+		});
+		await t.fire("session_start");
+		await t.fire("agent_start");
+		await finishError(t, provider, "gpt-5.5", errorText);
+		assert.equal(t.readState().pendingFrom, `${provider}/gpt-5.5`);
+		await wait(1100);
+		assert.equal(t.rec.sent.length, 1, "the same route is retried without a user message");
+		assert.deepEqual(t.rec.setModels, []);
+		await t.fire("session_shutdown");
+	});
+}
+
+test("a long outage keeps retrying past the auto-continue budget instead of cancelling the wake", async () => {
+	const provider = "openai-codex-account-2";
+	const error = "503 service unavailable";
+	const t = setup({
+		accounts: { [provider]: { type: "oauth", access: "b", refresh: "br", accountId: "codex-2" } },
+		current: { provider, id: "gpt-5.5" },
+		config: { transientCooldownMs: 25, pendingPollMs: 25, breakerCooldownMs: 1_200, maxAutoContinuesPerPrompt: 2 },
+		omitContinueAgent: true,
+	});
+	await t.fire("session_start");
+	await finishError(t, provider, "gpt-5.5", error);
+	for (let attempt = 0; attempt < 2; attempt++) {
+		await wait(1100);
+		assert.equal(t.rec.sent.length, attempt + 1);
+		await t.fire("before_agent_start", {});
+		await finishError(t, provider, "gpt-5.5", error);
+	}
+	assert.equal(t.readState().pendingFrom, `${provider}/gpt-5.5`, "a spent budget parks the wake, it does not cancel it");
+	await wait(3_000);
+	assert.equal(t.rec.sent.length, 3, "after the parking delay the work resumes without a user message");
 	await t.fire("session_shutdown");
 });
 

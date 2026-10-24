@@ -92,7 +92,8 @@
     "@earendil-works/pi-ai": "0.87.1",
     "@earendil-works/pi-coding-agent": "0.87.1",
     "@types/node": "^22.20.4",
-    "typescript": "^6.0.3"
+    "@typescript/typescript6": "^6.0.2",
+    "typescript": "^7.0.2"
   },
   "pi": {
     "extensions": [

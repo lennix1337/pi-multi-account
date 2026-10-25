@@ -19,7 +19,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { VERSION as PI_HOST_VERSION } from "@earendil-works/pi-coding-agent";
 import { piAutoPersistsSelectedModel, piHasContextWithSystem } from "../pi-contract.ts";
 import { childFacingAuthEntryForSlot } from "../slot-proxy-auth.ts";
@@ -14388,4 +14388,86 @@ test("two extension instances retain each other's newly observed account failure
  await a.fire("session_shutdown");
  assert.ok(a.readState().exhaustedUntilByProvider["openai-codex-account-2"] > Date.now());
  await b.fire("session_shutdown");
+});
+
+// ---------------------------------------------------------------------------
+// Automatic resume when quota returns (fake clock; no user message ever)
+// ---------------------------------------------------------------------------
+
+/** Run `body` on a fake setTimeout/Date; `tick` also drains the async work each timer starts. */
+async function onFakeClock(body: (tick: (ms: number) => Promise<void>) => Promise<void>) {
+	mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+	const tick = async (ms: number) => {
+		for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+			mock.timers.tick(Math.min(100, ms - elapsed));
+			for (let i = 0; i < 20; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+	};
+	try { await body(tick); } finally { mock.timers.reset(); }
+}
+
+const QUOTA_ERROR = "429 usage limit reached";
+const QUOTA_CONFIG = { cooldownMs: 60_000, probeCooldownMs: 60_000, pendingPollMs: 30_000 };
+
+test("quota auto-resume: no goal, all accounts exhausted -> one continuation at the reset, never earlier", async () => {
+	const t = setup({ accounts: ONE_ACCOUNT, current: { provider: "anthropic", id: "claude-opus-4-8" }, config: QUOTA_CONFIG });
+	await onFakeClock(async (tick) => {
+		await finishError(t, "anthropic", "claude-opus-4-8", QUOTA_ERROR);
+		assert.ok(t.readState().pendingFrom, "the stopped turn is parked, not dropped");
+		await tick(50_000);
+		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 0, "no probe or resume before the reset");
+		await tick(15_000);
+		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 1, "resumes once the account is back");
+		await tick(600_000);
+		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 1, "exactly once: no double resume");
+		assert.equal(t.readState().pendingFrom, undefined);
+	});
+	await t.fire("session_shutdown");
+});
+
+test("quota auto-resume: repeated exhaustion cycles each resume exactly once", async () => {
+	const t = setup({ accounts: ONE_ACCOUNT, current: { provider: "anthropic", id: "claude-opus-4-8" }, config: QUOTA_CONFIG });
+	await onFakeClock(async (tick) => {
+		for (let cycle = 1; cycle <= 3; cycle++) {
+			await finishError(t, "anthropic", "claude-opus-4-8", QUOTA_ERROR);
+			await tick(70_000);
+			assert.equal(t.rec.continueCalls.length + t.rec.sent.length, cycle, `cycle ${cycle} resumed once`);
+			await t.fire("before_agent_start", {});
+		}
+		await tick(600_000);
+		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 3);
+	});
+	await t.fire("session_shutdown");
+});
+
+test("quota auto-resume: a message the user types meanwhile cancels the automatic resume", async () => {
+	const t = setup({ accounts: ONE_ACCOUNT, current: { provider: "anthropic", id: "claude-opus-4-8" }, config: QUOTA_CONFIG });
+	await onFakeClock(async (tick) => {
+		await finishError(t, "anthropic", "claude-opus-4-8", QUOTA_ERROR);
+		await tick(20_000);
+		assert.ok(t.readState().pendingFrom, "precondition: a resume is armed");
+		await t.input("do something else instead");
+		await tick(600_000);
+		assert.equal(t.rec.continueCalls.length, 0, "the user owns the session; nothing is resumed behind their back");
+		assert.equal(t.readState().pendingFrom, undefined);
+	});
+	await t.fire("session_shutdown");
+});
+
+test("quota auto-resume: with two accounts the first to recover resumes, once", async () => {
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		config: QUOTA_CONFIG,
+		seedCooldownsMsFromNow: { anthropic: 40_000, "openai-codex-account-2": 3_600_000 },
+	});
+	await onFakeClock(async (tick) => {
+		await finishError(t, "anthropic", "claude-opus-4-8", QUOTA_ERROR);
+		await tick(30_000);
+		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 0);
+		await tick(30_000);
+		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 1);
+		await tick(900_000);
+		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 1);
+	});
+	await t.fire("session_shutdown");
 });

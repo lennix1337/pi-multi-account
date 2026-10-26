@@ -298,6 +298,9 @@ const ONE_ACCOUNT: Account = {
 
 let messageTimestamp = 1;
 
+/** Shuts down each fixture a test left running; a leftover's real-time wake would otherwise fire inside a later fake-clock test. */
+const liveFixtures = new Set<() => Promise<unknown>>();
+
 function setup(opts: {
 	accounts?: Account;
 	current?: { provider: string; id: string };
@@ -857,6 +860,7 @@ function setup(opts: {
 		}
 	};
 
+	liveFixtures.add(() => fire("session_shutdown", {}));
 	return {
 		ctx,
 		rec,
@@ -1095,8 +1099,20 @@ test("a failed pin write preserves the previous runtime preference", async () =>
 	assert.deepEqual(t.rec.setModels, []);
 });
 
-function wait(ms: number) {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+/** Inside onFakeClock, waiting advances the fake clock instead of the wall clock. */
+let fakeTick: ((ms: number) => Promise<void>) | undefined;
+
+function wait(ms: number): Promise<unknown> {
+	return fakeTick ? fakeTick(ms) : new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A test whose recovery timers run on the fake clock: its waits cost no wall time, and every timer still fires in order. */
+function fakeClockTest(name: string, body: () => Promise<void>) {
+	test(name, async () => {
+		for (const shutdown of liveFixtures) await shutdown().catch(() => undefined);
+		liveFixtures.clear();
+		await onFakeClock(() => body());
+	});
 }
 
 function assistantError(provider: string, model: string, errorMessage: string) {
@@ -2958,7 +2974,7 @@ test("all-limited work resumes in the same live session after cooldown", async (
 	assert.ok(!t.readState().pendingFrom);
 });
 
-test("quota recovery is independent from immediate auto-continue", async () => {
+fakeClockTest("quota recovery is independent from immediate auto-continue", async () => {
 	const t = setup({
 		accounts: ONE_ACCOUNT,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -2977,7 +2993,7 @@ test("quota recovery is independent from immediate auto-continue", async () => {
 	assert.equal(t.readState().pendingFrom, undefined);
 });
 
-test("quota recovery can be disabled without disabling immediate auto-continue", async () => {
+fakeClockTest("quota recovery can be disabled without disabling immediate auto-continue", async () => {
 	const t = setup({
 		accounts: ONE_ACCOUNT,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -3624,7 +3640,7 @@ test("manual next keeps every account selectable and always at its flagship mode
 	);
 });
 
-test("resume fires on whichever account recovers first, not rotation order", async () => {
+fakeClockTest("resume fires on whichever account recovers first, not rotation order", async () => {
 	const accounts: Account = {
 		anthropic: { type: "oauth", access: "a", refresh: "ar" },
 		"openai-codex-account-2": {
@@ -5825,7 +5841,7 @@ test("remove without args prints usage", async () => {
 	assert.match(notice, /usage:.*remove/i);
 });
 
-test("transient overload retries the same account instead of rotating siblings", async () => {
+fakeClockTest("transient overload retries the same account instead of rotating siblings", async () => {
 	const accounts: Account = {
 		"openai-codex-account-2": {
 			type: "oauth",
@@ -5875,7 +5891,7 @@ test("transient overload retries the same account instead of rotating siblings",
 	assert.equal(t.rec.sent.length, 0);
 });
 
-test("a successful Pi-native retry cancels the extension's same-route wake", async () => {
+fakeClockTest("a successful Pi-native retry cancels the extension's same-route wake", async () => {
 	const provider = "kimi-coding";
 	const t = setup({
 		accounts: {
@@ -5900,7 +5916,7 @@ test("a successful Pi-native retry cancels the extension's same-route wake", asy
 	assert.equal(t.rec.sent.length, 0, "no synthetic retry prompt may follow success");
 });
 
-test("a second consecutive transient error keeps the route and a native success cancels its wake", async () => {
+fakeClockTest("a second consecutive transient error keeps the route and a native success cancels its wake", async () => {
 	// Owner correction 2026-09-16: even repeated 500s are not quota evidence.
 	// Native retries count toward the bound, but must never authorize route switching.
 	const t = setup({
@@ -6157,7 +6173,7 @@ test("Cursor stall evidence survives tool-use progress until the task actually f
 	}
 });
 
-test("repeated transient errors still resume the same route when Pi has no native retry left", async () => {
+fakeClockTest("repeated transient errors still resume the same route when Pi has no native retry left", async () => {
 	const t = setup({
 		accounts: {
 			"kimi-coding": { type: "oauth", access: "k1", refresh: "kr1" },
@@ -6296,7 +6312,7 @@ test("does not re-resume from a successful assistant turn (the 'Cannot continue 
 	);
 });
 
-test("successful completion cancels a pending same-model retry", async () => {
+fakeClockTest("successful completion cancels a pending same-model retry", async () => {
 	const t = setup({
 		accounts: ONE_ACCOUNT,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -6341,7 +6357,7 @@ test("successful completion cancels a resume already waiting for the host to go 
 	}
 });
 
-test("successful completion cancels a retry waiting for its model switch", async () => {
+fakeClockTest("successful completion cancels a retry waiting for its model switch", async () => {
 	let release: () => void = () => {};
 	const blocked = new Promise<void>((resolve) => { release = resolve; });
 	let switchStarted = false;
@@ -6376,7 +6392,7 @@ test("successful completion cancels a retry waiting for its model switch", async
 	}
 });
 
-test("successful completion cancels prompt injection after a pending continuation rejects", async () => {
+fakeClockTest("successful completion cancels prompt injection after a pending continuation rejects", async () => {
 	let release: () => void = () => {};
 	const blocked = new Promise<void>((resolve) => { release = resolve; });
 	const t = setup({
@@ -6531,7 +6547,7 @@ test("an un-continuable resume (e.g. tail aborted by the watchdog) recovers by i
 	);
 });
 
-test("a rejected prompt injection remains armed and retries on the selected fallback", async () => {
+fakeClockTest("a rejected prompt injection remains armed and retries on the selected fallback", async () => {
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		config: { pendingPollMs: 25 },
@@ -7678,7 +7694,7 @@ test("neverFailoverProviders leaves native compaction on the exempt provider des
 	} finally { await t.fire("session_shutdown"); }
 });
 
-test("adding neverFailoverProviders while a retry is pending cancels that extension-owned wake", async () => {
+fakeClockTest("adding neverFailoverProviders while a retry is pending cancels that extension-owned wake", async () => {
 	const t = setup({ current: { provider: "cerebras", id: "qwen-3.8-27b" },
 		accounts: { ...TWO_ACCOUNTS, cerebras: { type: "api_key", key: "fixture-only" } },
 		config: { childProxy: false, transientCooldownMs: 25, pendingPollMs: 25 } });
@@ -9200,7 +9216,7 @@ test("pending same-account resume shares its recovery lease with nested provider
 	}
 });
 
-test("a same-account pending resume auto-continues on a host without pi.continueAgent", async () => {
+fakeClockTest("a same-account pending resume auto-continues on a host without pi.continueAgent", async () => {
 	// The regression: `currentPromptSwitch` is set only when we ROTATE accounts. A transient
 	// overload deliberately retries the SAME account, so there is no switch record — and the
 	// injection fallback used to require one. On every build since pi-coding-agent 0.80.3
@@ -9251,7 +9267,7 @@ test("a same-account pending resume auto-continues on a host without pi.continue
 	assert.doesNotMatch(String(t.rec.sent[0].prompt), /switched to .* after .*\/gpt-5\.5/i);
 });
 
-test("one Pi window never resumes another window's pending task", async () => {
+fakeClockTest("one Pi window never resumes another window's pending task", async () => {
 	const provider = "openai-codex-account-2";
 	const t = setup({
 		accounts: {
@@ -9310,31 +9326,33 @@ test("repeated 500s on an automatic same-model retry slow down at the breaker an
 		config: { transientCooldownMs: 25, pendingPollMs: 25, breakerCooldownMs: 2_500 },
 		omitContinueAgent: true,
 	});
-	await t.fire("session_start");
-	await finishError(t, provider, "gpt-5.5", error);
-
-	for (let attempt = 0; attempt < 3; attempt++) {
-		await wait(1100);
-		assert.equal(t.rec.sent.length, attempt + 1, "one extension retry per recovery attempt");
-		await t.fire("before_agent_start", {});
+	await onFakeClock(async (tick) => {
+		await t.fire("session_start");
 		await finishError(t, provider, "gpt-5.5", error);
-	}
 
-	assert.ok(
-		t.rec.notifies.some((message) => /safe mode|pausing auto-continue/i.test(message)),
-		"three failed retries visibly slow automatic continuation down",
-	);
-	assert.equal(t.readState().pendingFrom, `${provider}/gpt-5.5`, "the breaker keeps the wake armed");
-	assert.deepEqual(t.rec.setModels, [], "a temporary failure never changes the route");
-	await wait(1100);
-	assert.equal(t.rec.sent.length, 3, "nothing is sent while the breaker is open");
-	await wait(2_000);
-	assert.equal(t.rec.sent.length, 4, "the retry resumes by itself once the breaker closes");
-	await t.fire("session_shutdown");
+		for (let attempt = 0; attempt < 3; attempt++) {
+			await tick(1100);
+			assert.equal(t.rec.sent.length, attempt + 1, "one extension retry per recovery attempt");
+			await t.fire("before_agent_start", {});
+			await finishError(t, provider, "gpt-5.5", error);
+		}
+
+		assert.ok(
+			t.rec.notifies.some((message) => /safe mode|pausing auto-continue/i.test(message)),
+			"three failed retries visibly slow automatic continuation down",
+		);
+		assert.equal(t.readState().pendingFrom, `${provider}/gpt-5.5`, "the breaker keeps the wake armed");
+		assert.deepEqual(t.rec.setModels, [], "a temporary failure never changes the route");
+		await tick(1100);
+		assert.equal(t.rec.sent.length, 3, "nothing is sent while the breaker is open");
+		await tick(2_000);
+		assert.equal(t.rec.sent.length, 4, "the retry resumes by itself once the breaker closes");
+		await t.fire("session_shutdown");
+	});
 });
 
 for (const errorText of ["Connection error.", "terminated"]) {
-	test(`"${errorText}" is a temporary failure retried on the same route`, async () => {
+	fakeClockTest(`"${errorText}" is a temporary failure retried on the same route`, async () => {
 		// Both were logged live as "unhandled" and left the session idle until the user typed.
 		const provider = "openai-codex-account-2";
 		const t = setup({
@@ -9363,21 +9381,23 @@ test("a long outage keeps retrying past the auto-continue budget instead of canc
 		config: { transientCooldownMs: 25, pendingPollMs: 25, breakerCooldownMs: 1_200, maxAutoContinuesPerPrompt: 2 },
 		omitContinueAgent: true,
 	});
-	await t.fire("session_start");
-	await finishError(t, provider, "gpt-5.5", error);
-	for (let attempt = 0; attempt < 2; attempt++) {
-		await wait(1100);
-		assert.equal(t.rec.sent.length, attempt + 1);
-		await t.fire("before_agent_start", {});
+	await onFakeClock(async (tick) => {
+		await t.fire("session_start");
 		await finishError(t, provider, "gpt-5.5", error);
-	}
-	assert.equal(t.readState().pendingFrom, `${provider}/gpt-5.5`, "a spent budget parks the wake, it does not cancel it");
-	await wait(3_000);
-	assert.equal(t.rec.sent.length, 3, "after the parking delay the work resumes without a user message");
-	await t.fire("session_shutdown");
+		for (let attempt = 0; attempt < 2; attempt++) {
+			await tick(1100);
+			assert.equal(t.rec.sent.length, attempt + 1);
+			await t.fire("before_agent_start", {});
+			await finishError(t, provider, "gpt-5.5", error);
+		}
+		assert.equal(t.readState().pendingFrom, `${provider}/gpt-5.5`, "a spent budget parks the wake, it does not cancel it");
+		await tick(3_000);
+		assert.equal(t.rec.sent.length, 3, "after the parking delay the work resumes without a user message");
+		await t.fire("session_shutdown");
+	});
 });
 
-test("a blocked continuation records why, instead of failing silently", async () => {
+fakeClockTest("a blocked continuation records why, instead of failing silently", async () => {
 	// Every refusal used to be silent, so a session that stopped continuing by itself left
 	// nothing in the debug log to explain it — the visible warning blamed the Pi build even
 	// when the real cause was a spent auto-continue budget or a disabled autoContinue.
@@ -9420,7 +9440,7 @@ test("a blocked continuation records why, instead of failing silently", async ()
 // Verify, don't predict: a provider's forecast never parks an account
 // ---------------------------------------------------------------------------
 
-test("a month-long quota forecast cannot park an account past the recheck ceiling", async () => {
+fakeClockTest("a month-long quota forecast cannot park an account past the recheck ceiling", async () => {
 	// Providers reset quota windows early and unannounced, and resize the windows themselves, so
 	// "used 100%, resets in 29 days" is a forecast about the future — not evidence. Before the
 	// ceiling it was treated as authoritative ground truth REGARDLESS of snapshot age, so a single
@@ -9485,7 +9505,7 @@ test("a month-long quota forecast cannot park an account past the recheck ceilin
 	);
 });
 
-test("once the recheck ceiling elapses, an untried account still outranks one that refused", async () => {
+fakeClockTest("once the recheck ceiling elapses, an untried account still outranks one that refused", async () => {
 	// The ceiling deliberately puts a refused account BACK in the candidate pool. Ordering is then
 	// the only thing keeping us off it: rotation position alone would send us straight back to the
 	// account that just said "usage limit reached", get the same refusal, and loop between spent
@@ -13694,7 +13714,7 @@ function spentCodexFleetState(now: number, extra: Record<string, unknown> = {}) 
 	};
 }
 
-test("two spent siblings cannot rotate onto each other for ever while a live account waits", async () => {
+fakeClockTest("two spent siblings cannot rotate onto each other for ever while a live account waits", async () => {
 	const now = Date.now();
 	const t = setup({
 		accounts: SPENT_CODEX_FLEET,
@@ -13783,7 +13803,7 @@ test("the resume timer only rotates onto an account it could actually resume on"
 	await t.fire("session_shutdown");
 });
 
-test("a rotation that reaches nothing usable stops instead of polling for ever", async () => {
+fakeClockTest("a rotation that reaches nothing usable stops instead of polling for ever", async () => {
 	// Same fleet, but the Anthropic account is spent too — so there is genuinely nowhere to go.
 	// The wait itself must then be finite and say so, rather than switching account every second
 	// until the user kills the session.
@@ -14403,7 +14423,8 @@ async function onFakeClock(body: (tick: (ms: number) => Promise<void>) => Promis
 			for (let i = 0; i < 20; i++) await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 	};
-	try { await body(tick); } finally { mock.timers.reset(); }
+	fakeTick = tick;
+	try { await body(tick); } finally { fakeTick = undefined; mock.timers.reset(); }
 }
 
 const QUOTA_ERROR = "429 usage limit reached";

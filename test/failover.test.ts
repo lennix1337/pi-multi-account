@@ -11977,6 +11977,37 @@ test("a context-guard compaction continues only after its completion callback", 
 	assert.match(t.rec.sent[0].prompt, /compacted automatically/i);
 });
 
+test("a context-guard continuation rejection is caught and releases recovery", async () => {
+	const t = setup({
+		current: { provider: "openai-codex", id: "gpt-5.6-sol" },
+		compactSilent: true,
+		sendUserMessageRejects: 1,
+	});
+	t.ctx.model.contextWindow = 272_000;
+	t.ctx.getSystemPrompt = () => "";
+
+	await t.fire("context", { messages: bigConversation(50) });
+	t.setIdle(true);
+	await t.fire("agent_settled", {});
+	const onComplete = t.rec.compacts[0].onComplete as (result: unknown) => void;
+	const logStart = readDebugLog().length;
+	onComplete({ summary: "test summary" });
+	await wait(0);
+
+	const dispatchLog = readDebugLog().slice(logStart);
+	assert.ok(dispatchLog.some((event) => event.kind === "compaction_continue_failed"),
+		"an asynchronously rejected dispatch must reach the failure handler");
+	assert.ok(!dispatchLog.some((event) => event.kind === "compaction_continue"),
+		"a rejected continuation must not be reported as queued");
+	assert.ok(t.rec.notifies.some((notice) => /could not resume.*compaction/i.test(notice)),
+		"the operator must see that the task did not resume");
+
+	const failure = assistantError("openai-codex", "gpt-5.6-sol", "429 rate limit exceeded");
+	await t.fire("message_end", { message: failure });
+	assert.ok(t.rec.setModels.length > 0,
+		"the failed compaction continuation must release its lease for later recovery");
+});
+
 test("a context-guard policy refusal cannot auto-continue or start another compaction", async () => {
 	const t = setup({
 		current: { provider: "openai-codex", id: "gpt-5.6-sol" },

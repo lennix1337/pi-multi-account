@@ -11078,7 +11078,7 @@ ${note}` : basePrompt;
 	 * during session_compact would merely append it to history and never run it. A user message
 	 * after the callback both starts a real turn and keeps the normal continuation budget/marker.
 	 */
-	function dispatchContextGuardContinuation(
+	async function dispatchContextGuardContinuation(
 		ctx: any,
 		parentLease?: AutomaticRecoveryLease,
 		epoch = contextGuardRecoveryEpoch,
@@ -11147,7 +11147,7 @@ ${note}` : basePrompt;
 		recoveryLease.markRecovering("context_limit", ctx?.model?.provider, ctx?.model?.id);
 		expectingInjectedContinuation = true;
 		try {
-			pi.sendUserMessage(CONTINUE_AFTER_COMPACTION_PROMPT, {
+			await pi.sendUserMessage(CONTINUE_AFTER_COMPACTION_PROMPT, {
 				deliverAs: "followUp",
 			});
 			continuationQueued = true;
@@ -11164,6 +11164,10 @@ ${note}` : basePrompt;
 			logEvent("compaction_continue_failed", {
 				error: String(error).slice(0, 200),
 			});
+			ctx.ui?.notify?.(
+				"Multi Account could not resume after compaction. The continuation was rejected; inspect the transcript before continuing manually.",
+				"warning",
+			);
 		}
 		} finally {
 			if (!continuationQueued) {

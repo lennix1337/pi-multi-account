@@ -17,6 +17,11 @@
       "argv": ["node", "--test", "test/interrupted-context.test.ts"],
       "timeoutMs": 30000
     },
+    "compaction-dispatch": {
+      "description": "Offline context-guard continuation acceptance and async rejection regressions",
+      "argv": ["node", "--test", "--test-name-pattern", "context-guard.*(compaction continues|continuation rejection|cannot revive recovery)", "test/failover.test.ts"],
+      "timeoutMs": 120000
+    },
     "interrupted-handoff": {
       "description": "Offline interrupted-context and failover regressions; no live account switch",
       "argv": ["node", "--test", "test/interrupted-context.test.ts", "test/failover.test.ts"],

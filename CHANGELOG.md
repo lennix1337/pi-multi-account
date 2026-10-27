@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Context guard
 
+- Await the host's post-compaction continuation dispatch so an asynchronous rejection is caught, logged, and shown as a warning rather than becoming an unhandled rejection. Failed dispatches release their recovery lease and are not reported as queued.
 - On Pi 0.87+ the guard runs in `context_with_system`, so it measures the request that is actually sent. In the `context` phase it measured Pi's raw transcript before extensions such as OptChat replaced it: it reported "75% of the 400,000-token window" and queued a summary while the request held 136k tokens. The notice now says "guard limit" and shows the model's own window when the cap is smaller.
 
 ### Fixed

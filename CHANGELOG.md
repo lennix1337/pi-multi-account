@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Anthropic API-key usage
+
+- Identify Console API keys as `api-key` instead of reporting `ready · usage unavailable` after an OAuth-only usage request fails. API-key metadata stays offline and does not infer a Max plan, account identity, quota, or promotional balance. `accounts` and `limits` point to Console Billing's Promotional credits for the remaining amount and expiry; Claude OAuth quota behavior is unchanged.
+
 ### Recovery never waits for a message
 
 - Work now resumes by itself once a provider answers again, as in Claude Code. Before, three places ended automatic recovery and left the session idle until the user typed: a temporary error stopped after four attempts (seen live on 2026-10-24 with four Anthropic `overloaded_error` replies in 20 s), the circuit breaker dropped the armed wake, and a spent `maxAutoContinuesPerPrompt` or rotation budget cancelled it. Temporary errors now keep retrying the same route with a doubling delay up to 15 minutes; the breaker and a spent budget pause recovery for `breakerCooldownMs` (default 10 minutes) and then resume. The governor still stops a session whose automatic steps never reach or never get an answer from a provider.

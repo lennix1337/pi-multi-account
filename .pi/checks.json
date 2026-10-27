@@ -2,6 +2,11 @@
   "version": 1,
   "checks": {
     "typecheck": {"description":"TypeScript no-emit check", "onEdit":true, "argv":["node","node_modules/typescript/bin/tsc","--noEmit"], "timeoutMs":120000},
+    "anthropic-api-key": {
+      "description": "Offline Anthropic API-key identity, balance guidance and OAuth usage regressions; no inference or live credential access",
+      "argv": ["node", "--test", "--test-name-pattern", "Anthropic|anthropic", "test/usage.test.ts", "test/failover.test.ts"],
+      "timeoutMs": 120000
+    },
     "unit": {"description":"Full offline lifecycle and routing regression suite", "argv":["node","--test","test/*.test.ts"], "timeoutMs":600000},
     "pack": {"description":"npm pack --dry-run contents, size, version and peer-range checks; no publication", "argv":["node","scripts/check-package.mjs"], "timeoutMs":120000},
     "privacy": {"description":"Personal-identifier scan over tracked files", "argv":["node","scripts/check-tracked-privacy.mjs"], "timeoutMs":60000},

@@ -9988,6 +9988,32 @@ test("accounts lists provider identity, quota and routing state without credenti
 	assert.doesNotMatch(table, /anthropic-secret|anthropic-refresh|codex-secret|codex-refresh|workspace-safe-id/);
 });
 
+test("accounts refresh identifies Anthropic API keys and explains promotional balance without network", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = (async () => { calls++; throw new Error("no provider requests allowed"); }) as typeof fetch;
+	try {
+		const t = setup({
+			accounts: { anthropic: { type: "api_key", key: "fake-anthropic-key" } },
+			current: { provider: "anthropic", id: "claude-opus-4-8" },
+			config: { showUsage: false },
+		});
+		await t.command("accounts refresh");
+		const table = t.rec.notifies.at(-1) ?? "";
+		assert.match(table, /anthropic\s+—\s+—\s+api-key\s+—\s+—\s+—\s+ready/);
+		assert.match(table, /promotional.*balance.*not.*exposed/i);
+		assert.match(table, /https:\/\/platform\.claude\.com\/settings\/billing/);
+		assert.doesNotMatch(table, /usage unavailable|fake-anthropic-key|Max|\$100/);
+		await t.command("limits");
+		const details = t.rec.notifies.at(-1) ?? "";
+		assert.match(details, /api-key/);
+		assert.match(details, /Promotional credits/);
+		assert.equal(calls, 0);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
 test("accounts refresh explicitly loads every supported account while the footer is disabled", async () => {
 	const originalFetch = globalThis.fetch;
 	let authorization = "";

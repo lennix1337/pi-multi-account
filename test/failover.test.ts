@@ -346,6 +346,8 @@ function setup(opts: {
 	omitSendUserMessage?: boolean;
 	/** Reject this many prompt-injection attempts before accepting one. */
 	sendUserMessageRejects?: number;
+	/** Host dispatch may resolve only after the resumed run ends. */
+	sendUserMessageBlocks?: () => Promise<void>;
 	/** Models the HOST (Pi) itself publishes for the base Codex provider. */
 	hostCodexModels?: string[];
 	/** Optional exact host catalog by provider, used for cross-family/apex routing tests. */
@@ -715,6 +717,7 @@ function setup(opts: {
 				sendUserMessageRejects--;
 				throw new Error("Agent is already processing");
 			}
+			if (opts.sendUserMessageBlocks) await opts.sendUserMessageBlocks();
 		},
 		sendMessage: (message: Record<string, unknown>, options?: Record<string, unknown>) => {
 			rec.customMessages.push({ message, options });
@@ -12006,6 +12009,33 @@ test("a context-guard continuation rejection is caught and releases recovery", a
 	await t.fire("message_end", { message: failure });
 	assert.ok(t.rec.setModels.length > 0,
 		"the failed compaction continuation must release its lease for later recovery");
+});
+
+test("a context-guard continuation cannot revive recovery after its turn ends", async () => {
+	let releaseDispatch!: () => void;
+	const dispatched = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+	const t = setup({
+		current: { provider: "openai-codex", id: "gpt-5.6-sol" },
+		compactSilent: true,
+		sendUserMessageBlocks: () => dispatched,
+	});
+	t.ctx.model.contextWindow = 272_000;
+	t.ctx.getSystemPrompt = () => "";
+	await t.fire("context", { messages: bigConversation(50) });
+	t.setIdle(true);
+	await t.fire("agent_settled", {});
+	const onComplete = t.rec.compacts[0].onComplete as (result: unknown) => void;
+	onComplete({ summary: "test summary" });
+	assert.equal(t.rec.sent.length, 1);
+
+	await t.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] });
+	releaseDispatch();
+	await wait(0);
+	await t.fire("message_end", {
+		message: assistantError("openai-codex", "gpt-5.6-sol", "429 rate limit exceeded"),
+	});
+	assert.ok(t.rec.setModels.length > 0,
+		"a settled dispatch must not retain a stale lease that blocks the next recovery");
 });
 
 test("a context-guard policy refusal cannot auto-continue or start another compaction", async () => {

@@ -19,7 +19,7 @@
     },
     "compaction-dispatch": {
       "description": "Offline context-guard continuation acceptance and async rejection regressions",
-      "argv": ["node", "--test", "--test-name-pattern", "context-guard.*(compaction continues|continuation rejection)", "test/failover.test.ts"],
+      "argv": ["node", "--test", "--test-name-pattern", "context-guard.*(compaction continues|continuation rejection|cannot revive recovery)", "test/failover.test.ts"],
       "timeoutMs": 120000
     },
     "interrupted-handoff": {

@@ -52,6 +52,9 @@ export type UsageSnapshot = {
 	};
 };
 
+export const ANTHROPIC_API_KEY_BILLING_NOTE =
+	"Anthropic API key: promotional credit balance is not exposed by this key. See Promotional credits (remaining amount and expiry): https://platform.claude.com/settings/billing";
+
 export type UsageCredential = {
 	type?: string;
 	access?: string;
@@ -904,6 +907,16 @@ export async function fetchUsageSnapshot(
 	}
 	if (family === "xai") return fetchXaiUsageSnapshot(provider, credential, options);
 	if (family === "zai-coding-cn") return fetchZaiCodingCnUsageSnapshot(provider, credential, options);
+	if (family === "anthropic" && credential.type === "api_key" && credential.key?.trim()) {
+		// OAuth quota windows belong to Claude subscriptions, not Console API credits.
+		return {
+			provider,
+			family,
+			fetchedAt: Date.now(),
+			credentialHash: options.credentialHash,
+			plan: "api-key",
+		};
+	}
 	if (credential.type !== "oauth" || !credential.access) {
 		throw new UsageFetchError(`${provider} has no OAuth access token`);
 	}
@@ -1117,6 +1130,8 @@ export function formatUsageDetails(snapshot: UsageSnapshot, now = Date.now()): s
 			`${label}: ${remainingPercent(window)}% left (${Math.round(window.usedPercent)}% used), resets in ${formatResetDuration(window.resetAt, now)} at ${new Date(window.resetAt).toLocaleString()}`,
 		);
 	}
+	if (snapshot.family === "anthropic" && snapshot.plan === "api-key")
+		lines.push(ANTHROPIC_API_KEY_BILLING_NOTE);
 	if (snapshot.credits?.unlimited) lines.push("Credits: unlimited");
 	else if (snapshot.credits?.balance !== undefined) lines.push(`Credits: ${snapshot.credits.balance}`);
 	lines.push(`Updated ${formatResetDuration(now, snapshot.fetchedAt)} ago`);

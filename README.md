@@ -138,6 +138,26 @@ All three names are aliases for the same command: `/multi-account`, `/provider-f
 
 Unknown subcommands, surplus arguments and malformed `log N`, `limits`, or `only-active` arguments are rejected with a usage warning before discovery refresh or any state change. Subcommand names are case-insensitive; `on`, `off` and `refresh` must be lowercase. `help` and `-h` are not subcommands; use `status`.
 
+### Anthropic API keys and Max promotional credits
+
+An Anthropic Console API key is not a Claude OAuth login. After
+`/multi-account accounts refresh`, the table and footer identify it as `api-key`
+(the credential type, not a detected subscription plan). It does not request
+OAuth quota windows, infer your email or Max plan, or spend tokens to check usage.
+`ready` remains a routing state, not proof of key validity or remaining funds.
+
+The remaining promotional credit and expiry are shown under **Promotional credits**
+in [Console Billing](https://platform.claude.com/settings/billing); `accounts` and
+`limits` include this destination for API keys. A normal API key does not expose
+that balance. The Admin Usage/Cost API requires separate administrative credentials
+and reports usage/spend, not the remaining promotional balance.
+
+[Max 5x includes $100 per billing cycle](https://platform.claude.com/docs/en/about-claude/api-credits-for-subscribers)
+once claimed for a linked Console organization. Those credits expire without
+rollover, are shared by all keys/workspaces in the organization, and refresh on
+the subscription billing cycle, not necessarily the first of the month. Local
+Pi cost estimates or `100 - spend` are not an authoritative balance.
+
 ### Model pins
 
 ```text

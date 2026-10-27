@@ -314,6 +314,7 @@ import {
 	type CodexCatalogSnapshot,
 } from "./model-catalog.ts";
 import {
+	ANTHROPIC_API_KEY_BILLING_NOTE,
 	fetchUsageSnapshot,
 	formatResetDuration,
 	formatUsageCompact,
@@ -5677,7 +5678,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	function renderAccountTable(ctx: any): string {
 		refreshDiscovery(false, ctx);
 		const now = Date.now();
-		const rows = accountRows(ctx, now).map(({ provider, snapshot, status }) => {
+		const accounts = accountRows(ctx, now);
+		const rows = accounts.map(({ provider, snapshot, status }) => {
 			const account = snapshot?.account ?? "—";
 			const alias =
 				snapshot?.account && snapshot.account.includes("@")
@@ -5708,6 +5710,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			line(header),
 			line(widths.map((width) => "-".repeat(width))),
 			...rows.map(line),
+			...(accounts.some(({ snapshot }) => snapshot?.family === "anthropic" && snapshot.plan === "api-key")
+				? [ANTHROPIC_API_KEY_BILLING_NOTE] : []),
 			"Use /multi-account accounts refresh to refresh every supported account explicitly.",
 		].join("\n");
 	}

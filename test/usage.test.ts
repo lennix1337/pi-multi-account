@@ -3,6 +3,7 @@ import test from "node:test";
 import {
 	fetchUsageSnapshot,
 	formatUsageCompact,
+	formatUsageDetails,
 	parseAnthropicUsageBody,
 	parseCodexUsageBody,
 	parseXaiUsageBody,
@@ -448,6 +449,37 @@ test("a footer for an account with no email is unchanged", () => {
 	});
 	assert.equal(snapshot?.account, undefined);
 	assert.doesNotMatch(formatUsageCompact(snapshot!, Date.now()), /·\s*\|/);
+});
+
+test("Anthropic API keys identify API billing without OAuth calls or invented credit", async () => {
+	let calls = 0;
+	const fetchImpl = (async () => {
+		calls++;
+		throw new Error("API-key metadata must stay offline");
+	}) as typeof fetch;
+	for (const provider of ["anthropic", "anthropic-account-2"]) {
+		const snapshot = await fetchUsageSnapshot(provider, {
+			type: "api_key", key: "fake-anthropic-key",
+		}, { fetchImpl, credentialHash: "safe-hash" });
+		assert.equal(snapshot.plan, "api-key");
+		assert.equal(snapshot.credentialHash, "safe-hash");
+		for (const field of ["account", "primary", "secondary", "tertiary", "credits", "serviceable"] as const)
+			assert.equal(snapshot[field], undefined, `${field} must not be inferred from a key`);
+		assert.match(formatUsageCompact(snapshot), /api-key/);
+		assert.match(formatUsageDetails(snapshot), /promotional.*balance.*not.*exposed/i);
+		assert.match(formatUsageDetails(snapshot), /https:\/\/platform\.claude\.com\/settings\/billing/);
+		assert.doesNotMatch(JSON.stringify(snapshot), /fake-anthropic-key|Max/);
+	}
+	assert.equal(calls, 0);
+});
+
+test("Anthropic API-key metadata still rejects missing or malformed credentials", async () => {
+	let calls = 0;
+	const fetchImpl = (async () => { calls++; throw new Error("must not fetch"); }) as typeof fetch;
+	for (const credential of [{}, { type: "api_key" }, { type: "api_key", key: "" }, { type: "api_key", key: "   " }]) {
+		await assert.rejects(fetchUsageSnapshot("anthropic", credential, { fetchImpl }), UsageFetchError);
+	}
+	assert.equal(calls, 0);
 });
 
 test("a Kimi Coding slot reports itself instead of throwing", async () => {

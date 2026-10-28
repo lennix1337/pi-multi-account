@@ -14683,6 +14683,33 @@ test("quota auto-resume: repeated exhaustion cycles each resume exactly once", a
 	await t.fire("session_shutdown");
 });
 
+test("quota auto-resume: an Anthropic API key out of credit is not re-sent a turn on the 10-minute probe ceiling", async () => {
+	// Its usage probe can only say "api-key": it cannot see Console credit, so a background
+	// check never proves the key funded again. Re-checking it every ten minutes therefore spent a
+	// real resumed turn (and a compaction) on the same refusal, over and over.
+	const t = setup({
+		accounts: { anthropic: { type: "api_key", key: "k1" } },
+		current: { provider: "anthropic", id: "claude-haiku-5-5" },
+		hostModelsByProvider: { anthropic: ["claude-haiku-5-5"] },
+	});
+	await onFakeClock(async (tick) => {
+		await finishError(
+			t,
+			"anthropic",
+			"claude-haiku-5-5",
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}',
+		);
+		assert.ok(t.readState().pendingFrom, "precondition: the stopped turn is parked");
+		await tick(15 * 60_000);
+		assert.equal(
+			t.rec.continueCalls.length + t.rec.sent.length,
+			0,
+			"an unobservable credit balance is not declared usable again by the recheck ceiling",
+		);
+	});
+	await t.fire("session_shutdown");
+});
+
 test("quota auto-resume: a message the user types meanwhile cancels the automatic resume", async () => {
 	const t = setup({ accounts: ONE_ACCOUNT, current: { provider: "anthropic", id: "claude-opus-4-8" }, config: QUOTA_CONFIG });
 	await onFakeClock(async (tick) => {

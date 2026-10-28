@@ -6122,15 +6122,16 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 *
 	 * Codex, Anthropic, Ollama, Cursor and xAI subscription OAuth all publish something we can poll
 	 * in the background. Kimi, Qwen and xAI API keys publish nothing, so their only "probe" is a
-	 * real request that costs the user the turn it lands on.
+	 * real request that costs the user the turn it lands on. An Anthropic API key is in that second
+	 * group: its probe reports only "api-key", because Console credit is not exposed to the key.
 	 */
 	function hasCheapAvailabilityProbe(provider: string): boolean {
 		const family = usageFamily(provider);
-		if (family === "xai") return readAuthFile()[provider]?.type === "oauth";
+		if (family === "xai" || family === "anthropic")
+			return readAuthFile()[provider]?.type === "oauth";
 		if (family === "zai-coding-cn") return readAuthFile()[provider]?.type === "api_key";
 		return (
 			family === "codex" ||
-			family === "anthropic" ||
 			family === "ollama" ||
 			family === "cursor"
 		);

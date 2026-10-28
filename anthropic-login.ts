@@ -3,6 +3,11 @@ import type { AuthBlob } from "./slot-proxy-auth.ts";
 
 export type ReadLoginCredential = (id: string) => AuthBlob | undefined;
 
+// New hosts include non-chat operations; older hosts expose only getModels.
+type AllModelsGetter = Provider extends { getAllModels?: () => infer Models }
+	? () => Models
+	: Provider["getModels"];
+
 /** A provider id stores one credential; changing auth type must use a separate account slot. */
 export function protectAnthropicLogin<T extends unknown[], R>(
 	id: string,
@@ -34,10 +39,10 @@ export function anthropicLoginProvider(
 	id: string,
 	read: ReadLoginCredential,
 	models?: Provider["getModels"],
-): Provider & { getAllModels: Provider["getModels"] } {
+): Provider & { getAllModels: AllModelsGetter } {
 	const apiKey = base.auth.apiKey;
 	const oauth = base.auth.oauth;
-	const catalog = base as Provider & { getAllModels?: Provider["getModels"] };
+	const catalog = base as Provider & { getAllModels?: AllModelsGetter };
 	return {
 		...base,
 		id,

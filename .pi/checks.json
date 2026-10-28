@@ -2,6 +2,11 @@
   "version": 1,
   "checks": {
     "typecheck": {"description":"TypeScript no-emit check", "onEdit":true, "argv":["node","node_modules/typescript/bin/tsc","--noEmit"], "timeoutMs":120000},
+    "anthropic-login": {
+      "description": "Offline native login persistence, separate OAuth/API-key slots and overwrite guards; disposable credentials only",
+      "argv": ["node", "--test", "test/anthropic-login.test.ts"],
+      "timeoutMs": 120000
+    },
     "anthropic-api-key": {
       "description": "Offline Anthropic API-key identity, balance guidance and OAuth usage regressions; no inference or live credential access",
       "argv": ["node", "--test", "--test-name-pattern", "Anthropic|anthropic", "test/usage.test.ts", "test/failover.test.ts"],

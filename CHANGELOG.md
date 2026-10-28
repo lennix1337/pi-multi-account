@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Anthropic OAuth and API keys together
+
+- Numbered Anthropic slots now expose Pi's native secret-input API-key login alongside subscription OAuth. Keep one credential type per slot, with both accounts available in the rotation.
+- Refuse a login that would replace an occupied slot's other credential type, and point to `/multi-account add anthropic` and the free `/login` slot. Same-type re-login remains supported; existing credentials are not migrated.
+
 ### Anthropic API-key usage
 
 - Identify Console API keys as `api-key` instead of reporting `ready · usage unavailable` after an OAuth-only usage request fails. API-key metadata stays offline and does not infer a Max plan, account identity, quota, or promotional balance. `accounts` and `limits` point to Console Billing's Promotional credits for the remaining amount and expiry; Claude OAuth quota behavior is unchanged.

@@ -44,6 +44,7 @@
     "index.ts",
     "provider-payload-stream.ts",
     "auth-file-transaction.ts",
+    "anthropic-login.ts",
     "state-file-transaction.ts",
     "command-arguments.ts",
     "command-completions.ts",

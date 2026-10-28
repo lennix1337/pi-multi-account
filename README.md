@@ -63,6 +63,22 @@ a previously generated unused Kimi alias can be removed from `models.json` and w
 > already have `pi-anthropic-auth`, the two coexist safely (the shaping is
 > idempotent). OpenAI Codex / ChatGPT and Qwen accounts work as well.
 
+### Use Anthropic OAuth and an API key together
+
+Each account slot holds **one** login type. Keep the subscription in `anthropic` and sign in
+with the Console API key in a free numbered slot (or the reverse):
+
+1. Run `/multi-account add anthropic` to see the next free slot.
+2. Run `/login`, choose the API-key or subscription option, then select that free
+   `anthropic-account-N` slot. Anthropic numbered slots appear in both login menus.
+3. Check `/multi-account accounts`; both accounts join the rotation automatically. Use
+   `/multi-account use <provider-id>` to choose one explicitly.
+
+Signing in with the other type over an occupied slot is rejected **before** the credential
+is replaced; same-type re-login still works. Existing credentials are not moved or duplicated.
+If a previous Pi login already overwrote an OAuth credential, sign into the subscription again
+in a free slot; this extension cannot recover a credential that is no longer stored.
+
 ### Recommended setting
 
 Set Pi provider-level retries to zero so the SDK does not keep retrying an exhausted account before failover kicks in. Pi's separate agent-level retry loop may remain enabled: the extension cancels its pending wake if that retry succeeds. Repeated temporary failures get bounded recovery on the same route, then an explicit stop—not provider failover. In `~/.pi/agent/settings.json`:
@@ -121,7 +137,7 @@ All three names are aliases for the same command: `/multi-account`, `/provider-f
 | `accounts [refresh]` | List every configured slot with provider-reported alias/email, plan, limits, and live routing status. Uses cached metadata unless `refresh` is explicit. |
 | `models` | List each account's model order; states explicitly when no account is in the rotation. Alias: `model`. |
 | `rediscover` | Force a re-scan of `auth.json`, rebuild the rotation, and refresh Codex model catalogs now. |
-| `add [anthropic\|codex\|kimi\|cursor\|ollama\|qwen]` | Print the next free account slot to select from the interactive `/login` picker. Subscription families (Anthropic, Codex, Kimi, Cursor) are logged in through `/login`; API-key families are filled in `auth.json`. |
+| `add [anthropic\|codex\|kimi\|cursor\|ollama\|qwen]` | Print the next free account slot to select from the interactive `/login` picker. Anthropic slots support both subscription and API-key `/login`, in separate slots. Codex, Kimi and Cursor use subscription `/login`; other API-key families are filled in `auth.json`. |
 | `remove [anthropic\|codex\|kimi\|cursor\|ollama\|qwen\|<provider-id>]` | Remove an account from `auth.json` and rotation. Family name drops the highest numbered alias slot; a full provider id removes that exact slot. Aliases: `rm`, `delete`. |
 | `next` | Manually switch to the next compatible-quality fallback that can serve work now. Cooling and known-spent accounts are skipped; when none is ready, the current account stays and the switch is reported. Use `switch` to pick a specific account or tier, including a cooled one for one attempt. |
 | `pin <provider/model>` | Persist a model preference for that provider's account group. A numbered alias applies to its siblings too. Requires an idle live parent; does not select the model. |

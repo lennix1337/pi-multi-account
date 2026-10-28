@@ -4395,6 +4395,8 @@ test("terminal Pi rehydrates the same session without admitting a different chil
 	};
 	const first = makeSession("terminal-session");
 	await first.fire("session_start");
+	const debugPath = join(AGENT_DIR, "provider-failover-debug.log");
+	assert.ok(existsSync(MODELS), `terminal owner must publish models; notifications=${JSON.stringify(first.rec.notifies)}; decisions=${existsSync(debugPath) ? readFileSync(debugPath, "utf8").split("\n").slice(-20).join("\n") : "no decision log"}`);
 	const publishedRoute = JSON.parse(readFileSync(MODELS, "utf8")).providers["openai-codex-account-2"].baseUrl;
 	const resumed = makeSession("terminal-session", true);
 	let firstClosed = false;

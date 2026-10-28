@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test, { mock } from "node:test";
-import { VERSION as PI_HOST_VERSION } from "@earendil-works/pi-coding-agent";
+import { ModelRuntime, VERSION as PI_HOST_VERSION } from "@earendil-works/pi-coding-agent";
 import { piAutoPersistsSelectedModel, piHasContextWithSystem } from "../pi-contract.ts";
 import { childFacingAuthEntryForSlot } from "../slot-proxy-auth.ts";
 import { publishedRouteFor } from "../slot-proxy.ts";
@@ -632,6 +632,7 @@ function setup(opts: {
 	};
 
 	let sendUserMessageRejects = opts.sendUserMessageRejects ?? 0;
+	const providerDefinitions = new Map<string, any>();
 	const pi: any = {
 		events: {
 			on: (name: string, handler: (payload: any) => void) => {
@@ -647,9 +648,23 @@ function setup(opts: {
 			},
 		},
 		registerProvider: (
-			name: string,
+			name: string | { id: string },
 			providerConfig?: { models?: any[]; baseUrl?: string },
 		) => {
+			if (typeof name !== "string") {
+				const native = name as any;
+				providerDefinitions.set(native.id, native);
+				providerConfig = {
+					...native,
+					models: native.id === "anthropic" ? undefined : native.getModels(),
+					oauth: native.auth.oauth && {
+						...native.auth.oauth,
+						refreshToken: native.auth.oauth.refresh,
+						getApiKey: (credential: any) => credential.access,
+					},
+				} as any;
+				name = native.id as string;
+			}
 			known.add(name);
 			providerConfigs.set(name, providerConfig);
 			rec.registrations.push({
@@ -880,6 +895,7 @@ function setup(opts: {
 		userSetsThinking,
 		settleThinkingLevelSelects,
 		providerConfigs,
+		providerDefinitions,
 		completionRouter: () => rec.completionRouters.at(-1),
 		hasHandler: (event: string) => (events[event]?.length ?? 0) > 0,
 		/** Register a handler AHEAD of ours, as an extension loaded earlier (e.g. OptChat) would be. */
@@ -9986,6 +10002,33 @@ test("accounts lists provider identity, quota and routing state without credenti
 	assert.match(table, /cooldown \d+m/);
 	assert.match(table, /\banthropic\b[\s\S]*\bready\b/);
 	assert.doesNotMatch(table, /anthropic-secret|anthropic-refresh|codex-secret|codex-refresh|workspace-safe-id/);
+});
+
+test("Anthropic login offers an API-key spare alongside the existing OAuth account", async () => {
+	const t = setup({
+		accounts: { anthropic: { type: "oauth", access: "fixture-oauth", refresh: "fixture-refresh", expires: Date.now() + 3_600_000 } },
+		config: { showUsage: false },
+	});
+	const spare = t.providerDefinitions.get("anthropic-account-2");
+	assert.equal(typeof spare?.auth.apiKey?.login, "function", "the API-key login menu needs a separate free slot");
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async () => { throw new Error("login regression must stay offline"); };
+	try {
+		const runtime = await ModelRuntime.create({ authPath: AUTH, modelsPath: null, refreshOnCreate: false });
+		for (const id of ["anthropic", "anthropic-account-2"]) {
+			runtime.registerNativeProvider(t.providerDefinitions.get(id));
+		}
+		const interaction = { signal: new AbortController().signal, prompt: async () => "fixture-api-key", notify: () => {} };
+		await assert.rejects(runtime.login("anthropic", "api_key", interaction), /It was not replaced/);
+		const key = await runtime.login("anthropic-account-2", "api_key", interaction);
+		assert.equal(key.type, "api_key");
+		const auth = JSON.parse(readFileSync(AUTH, "utf8"));
+		assert.equal(auth.anthropic.type, "oauth");
+		assert.equal(auth["anthropic-account-2"].type, "api_key");
+		await assert.rejects(runtime.login("anthropic-account-2", "oauth", interaction), /It was not replaced/);
+		await t.command("accounts");
+		assert.match(t.rec.notifies.at(-1) ?? "", /anthropic-account-2/);
+	} finally { globalThis.fetch = originalFetch; }
 });
 
 test("accounts refresh identifies Anthropic API keys and explains promotional balance without network", async () => {

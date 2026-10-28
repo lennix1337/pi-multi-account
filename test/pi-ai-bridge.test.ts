@@ -1,5 +1,5 @@
-// Supported Pi hosts bind public provider imports. Exercise the legacy callback
-// adapter with fake factories: no browser, token refresh endpoint, or credentials.
+// Supported Pi hosts bind public provider imports. Exercise native Anthropic auth
+// and the legacy Codex adapter with fake factories: no browser or provider calls.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -25,7 +25,7 @@ test("host provider factories preserve OAuth callbacks, refresh signals, and Cod
 			["kimi-coding", "kimiCodingProvider"], ["xai", "xaiProvider"],
 		]) {
 			writeFileSync(join(sdk, "providers", `${name}.js`), `
-export function ${factory}() { return { auth: { oauth: {
+export function ${factory}() { return { getModels: () => [], auth: { oauth: {
  async login(interaction) {
   interaction.notify({type: "auth_url", url: "https://example.invalid/oauth"});
   interaction.notify({type: "info", message: "fake progress"});
@@ -66,18 +66,17 @@ process.env.PI_CODING_AGENT_DIR = ${JSON.stringify(agent)};
 process.env.PI_CURSOR_PROVIDER_ROOT = ${JSON.stringify(join(root, "no-cursor"))};
 const {default: extension} = await import(${JSON.stringify(pathToFileURL(join(ext, "index.ts")).href)});
 const registrations = new Map();
-extension({registerProvider: (id, config) => registrations.set(id, config),
+extension({registerProvider: (id, config) => registrations.set(typeof id === 'string' ? id : id.id, config ?? id),
  registerCommand() {}, events: {on: () => () => {}, emit() {}}, on() {}, setModel: async () => true,
  getThinkingLevel: () => "high", setThinkingLevel() {}, appendEntry() {}});
 const result = {};
-const anthropic = registrations.get("anthropic").oauth;
+const anthropic = registrations.get("anthropic").auth.oauth;
 await anthropic.login({
- onAuth: info => result.url = info.url,
- onProgress: text => result.progress = text,
- onManualCodeInput: async () => { result.manual = true; return "fake-code"; },
- onPrompt: async () => "", onSelect: async () => ""
+ signal: new AbortController().signal,
+ notify: event => { if (event.type === 'auth_url') result.url = event.url; else result.progress = event.message; },
+ prompt: async prompt => { if (prompt.type !== 'manual_code') throw new Error('lost prompt type'); result.manual = true; return 'fake-code'; }
 });
-result.refreshed = (await anthropic.refreshToken({access: "old", refresh: "fake-refresh"})).access;
+result.refreshed = (await anthropic.refresh({access: "old", refresh: "fake-refresh"}, new AbortController().signal)).access;
 const codex = registrations.get("openai-codex").oauth;
 result.callbackServer = codex.usesCallbackServer;
 result.key = codex.getApiKey({access: "fake-access"});

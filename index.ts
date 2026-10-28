@@ -33,6 +33,7 @@ import {
 	type RecoveryCategory,
 } from "./recovery-safety.ts";
 import { mutateProxyAuth } from "./auth-file-transaction.ts";
+import { anthropicLoginProvider } from "./anthropic-login.ts";
 import { commandArgumentsProblem } from "./command-arguments.ts";
 import { multiAccountCompletions, type AccountChoice } from "./command-completions.ts";
 import { mergeStateDeltas, mutateStateFile } from "./state-file-transaction.ts";
@@ -2978,25 +2979,7 @@ function registerAnthropicSlot(
 	baseUrl = "https://api.anthropic.com",
 ) {
 	if (id === ANTHROPIC_BASE) return; // base provider: oauth + shaping registered in piMultiAccount()
-	const models = modelIds.map((m) => anthropicModelDef(m, id));
-	pi.registerProvider(id, {
-		name: `Claude Pro/Max (${id})`,
-		baseUrl,
-		api: "anthropic-messages" as any,
-		streamSimple: anthropicPayloadStream,
-		oauth: {
-			name: `Claude Pro/Max (${id})`,
-			async login(callbacks: any) {
-				return rejectDuplicateLogin(
-					id,
-					await requirePiAiOauth().anthropic.login(callbacks),
-				);
-			},
-			refreshToken: anthropicRefresherFor(id),
-			getApiKey: (credentials: any) => credentials.access,
-		},
-		models: models as any,
-	});
+	registerAnthropicLoginMethods(pi, id, modelIds, baseUrl);
 }
 
 function codexOAuthOverride(providerId: string, name: string) {
@@ -3798,20 +3781,39 @@ const qwenPayloadStream = createPayloadStream((payload) => {
 	return payload;
 });
 
-/** OAuth override enabling Claude Pro/Max login on a provider (base or alias). */
-function anthropicOAuthOverride(providerId: string, name: string) {
-	return {
-		name,
-		usesCallbackServer: true,
-		async login(callbacks: any) {
-			return rejectDuplicateLogin(
-				providerId,
-				await requirePiAiOauth().anthropic.login(callbacks),
-			);
+function readAnthropicLoginCredential(id: string): AuthEntry | undefined {
+	const entry = readAuthFile()[id];
+	return isChildFacingPlaceholderForSlot(entry, id) ? undefined : entry;
+}
+
+function registerAnthropicLoginMethods(
+	pi: ExtensionAPI,
+	id: string,
+	modelIds?: string[],
+	baseUrl = "https://api.anthropic.com",
+): void {
+	const base = builtinProviders().find((provider) => provider.id === ANTHROPIC_BASE);
+	if (!base) throw new Error("The running Pi host has no Anthropic provider");
+	const provider = anthropicLoginProvider(base, id, readAnthropicLoginCredential);
+	const oauth = provider.auth.oauth!;
+	// Do not follow this with a legacy string/config registration: Pi discards the native
+	// provider (including its API-key login guard) when the legacy registration replaces it.
+	pi.registerProvider({
+		...provider,
+		baseUrl,
+		getModels: modelIds
+			? () => modelIds.map((modelId) => ({ ...anthropicModelDef(modelId, id), provider: id, baseUrl, api: "anthropic-messages" } as any))
+			: provider.getModels,
+		streamSimple: anthropicPayloadStream,
+		auth: {
+			...provider.auth,
+			oauth: {
+				...oauth,
+				login: async (...args: Parameters<typeof oauth.login>) => rejectDuplicateLogin(id, await oauth.login(...args)),
+				refresh: anthropicRefresherFor(id),
+			},
 		},
-		refreshToken: anthropicRefresherFor(providerId),
-		getApiKey: (credentials: any) => credentials.access,
-	};
+	});
 }
 
 // ===========================================================================
@@ -9818,7 +9820,9 @@ ${note}` : basePrompt;
 				const loginHint =
 					family === "cursor"
 						? `run /login, authenticate your Cursor subscription in the browser, select ${id}`
-						: `run /login, choose "Use a subscription", select ${id}`;
+						: family === "anthropic"
+							? `run /login, choose subscription (OAuth) or API key, select ${id}. Each login type uses its own slot; existing credentials are kept`
+							: `run /login, choose "Use a subscription", select ${id}`;
 				ctx.ui.notify(
 					`pi-multi-account: ${loginHint}, then run /multi-account rediscover`,
 					"info",
@@ -10535,12 +10539,7 @@ ${note}` : basePrompt;
 	// every Anthropic OAuth request so subscription tokens are accepted — without
 	// requiring a separate pi-anthropic-auth install. Idempotent, so it coexists
 	// safely if pi-anthropic-auth is also present.
-	pi.registerProvider("anthropic", {
-		baseUrl: "https://api.anthropic.com",
-		api: "anthropic-messages",
-		streamSimple: anthropicPayloadStream,
-		oauth: anthropicOAuthOverride("anthropic", "Anthropic (Claude Pro/Max)"),
-	} as any);
+	registerAnthropicLoginMethods(pi, ANTHROPIC_BASE);
 	pi.registerProvider("openai-codex", {
 		oauth: codexOAuthOverride(
 			"openai-codex",

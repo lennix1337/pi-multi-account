@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Selected model defaults during account rotation
+
+- Honor the model saved in Pi settings across sibling accounts, including cross-family failover and manual `use`. Do not promote a saved Codex Sol default to Astra because it leads the catalog. If the chosen model is unavailable, do not silently substitute another model. Explicit targets/pins and the paid-provider admission boundary remain intact.
+
+### Anthropic numbered-slot failover on Pi 1.x
+
+- Keep numbered-slot identity in both `getModels` and `getAllModels`, including host-discovered models. Previously Pi 1.x could list an OAuth slot as ready but resolve its catalog back to the exhausted base API-key account, preventing automatic failover and misrouting manual `use`. No credentials are moved or replaced.
+
 ### Anthropic OAuth and API keys together
 
 - Numbered Anthropic slots now expose Pi's native secret-input API-key login alongside subscription OAuth. Keep one credential type per slot, with both accounts available in the rotation.

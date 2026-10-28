@@ -29,14 +29,23 @@ export function protectAnthropicLogin<T extends unknown[], R>(
 }
 
 /** Expose the native secret-input API-key flow for numbered slots as well as the base provider. */
-export function anthropicLoginProvider(base: Provider, id: string, read: ReadLoginCredential): Provider {
+export function anthropicLoginProvider(
+	base: Provider,
+	id: string,
+	read: ReadLoginCredential,
+	models?: Provider["getModels"],
+): Provider & { getAllModels: Provider["getModels"] } {
 	const apiKey = base.auth.apiKey;
 	const oauth = base.auth.oauth;
+	const catalog = base as Provider & { getAllModels?: Provider["getModels"] };
 	return {
 		...base,
 		id,
 		name: `Anthropic (${id})`,
-		getModels: () => base.getModels().map((model) => ({ ...model, provider: id })),
+		getModels: () => (models?.() ?? base.getModels()).map((model) => ({ ...model, provider: id })),
+		// Pi 1.x reads this catalog before getModels; never inherit the base slot identity.
+		getAllModels: () => (models?.() ?? catalog.getAllModels?.() ?? base.getModels())
+			.map((model) => ({ ...model, provider: id })),
 		auth: {
 			...base.auth,
 			apiKey: apiKey?.login

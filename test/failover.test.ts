@@ -656,7 +656,7 @@ function setup(opts: {
 				providerDefinitions.set(native.id, native);
 				providerConfig = {
 					...native,
-					models: native.id === "anthropic" ? undefined : native.getModels(),
+					models: native.id === "anthropic" ? undefined : (native.getAllModels?.() ?? native.getModels()),
 					oauth: native.auth.oauth && {
 						...native.auth.oauth,
 						refreshToken: native.auth.oauth.refresh,
@@ -673,9 +673,10 @@ function setup(opts: {
 				baseUrl: providerConfig?.baseUrl,
 			});
 			if (providerConfig?.models) {
+				// Native catalogs already own provider identity, as in ModelRuntime.
 				registeredModels.set(
 					name,
-					providerConfig.models.map((model) => ({ ...model, provider: name })),
+					providerConfig.models.map((model) => ({ provider: name, ...model })),
 				);
 			}
 		},
@@ -8190,6 +8191,91 @@ test("numbered Anthropic slots inherit native Fable metadata from the host catal
 	await t.fire("session_shutdown");
 });
 
+test("account failover honors the saved Codex default instead of promoting to Astra", async () => {
+	const t = setup({
+		accounts: {
+			anthropic: { type: "api_key", key: "fixture-key" },
+			"openai-codex": { type: "oauth", access: "c1", refresh: "cr1" },
+			"openai-codex-account-2": { type: "oauth", access: "c2", refresh: "cr2" },
+		},
+		settings: { defaultProvider: "openai-codex", defaultModel: "gpt-6.1-sol" },
+		current: { provider: "openai-codex", id: "gpt-6.1-sol" },
+		hostCodexModels: ["gpt-6-astra", "gpt-6.1-sol"],
+		hostModelsByProvider: { anthropic: ["claude-fable-5-1"] },
+	});
+	await t.fire("session_start");
+	// A temporary foreground selection does not replace the saved per-family default.
+	t.ctx.model = { provider: "anthropic", id: "claude-fable-5-1" };
+	await finishError(t, "anthropic", "claude-fable-5-1", "429 rate limit");
+	assert.equal(t.rec.setModels.at(-1), "openai-codex/gpt-6.1-sol");
+	await finishError(t, "openai-codex", "gpt-6.1-sol", "429 rate limit");
+	assert.equal(t.rec.setModels.at(-1), "openai-codex-account-2/gpt-6.1-sol");
+	assert.ok(t.rec.setModels.every((model) => !model.includes("astra")));
+	await t.fire("session_shutdown");
+});
+
+test("an unavailable saved default does not silently fall back to Astra", async () => {
+	const t = setup({
+		accounts: {
+			anthropic: { type: "api_key", key: "fixture-key" },
+			"openai-codex-account-2": { type: "oauth", access: "c2", refresh: "cr2" },
+		},
+		settings: { defaultProvider: "openai-codex-account-2", defaultModel: "unavailable-default" },
+		current: { provider: "anthropic", id: "claude-fable-5-1" },
+		hostCodexModels: ["gpt-6-astra", "gpt-6.1-sol"],
+		hostModelsByProvider: { anthropic: ["claude-fable-5-1"] },
+	});
+	await t.fire("session_start");
+	await finishError(t, "anthropic", "claude-fable-5-1", "429 rate limit");
+	assert.deepEqual(t.rec.setModels, []);
+	assert.ok(t.rec.notifies.some((message) => message.includes("no immediately available fallback")));
+	await t.fire("session_shutdown");
+});
+
+test("manual account switches honor the saved default rather than the catalog flagship", async () => {
+	const t = setup({
+		accounts: {
+			anthropic: { type: "api_key", key: "fixture-key" },
+			"anthropic-account-2": { type: "oauth", access: "a2", refresh: "ar2" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-5-5" },
+		settings: { defaultProvider: "anthropic", defaultModel: "claude-opus-5-5" },
+		hostModelsByProvider: { anthropic: ["claude-fable-5-1", "claude-opus-5-5"] },
+	});
+	await t.fire("session_start");
+	await t.command("use anthropic-account-2");
+	assert.equal(t.rec.setModels.at(-1), "anthropic-account-2/claude-opus-5-5");
+	await t.fire("session_shutdown");
+});
+
+test("credit balance failure automatically selects the OAuth slot without rediscover or use", async () => {
+	const t = setup({
+		accounts: {
+			anthropic: { type: "api_key", key: "k1" },
+			"anthropic-account-2": { type: "oauth", access: "a2", refresh: "ar2" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-5-5" },
+		hostModelsByProvider: {
+			anthropic: ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+			"anthropic-account-2": ["claude-opus-5", "claude-sonnet-4-6"],
+		},
+	});
+	await t.fire("session_start");
+	await finishError(
+		t,
+		"anthropic",
+		"claude-opus-5-5",
+		'400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}',
+	);
+	assert.deepEqual(t.rec.setModels, ["anthropic-account-2/claude-opus-5-5"]);
+	assert.equal(t.ctx.model.provider, "anthropic-account-2");
+	assert.ok(t.rec.notifies.some((message) => message.includes("→ anthropic-account-2/claude-opus-5-5")));
+	assert.ok(!t.rec.notifies.some((message) => message.includes("no immediately available fallback")));
+	await t.fire("agent_end");
+	assert.equal(t.rec.continueCalls.length, 1, "accepted switch must resume the interrupted turn");
+	await t.fire("session_shutdown");
+});
+
 test("native apex sessions do not activate paid OpenAI/OpenRouter fallback without an explicit target", async () => {
 	const accounts: Account = {
 		"openai-codex": { type: "oauth", access: "c", refresh: "cr", accountId: "codex" },
@@ -10016,7 +10102,11 @@ test("Anthropic login offers an API-key spare alongside the existing OAuth accou
 	try {
 		const runtime = await ModelRuntime.create({ authPath: AUTH, modelsPath: null, refreshOnCreate: false });
 		for (const id of ["anthropic", "anthropic-account-2"]) {
-			runtime.registerNativeProvider(t.providerDefinitions.get(id));
+			const definition = t.providerDefinitions.get(id);
+			runtime.registerNativeProvider(definition);
+			for (const model of definition.getModels()) {
+				assert.equal(runtime.getModel(id, model.id)?.provider, id, "the real runtime must retain the registered slot identity");
+			}
 		}
 		const interaction = { signal: new AbortController().signal, prompt: async () => "fixture-api-key", notify: () => {} };
 		await assert.rejects(runtime.login("anthropic", "api_key", interaction), /It was not replaced/);

@@ -3794,16 +3794,16 @@ function registerAnthropicLoginMethods(
 ): void {
 	const base = builtinProviders().find((provider) => provider.id === ANTHROPIC_BASE);
 	if (!base) throw new Error("The running Pi host has no Anthropic provider");
-	const provider = anthropicLoginProvider(base, id, readAnthropicLoginCredential);
+	const models = modelIds
+		? () => modelIds.map((modelId) => ({ ...anthropicModelDef(modelId, id), provider: id, baseUrl, api: "anthropic-messages" } as any))
+		: undefined;
+	const provider = anthropicLoginProvider(base, id, readAnthropicLoginCredential, models);
 	const oauth = provider.auth.oauth!;
 	// Do not follow this with a legacy string/config registration: Pi discards the native
 	// provider (including its API-key login guard) when the legacy registration replaces it.
 	pi.registerProvider({
 		...provider,
 		baseUrl,
-		getModels: modelIds
-			? () => modelIds.map((modelId) => ({ ...anthropicModelDef(modelId, id), provider: id, baseUrl, api: "anthropic-messages" } as any))
-			: provider.getModels,
 		streamSimple: anthropicPayloadStream,
 		auth: {
 			...provider.auth,
@@ -6762,6 +6762,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return Object.hasOwn(config.pinnedModels, scope) ? config.pinnedModels[scope] : undefined;
 	}
 
+	function savedDefaultForProvider(provider: string): string | undefined {
+		const selected = readHostDefaultModel();
+		return selected && accountGroup(selected.provider, config.qwenProvider) === accountGroup(provider, config.qwenProvider)
+			? selected.id
+			: undefined;
+	}
+
 	function pinQualityCompatible(model: any, source: any): boolean {
 		const pin = pinnedModelForProvider(model.provider);
 		const sourceBand = modelQualityBand(source?.id, source?.provider);
@@ -6798,6 +6805,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (!parsed) return [];
 		if (parsed.modelId) {
 			const model = findModelIncludingHidden(ctx, parsed.provider, parsed.modelId);
+			return isAccountChatModel(model) ? [model] : [];
+		}
+
+		// A saved user default is a choice, not a hint to upgrade to the catalog flagship.
+		const selected = !pinnedModelForProvider(parsed.provider) && savedDefaultForProvider(parsed.provider);
+		if (selected) {
+			const model = findModelIncludingHidden(ctx, parsed.provider, selected);
 			return isAccountChatModel(model) ? [model] : [];
 		}
 
@@ -6915,6 +6929,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			models = models.filter((model: any) => {
 				// A preference is not tier consent, including routed automatic compaction.
 				if (!pinQualityCompatible(model, currentModel)) return false;
+				// The user's saved default is explicit model intent, even across quality bands.
+				if (!pinnedModelForProvider(model.provider) && sameModelIdentity(model.id, savedDefaultForProvider(model.provider))) {
+					return explicitlyAllowsPaidApexFallback(model, currentModel);
+				}
 				const candidateBand = modelQualityBand(model.id, model.provider);
 				const candidateExceptional = apexIdentity(model.id);
 				// Cursor's Fable-named aliases are deliberately uncalibrated. A user may select one

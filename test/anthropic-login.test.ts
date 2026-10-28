@@ -52,6 +52,27 @@ for (const initial of [oauth, apiKey]) {
 	});
 }
 
+test("numbered Anthropic catalogs retain slot identity on modern Pi hosts", () => {
+	const native = builtinProviders().find((provider) => provider.id === "anthropic")!;
+	const chat = native.getModels()[0];
+	const all = () => [{ ...chat, id: "host-only-claude" }];
+	const base = { ...native, getAllModels: all };
+	const slot = anthropicLoginProvider(base, "anthropic-account-2", () => oauth) as typeof base;
+	assert.ok(slot.getModels().every((model) => model.provider === slot.id));
+	assert.deepEqual(slot.getAllModels(), [{ ...all()[0], provider: slot.id }]);
+	assert.equal(base.getAllModels()[0].provider, "anthropic", "the base catalog must remain untouched");
+});
+
+test("an explicit slot catalog drives both modern and legacy model lookups", () => {
+	const native = builtinProviders().find((provider) => provider.id === "anthropic")!;
+	const base = { ...native, getAllModels: () => native.getModels() };
+	const models = () => [{ ...native.getModels()[0], id: "host-only-claude" }];
+	const slot = anthropicLoginProvider(base, "anthropic-account-2", () => oauth, models);
+	assert.deepEqual(slot.getAllModels(), slot.getModels());
+	assert.deepEqual(slot.getAllModels().map(({ id, provider }) => ({ id, provider })),
+		[{ id: "host-only-claude", provider: "anthropic-account-2" }]);
+});
+
 test("the type guard is necessary: the native store otherwise replaces OAuth with an API key", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "anthropic-login-control-"));
 	const authPath = join(dir, "auth.json");

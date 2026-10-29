@@ -10194,6 +10194,44 @@ test("accounts lists provider identity, quota and routing state without credenti
 	assert.doesNotMatch(table, /anthropic-secret|anthropic-refresh|codex-secret|codex-refresh|workspace-safe-id/);
 });
 
+test("accounts shows when a spent account's window resets, not only the short recheck timer", async () => {
+	// Reported: the table read "cooldown 8m" for a Codex account whose 5h window sat at 0% for
+	// another 3h35m, so the account looked minutes away from usable. The cooldown is only the
+	// recheck ceiling; the provider's own reset forecast is what says when it really returns.
+	const now = Date.now();
+	const t = setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "a", refresh: "ar" },
+			"openai-codex-account-2": { type: "oauth", access: "c", refresh: "cr", accountId: "w" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		seedState: {
+			stateVersion: 5,
+			exhaustedUntilByProvider: { "openai-codex-account-2": now + 8 * 60_000 },
+			exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {},
+			invalidatedByProvider: {},
+			usageByProvider: {
+				"openai-codex-account-2": {
+					provider: "openai-codex-account-2",
+					family: "codex",
+					fetchedAt: now,
+					account: "lucas@example.com",
+					plan: "team",
+					serviceable: false,
+					primary: { usedPercent: 100, resetAt: now + (3 * 60 + 35) * 60_000, windowSeconds: 18_000 },
+					secondary: { usedPercent: 63, resetAt: now + 5 * 86_400_000, windowSeconds: 604_800 },
+				},
+			},
+			lastSwitches: [],
+		},
+	});
+
+	await t.command("accounts");
+	const row = (t.rec.notifies.at(-1) ?? "").split("\n").find((line) => line.startsWith("openai-codex-account-2")) ?? "";
+	assert.match(row, /spent · resets 3h3[45]m · recheck \d+m$/);
+});
+
 test("Anthropic login offers an API-key spare alongside the existing OAuth account", async () => {
 	const t = setup({
 		accounts: { anthropic: { type: "oauth", access: "fixture-oauth", refresh: "fixture-refresh", expires: Date.now() + 3_600_000 } },

@@ -5644,6 +5644,17 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return `${windowLabel(window, snapshot.family, position)} ${remainingPercent(window)}%/${formatResetDuration(window.resetAt, now)}`;
 	}
 
+	/**
+	 * The live cooldown is only the recheck ceiling (minutes); when the account's own usage forecasts
+	 * a later reset, that reset is when it really returns, so show both.
+	 */
+	function cooldownStatus(snapshot: UsageSnapshot | undefined, recoveryAt: number, now: number) {
+		const recheck = formatResetDuration(recoveryAt, now);
+		const resetMs = snapshot && snapshot.serviceable !== true ? cooldownMsFromUsage(snapshot, now) : undefined;
+		if (!resetMs || now + resetMs <= recoveryAt) return `cooldown ${recheck}`;
+		return `spent · resets ${formatResetDuration(now + resetMs, now)} · recheck ${recheck}`;
+	}
+
 	/** Every account the accounts table lists, rotation order first, with its status. */
 	function accountRows(ctx: any, now: number) {
 		const auth = readAuthFile();
@@ -5667,8 +5678,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			else if (isInvalidated(provider)) status = "unavailable · re-login";
 			else if (duplicate) status = `duplicate → ${duplicate}`;
 			else if (unconfigured.has(provider)) status = "unavailable · no models";
-			else if (recoveryAt > now)
-				status = `cooldown ${formatResetDuration(recoveryAt, now)}`;
+			else if (recoveryAt > now) status = cooldownStatus(snapshot, recoveryAt, now);
 			else if (usageErrors.has(provider)) status = "ready · usage unavailable";
 			else status = "ready";
 			return { provider, snapshot, status, ready: status.startsWith("ready") };
@@ -7406,7 +7416,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				.filter(
 					([provider, until]) => until > Date.now() && !isInvalidated(provider),
 				)
-				.map(([provider, until]) => `${provider}: ${formatUntil(until)}`)
+				.map(([provider, until]) => `${provider}: ${cooldownStatus(cachedUsage(provider), until, Date.now())}`)
 				.join(", ");
 			const invalids = [...invalidatedByProvider.keys()].join(", ");
 			const availability = [

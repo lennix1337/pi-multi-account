@@ -3909,6 +3909,21 @@ interface HostCompletionRouter {
 	onAttempt?(attempt: RouteAttemptFact): void | Promise<void>;
 }
 
+/**
+ * Cross-extension request: "which model should a subagent child launch on?". The asker fills
+ * `version`, `purpose` and `model`; the root session's listener fills `result` synchronously.
+ * No `result` means no live root answered (not installed, a passive child, failover disabled).
+ */
+const MODEL_ROUTE_REQUEST_EVENT = "pi:model-route:request:v1";
+type ModelRouteRequest = {
+	version: 1;
+	purpose?: string;
+	model: RouteModelRef;
+	result?:
+		| { action: "keep"; reason?: string }
+		| { action: "route"; model: RouteModelRef; reason: string };
+};
+
 interface HostCompletionRouterAPI {
 	registerCompletionRouter?(router: HostCompletionRouter): void;
 	unregisterCompletionRouter?(): void;
@@ -11951,7 +11966,8 @@ ${note}` : basePrompt;
 		};
 	}
 
-	function usableCompletionRoute(ctx: any, route: RouteModelRef): RouteModelRef | undefined {
+	/** A route's readiness right now: found, authenticated, not invalidated, not cooling down. */
+	function routeReadiness(ctx: any, route: RouteModelRef) {
 		const model = findModelIncludingHidden(ctx, route.provider, route.id);
 		const now = Date.now();
 		const hasAuth = model ? providerHasUsableAuth(ctx, route.provider) : false;
@@ -11959,6 +11975,11 @@ ${note}` : basePrompt;
 		const recoveryAt = providerRecoveryAt(route.provider, now);
 		const modelUntil = model ? (exhaustedUntilByModel.get(ref(model.provider, model.id)) ?? 0) : 0;
 		const ready = !!model && hasAuth && !invalidated && recoveryAt <= now && modelUntil <= now;
+		return { model, now, hasAuth, invalidated, recoveryAt, modelUntil, ready };
+	}
+
+	function usableCompletionRoute(ctx: any, route: RouteModelRef): RouteModelRef | undefined {
+		const { model, now, hasAuth, invalidated, recoveryAt, modelUntil, ready } = routeReadiness(ctx, route);
 		if (!ready) {
 			logEvent("completion_route_unusable", {
 				provider: route.provider,
@@ -12041,6 +12062,46 @@ ${note}` : basePrompt;
 			}
 		}
 	}
+
+	// Subagent children are passive here (no failover of their own), so the parent decides their
+	// model at launch: pi-subagents asks before spawning a child on a configured or inherited model.
+	// A model whose account is spent moves to the same quality band on a ready account, the way this
+	// session itself just failed over; a ready model, an unknown one, or no ready peer stays as asked.
+	pi.events.on(MODEL_ROUTE_REQUEST_EVENT, (raw: unknown) => {
+		if (!raw || typeof raw !== "object") return;
+		const request = raw as ModelRouteRequest;
+		if (request.result !== undefined || request.version !== 1) return;
+		const ctx = completionRouterContext;
+		if (!ctx || !automaticFailoverEnabled()) return;
+		const asked = request.model;
+		if (typeof asked?.provider !== "string" || typeof asked?.id !== "string") return;
+		const readiness = routeReadiness(ctx, asked);
+		if (!readiness.model || readiness.ready) {
+			request.result = { action: "keep" };
+			return;
+		}
+		const [pick] = findFallbackModels(ctx, readiness.model, {
+			availableNowOnly: true,
+			preserveQualityBand: true,
+		});
+		const blocked = readiness.invalidated
+			? "is logged out or invalid"
+			: !readiness.hasAuth
+				? "has no usable login"
+				: `is spent for ~${formatUntil(Math.max(readiness.recoveryAt, readiness.modelUntil))}`;
+		request.result = pick
+			? {
+					action: "route",
+					model: { provider: pick.provider, id: pick.id },
+					reason: `${asked.provider}/${asked.id} ${blocked}`,
+				}
+			: { action: "keep", reason: `${asked.provider}/${asked.id} ${blocked}; no ready account has the same tier` };
+		logEvent("model_route_request", {
+			purpose: request.purpose,
+			asked,
+			result: request.result,
+		});
+	});
 
 	const completionHost = pi as ExtensionAPI & HostCompletionRouterAPI;
 	if (typeof completionHost.registerCompletionRouter === "function") {

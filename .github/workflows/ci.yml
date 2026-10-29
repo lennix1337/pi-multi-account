@@ -10,9 +10,43 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR branch supersedes its running checks; main runs each keep their own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
+  # No test reads Markdown, so a docs-only change skips the suite and the host matrix.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - id: scope
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          files=""
+          if [ "$EVENT" = pull_request ]; then
+            files=$(git diff --name-only HEAD^1 HEAD) || files=""
+          elif [ "$EVENT" = push ] && [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] && git fetch --no-tags --depth=1 origin "$BEFORE"; then
+            files=$(git diff --name-only "$BEFORE" HEAD) || files=""
+          fi
+          printf 'Changed files:\n%s\n' "${files:-(unknown)}"
+          code=true
+          if [ -n "$files" ] && ! grep -qvE '(\.md$|^docs/|^LICENSE$)' <<<"$files"; then code=false; fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   check:
     name: Type-check & test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -27,6 +61,8 @@ jobs:
 
   host-compatibility:
     name: Pi ${{ matrix.pi }} compatibility
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -44,3 +80,17 @@ jobs:
       - run: npm ls --all
       - run: npm run check
       - run: npm test
+
+  # The one check branch protection requires: green when every job this change needed passed.
+  ci-ok:
+    if: always()
+    needs: [changes, check, host-compatibility]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Every needed job passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          node -e 'const bad = JSON.parse(process.env.RESULTS).filter((r) => r !== "success" && r !== "skipped"); if (bad.length) { console.error(`failed or cancelled: ${bad.join(", ")}`); process.exit(1); }'

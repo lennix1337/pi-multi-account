@@ -12,6 +12,11 @@
       "argv": ["node", "--test", "--test-name-pattern", "Anthropic|anthropic", "test/usage.test.ts", "test/failover.test.ts"],
       "timeoutMs": 120000
     },
+    "state-transactions": {
+      "description": "Offline locked-state updates and worker-drain regressions using disposable processes and files",
+      "argv": ["node", "--test", "test/state-file-transaction.test.ts"],
+      "timeoutMs": 120000
+    },
     "unit": {"description":"Full offline lifecycle and routing regression suite", "argv":["node","--test","test/*.test.ts"], "timeoutMs":600000},
     "pack": {"description":"npm pack --dry-run contents, size, version and peer-range checks; no publication", "argv":["node","scripts/check-package.mjs"], "timeoutMs":120000},
     "privacy": {"description":"Personal-identifier scan over tracked files", "argv":["node","scripts/check-tracked-privacy.mjs"], "timeoutMs":60000},

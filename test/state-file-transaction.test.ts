@@ -7,6 +7,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mergeStateDeltas, mutateStateFile } from "../state-file-transaction.ts";
 
+async function drainWorkers(workers: Promise<void>[]): Promise<void> {
+  const results = await Promise.allSettled(workers);
+  const errors = results.filter(result => result.status === "rejected").map(result => result.reason);
+  if (errors.length) throw new AggregateError(errors, "state workers failed");
+}
+
+test("a failed state worker is reported only after all workers settle", async () => {
+  let finishWriter!: () => void;
+  let settled = false;
+  const failure = new Error("state worker failed");
+  const writer = new Promise<void>(resolve => { finishWriter = resolve; });
+  const outcome = drainWorkers([Promise.reject(failure), writer]).then(
+    () => { settled = true; return undefined; },
+    error => { settled = true; return error; },
+  );
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(settled, false, "fixture cleanup must wait for the remaining writer");
+  } finally { finishWriter(); }
+  const error = await outcome;
+  assert.ok(error instanceof AggregateError);
+  assert.deepEqual(error.errors, [failure]);
+});
+
 test("shared state preserves other sessions' cooldowns and deliberate local clearing", () => {
   const base: { exhaustedUntilByProvider: Record<string, number> } = { exhaustedUntilByProvider: { a: 1, b: 2 } };
   const local = { exhaustedUntilByProvider: { a: 1, c: 3 } };
@@ -42,7 +66,7 @@ test("four real processes retain every independent state update without torn JSO
   const module = new URL("../state-file-transaction.ts", import.meta.url).href;
   try {
     mutateStateFile(path, () => ({ exhaustedUntilByProvider: {} }));
-    await Promise.all(Array.from({ length: 4 }, (_, worker) => new Promise<void>((resolve, reject) => {
+    await drainWorkers(Array.from({ length: 4 }, (_, worker) => new Promise<void>((resolve, reject) => {
       const child = spawn(process.execPath, ["--input-type=module", "-e", `
         import { mutateStateFile, mergeStateDeltas } from ${JSON.stringify(module)};
         import { setTimeout as sleep } from 'node:timers/promises';

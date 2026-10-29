@@ -898,6 +898,8 @@ function setup(opts: {
 		providerConfigs,
 		providerDefinitions,
 		completionRouter: () => rec.completionRouters.at(-1),
+		/** Emit on the shared extension bus, as another extension (pi-subagents) would. */
+		emitBus: (name: string, payload: any) => pi.events.emit(name, payload),
 		hasHandler: (event: string) => (events[event]?.length ?? 0) > 0,
 		/** Register a handler AHEAD of ours, as an extension loaded earlier (e.g. OptChat) would be. */
 		prependHandler: (event: string, handler: any) => (events[event] ??= []).unshift(handler),
@@ -1364,6 +1366,86 @@ test("non-provider background failures stop without poisoning route health", asy
 	});
 	assert.equal(t.readState().exhaustedUntilByProvider?.anthropic, undefined);
 	assert.deepEqual(t.ctx.model, current);
+});
+
+/** One Claude account and one Codex slot, Claude first in priority. */
+function claudeAndCodexSetup(input: {
+	current: { provider: string; id: string };
+	hostCodexModels: string[];
+	anthropicModels: string[];
+	config?: Record<string, unknown>;
+	seedCooldownsMsFromNow?: Record<string, number>;
+	subagentChild?: boolean;
+}) {
+	return setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "a", refresh: "ar" },
+			"openai-codex-account-2": { type: "oauth", access: "c", refresh: "cr", accountId: "codex-2" },
+		},
+		current: input.current,
+		hostCodexModels: input.hostCodexModels,
+		hostModelsByProvider: { anthropic: input.anthropicModels },
+		config: { providerPriority: ["anthropic", "openai-codex"], ...input.config },
+		...(input.seedCooldownsMsFromNow ? { seedCooldownsMsFromNow: input.seedCooldownsMsFromNow } : {}),
+		...(input.subagentChild ? { subagentChild: true } : {}),
+	});
+}
+
+function subagentRouteSetup(seedCooldownsMsFromNow: Record<string, number> = {}, opts: { subagentChild?: boolean } = {}) {
+	return claudeAndCodexSetup({
+		current: { provider: "anthropic", id: "claude-opus-5-5" },
+		hostCodexModels: ["gpt-6.1-sol", "gpt-6.1-terra"],
+		anthropicModels: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+		config: { childProxy: false },
+		seedCooldownsMsFromNow,
+		...opts,
+	});
+}
+
+function subagentRouteRequest(provider: string, id: string): any {
+	return { version: 1, purpose: "subagent", model: { provider, id } };
+}
+
+test("a subagent model on a spent account is routed to the same tier on a ready account", async () => {
+	const t = subagentRouteSetup({ "openai-codex-account-2": 3_600_000 });
+	await t.fire("session_start");
+	const request = subagentRouteRequest("openai-codex-account-2", "gpt-6.1-terra");
+	t.emitBus("pi:model-route:request:v1", request);
+
+	assert.equal(request.result?.action, "route", JSON.stringify(request.result));
+	assert.deepEqual(request.result.model, { provider: "anthropic", id: "claude-sonnet-5-5" });
+	assert.match(request.result.reason, /openai-codex-account-2/);
+	assert.deepEqual(t.ctx.model, { provider: "anthropic", id: "claude-opus-5-5" }, "routing a child never moves the session");
+	assert.deepEqual(t.rec.setModels, []);
+	await t.fire("session_shutdown");
+});
+
+test("a subagent model on a ready account is kept", async () => {
+	const t = subagentRouteSetup();
+	await t.fire("session_start");
+	const request = subagentRouteRequest("openai-codex-account-2", "gpt-6.1-terra");
+	t.emitBus("pi:model-route:request:v1", request);
+	assert.deepEqual(request.result, { action: "keep" });
+	await t.fire("session_shutdown");
+});
+
+test("a subagent model with no ready same-tier account is kept, with the reason", async () => {
+	const t = subagentRouteSetup({ "openai-codex-account-2": 3_600_000, anthropic: 3_600_000 });
+	await t.fire("session_start");
+	const request = subagentRouteRequest("openai-codex-account-2", "gpt-6.1-terra");
+	t.emitBus("pi:model-route:request:v1", request);
+	assert.equal(request.result?.action, "keep");
+	assert.match(request.result.reason, /no ready/);
+	await t.fire("session_shutdown");
+});
+
+test("a passive subagent child never answers model-route requests", async () => {
+	const t = subagentRouteSetup({ "openai-codex-account-2": 3_600_000 }, { subagentChild: true });
+	await t.fire("session_start");
+	const request = subagentRouteRequest("openai-codex-account-2", "gpt-6.1-terra");
+	t.emitBus("pi:model-route:request:v1", request);
+	assert.equal(request.result, undefined, "the parent root owns routing");
+	await t.fire("session_shutdown");
 });
 
 test("Cursor background payloads use the host side-channel session identity", async () => {
@@ -8078,15 +8160,11 @@ function assistantReply(provider: string, model: string) {
 }
 
 function warmupSetup(config: Record<string, unknown> = { failoverWarmupModels: { anthropic: "claude-haiku-5-5" } }) {
-	return setup({
-		accounts: {
-			anthropic: { type: "oauth", access: "a", refresh: "ar" },
-			"openai-codex-account-2": { type: "oauth", access: "c", refresh: "cr", accountId: "codex-2" },
-		},
+	return claudeAndCodexSetup({
 		current: { provider: "openai-codex-account-2", id: "gpt-5.6-sol" },
 		hostCodexModels: ["gpt-5.6-sol"],
-		hostModelsByProvider: { anthropic: ["claude-opus-5-5", "claude-haiku-5-5"] },
-		config: { providerPriority: ["anthropic", "openai-codex"], ...config },
+		anthropicModels: ["claude-opus-5-5", "claude-haiku-5-5"],
+		config,
 	});
 }
 

@@ -5077,6 +5077,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * this extension's list still topped out at claude-opus-4-8) was invisible to failover, which
 	 * silently broke the project's hard rule of always staying on a provider's top model.
 	 */
+	/** Models every numbered Anthropic slot offers: the host-ranked list once known, else the static one. */
+	function anthropicSlotModelIds(): string[] {
+		return registryAnthropicModelOrder.length > 0 ? registryAnthropicModelOrder : DEFAULT_ANTHROPIC_MODELS;
+	}
+
 	function refreshRegistryAnthropicModels(ctx: any) {
 		let hostIds: string[] = [];
 		try {
@@ -6540,7 +6545,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					registerAnthropicSlot(
 						pi,
 						id,
-						DEFAULT_ANTHROPIC_MODELS,
+						anthropicSlotModelIds(),
 						numberedAnthropicBaseUrl(id),
 					);
 				} else if (family === "openai-codex") {
@@ -11389,7 +11394,7 @@ ${note}` : basePrompt;
 				registerCodexSlot(pi, id, config.autoDiscoverModels && cached?.length
 					? (cached as Array<Record<string, unknown>>) : undefined, baseUrl);
 			} else if (family === "anthropic") {
-				registerAnthropicSlot(pi, id, DEFAULT_ANTHROPIC_MODELS, baseUrl);
+				registerAnthropicSlot(pi, id, anthropicSlotModelIds(), baseUrl);
 			}
 		}
 		return true;
@@ -11905,7 +11910,7 @@ ${note}` : basePrompt;
 					api: "anthropic-messages",
 					baseUrl,
 					apiKey: oauth ? placeholderKeyFor(family) : undefined,
-					models: DEFAULT_ANTHROPIC_MODELS.map((modelId) => ({
+					models: anthropicSlotModelIds().map((modelId) => ({
 						...anthropicModelDef(modelId, id),
 						baseUrl,
 					})),

@@ -8193,6 +8193,30 @@ test("numbered Anthropic slots inherit native Fable metadata from the host catal
 	await t.fire("session_shutdown");
 });
 
+test("a published Anthropic slot lists the host's newer Claude models for readers outside this process", async () => {
+	// Live 2026-10-29: Pi offered anthropic-account-2/claude-opus-5-5, but models.json carried only the
+	// static list, so the personal assistant (a separate process reading models.json) never saw it.
+	rmSync(MODELS, { force: true });
+	const t = setup({
+		accounts: {
+			anthropic: { type: "api_key", key: "fixture-key" },
+			"anthropic-account-2": { type: "oauth", access: "sk-ant-oat01-catalog-fixture", refresh: "catalog-refresh" },
+		},
+		current: { provider: "anthropic-account-2", id: "claude-opus-5-5" },
+		hostModelsByProvider: { anthropic: ["claude-opus-5-5", "claude-opus-5"] },
+	});
+	try {
+		await t.fire("session_start");
+		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers["anthropic-account-2"];
+		const ids = slot.models.map((model: { id: string }) => model.id);
+		assert.equal(ids[0], "claude-opus-5-5", `published ${ids.join(", ")}`);
+		assert.ok(ids.includes("claude-opus-5"), "the static fallbacks stay listed");
+	} finally {
+		await t.fire("session_shutdown");
+		rmSync(MODELS, { force: true });
+	}
+});
+
 test("account failover honors the saved Codex default instead of promoting to Astra", async () => {
 	const t = setup({
 		accounts: {

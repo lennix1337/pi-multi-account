@@ -1420,6 +1420,35 @@ test("a subagent model on a spent account is routed to the same tier on a ready 
 	await t.fire("session_shutdown");
 });
 
+// Live 2026-11-01: parent on anthropic-account-2/claude-opus-5-5 (also the saved default), the
+// Codex subagent default spent; children were routed to anthropic/claude-opus-5-5, another
+// account (no credit there) and the saved default's Opus tier instead of the asked one.
+test("a routed subagent stays on the parent's account and keeps the asked tier, not the saved default", async () => {
+	const t = setup({
+		accounts: {
+			anthropic: { type: "api_key", key: "fixture-key" },
+			"anthropic-account-2": { type: "oauth", access: "a2", refresh: "ar2" },
+			"openai-codex-account-2": { type: "oauth", access: "c", refresh: "cr", accountId: "codex-2" },
+		},
+		current: { provider: "anthropic-account-2", id: "claude-opus-5-5" },
+		settings: { defaultProvider: "anthropic-account-2", defaultModel: "claude-opus-5-5" },
+		hostCodexModels: ["gpt-6.1-sol", "gpt-6.1-terra"],
+		hostModelsByProvider: {
+			anthropic: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+			"anthropic-account-2": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+		},
+		config: { providerPriority: ["anthropic", "openai-codex"], childProxy: false },
+		seedCooldownsMsFromNow: { "openai-codex-account-2": 360_000 },
+	});
+	await t.fire("session_start");
+	const request = subagentRouteRequest("openai-codex-account-2", "gpt-6.1-terra");
+	t.emitBus("pi:model-route:request:v1", request);
+
+	assert.equal(request.result?.action, "route", JSON.stringify(request.result));
+	assert.deepEqual(request.result.model, { provider: "anthropic-account-2", id: "claude-sonnet-5-5" });
+	await t.fire("session_shutdown");
+});
+
 test("a subagent model on a ready account is kept", async () => {
 	const t = subagentRouteSetup();
 	await t.fire("session_start");

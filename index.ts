@@ -6831,6 +6831,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		target: string,
 		currentModel: any,
 		preferredOnly = false,
+		ignoreSavedDefault = false,
 	) {
 		const parsed = parseTarget(target);
 		if (!parsed) return [];
@@ -6840,7 +6841,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 
 		// A saved user default is a choice, not a hint to upgrade to the catalog flagship.
-		const selected = !pinnedModelForProvider(parsed.provider) && savedDefaultForProvider(parsed.provider);
+		const selected = !ignoreSavedDefault && !pinnedModelForProvider(parsed.provider) && savedDefaultForProvider(parsed.provider);
 		if (selected) {
 			const model = findModelIncludingHidden(ctx, parsed.provider, selected);
 			return isAccountChatModel(model) ? [model] : [];
@@ -6921,6 +6922,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			/** Keep the source model's product tier across accounts and provider families. */
 			preserveQualityBand?: boolean;
 			/**
+			 * The source model is someone else's choice (a subagent's), so the session's saved default
+			 * is no consent to change its tier: only the source band qualifies.
+			 */
+			ignoreSavedDefault?: boolean;
+			/**
 			 * Automatic failover: try another account that still has THIS model (and family)
 			 * before jumping to a different model. `best` turns this off so confirmation still
 			 * outranks an unmeasurable sibling.
@@ -6949,7 +6955,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// "mini" models as separate rotation targets, or `/multi-account next` ping-pongs
 			// between e.g. gpt-5.4 ↔ gpt-5.4-mini and one chatty provider drowns out the others.
 			// resolveTargets returns this account's models newest-first, so models[0] is the flagship.
-			let models = resolveTargets(ctx, fallbacks[i], currentModel).filter(
+			let models = resolveTargets(ctx, fallbacks[i], currentModel, false, options.ignoreSavedDefault === true).filter(
 				(model: any) =>
 					!options.excludeProviders?.has(model.provider) &&
 					!isInvalidated(model.provider) &&
@@ -6961,7 +6967,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				// A preference is not tier consent, including routed automatic compaction.
 				if (!pinQualityCompatible(model, currentModel)) return false;
 				// The user's saved default is explicit model intent, even across quality bands.
-				if (!pinnedModelForProvider(model.provider) && sameModelIdentity(model.id, savedDefaultForProvider(model.provider))) {
+				if (!options.ignoreSavedDefault && !pinnedModelForProvider(model.provider) && sameModelIdentity(model.id, savedDefaultForProvider(model.provider))) {
 					return explicitlyAllowsPaidApexFallback(model, currentModel);
 				}
 				const candidateBand = modelQualityBand(model.id, model.provider);
@@ -12090,10 +12096,14 @@ ${note}` : basePrompt;
 			request.result = { action: "keep" };
 			return;
 		}
-		const [pick] = findFallbackModels(ctx, readiness.model, {
+		// The parent's own account first: it is the one the operator is working on and just proved
+		// it can serve; another account of the family may be billed elsewhere or have no credit.
+		const picks = findFallbackModels(ctx, readiness.model, {
 			availableNowOnly: true,
 			preserveQualityBand: true,
+			ignoreSavedDefault: true,
 		});
+		const pick = picks.find((model: any) => model.provider === ctx.model?.provider) ?? picks[0];
 		const blocked = readiness.invalidated
 			? "is logged out or invalid"
 			: !readiness.hasAuth

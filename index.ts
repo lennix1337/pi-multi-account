@@ -1145,6 +1145,8 @@ const MAX_SAME_KEY_AUTH_FAILURES = 3;
 const RESUME_IDLE_TIMEOUT_MS = 90 * 1000; // max wait for the prior turn to go idle before we stop blocking
 const STUCK_WATCHDOG_MS = 180 * 1000; // total silence (no stream/tool/response) on a resumed turn ⇒ "stuck"
 const STUCK_REMINDER_MS = 120 * 1000; // re-surface the stuck notice this often while it stays stuck
+// A host that never reports the watchdog's own abort gets this many silent windows to do so.
+const ABORT_REPORT_GRACE_WINDOWS = 4;
 // Hang bound for a routed summary, not a success SLA. Large sessions on Opus routinely
 // take more than 2–3 minutes; the old 150s cap aborted a live summary and then handed
 // compaction to the spent account, which is how "Compacting context…" never ended.
@@ -7894,6 +7896,15 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				armStuckWatchdog();
 				return;
 			}
+			// Our previous tick aborted this turn and flagged it so agent_end could tell that abort
+			// from a user Esc. Another tick means agent_end never came. Write the flag off — left
+			// set, it makes the user's next Esc look like our own recovery — and do not abort a
+			// second time: the reminder path below is bounded, a repeating abort is not.
+			const previousAbortUnanswered = watchdogAborting;
+			if (previousAbortUnanswered) {
+				watchdogAborting = false;
+				logEvent("resume_abort_unanswered", { silentMs: Date.now() - lastResumeProgressAt });
+			}
 			const silentMs = Date.now() - lastResumeProgressAt;
 			const where = ctx?.model
 				? `${ctx.model.provider}/${ctx.model.id}`
@@ -7922,6 +7933,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			noteRecoveryFailure(ctx);
 			if (
 				config.autoRecoverStuck !== false &&
+				!previousAbortUnanswered &&
 				typeof ctx?.abort === "function"
 			) {
 				ctx?.ui?.notify?.(
@@ -7935,7 +7947,16 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					/* if abort is unavailable, fall through to the reminder path below */
 					watchdogAborting = false;
 				}
-				if (watchdogAborting) return; // agent_end(aborted) will arm the auto-resume
+				if (watchdogAborting) {
+					// agent_end(aborted) will arm the auto-resume. If it never arrives, the next
+					// tick writes the flag off (see previousAbortUnanswered).
+					progressWatchdogTimer = setTimeout(
+						onResumeStuck,
+						Math.max(25, config.stuckWatchdogMs) * ABORT_REPORT_GRACE_WINDOWS,
+					);
+					progressWatchdogTimer.unref?.();
+					return;
+				}
 			}
 
 			// Fallback (auto-recover disabled, or no abort available): notify + periodic reminder.
@@ -10913,6 +10934,14 @@ ${note}` : basePrompt;
 	});
 
 	let contextGuardCompactionTimer: ReturnType<typeof setTimeout> | undefined;
+	/**
+	 * Identifies the newest `ctx.compact()` the guard asked for. A summarizer that answers only
+	 * after its request was written off (watchdog, cancellation) reports through callbacks that
+	 * still hold their own request's number; once a later request exists those answers describe a
+	 * different compaction and must not clear the newer one's in-flight flag or dispatch its
+	 * continuation.
+	 */
+	let contextGuardRequestSeq = 0;
 
 	/** The compaction we asked for has reported back (either way): let the next one be asked for. */
 	function clearContextGuardCompactionWait() {
@@ -11038,6 +11067,12 @@ ${note}` : basePrompt;
 		contextGuardCompactionInFlight = true;
 		contextGuardContinuationPending = true;
 		contextGuardLastCompactionAt = Date.now();
+		const requestSeq = ++contextGuardRequestSeq;
+		const supersededRequest = (callback: string) => {
+			if (requestSeq === contextGuardRequestSeq) return false;
+			logEvent("context_guard_stale_callback", { callback });
+			return true;
+		};
 		logEvent("context_guard_compaction_requested", {
 			model: `${ctx?.model?.provider}/${ctx?.model?.id}`,
 			elided: contextGuardElided.size,
@@ -11052,10 +11087,12 @@ ${note}` : basePrompt;
 		try {
 			ctx.compact({
 				onComplete: () => {
+					if (supersededRequest("onComplete")) return;
 					clearContextGuardCompactionWait();
 					dispatchContextGuardContinuation(ctx, recoveryLease, recoveryEpoch);
 				},
 				onError: (error: Error) => {
+					if (supersededRequest("onError")) return;
 					// "Nothing to compact" is a normal answer, not a reason to retry on
 					// every settled event. Clear the demand and back off until a fresh
 					// context observation proves the context still needs a summary. The

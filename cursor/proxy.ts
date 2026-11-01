@@ -29,6 +29,7 @@ import {
   resolveToolCallCoalesceMs,
   type CursorFrameClass,
 } from "./stream-lifecycle.ts";
+import { createStreamPhase } from "./stream-phase.ts";
 import {
   requestActionText,
   historyForRebuild,
@@ -326,6 +327,13 @@ export function setBridgeFactoryForTests(factory?: BridgeFactory): void {
 
 let proxyServer: ReturnType<typeof createServer> | undefined;
 let proxyPort: number | undefined;
+/**
+ * The listener is stopped (neither field above set), starting (this promise set), or listening
+ * (server and port set). `proxyStopEpoch` lets a start that is still binding discover that
+ * `stopProxy()` ran meanwhile and release its socket instead of publishing it.
+ */
+let proxyStarting: Promise<number> | undefined;
+let proxyStopEpoch = 0;
 let proxyAccessTokenProvider: ((req?: IncomingMessage) => Promise<string>) | undefined;
 
 // ── Bridge spawn ──
@@ -506,8 +514,12 @@ export async function startProxy(
 ): Promise<number> {
   proxyAccessTokenProvider = getAccessToken;
   if (proxyServer && proxyPort) return proxyPort;
+  // A second caller while the first is still binding must join it. Starting another listener
+  // would overwrite `proxyServer` and leave the first one bound and unreachable for stopProxy().
+  if (proxyStarting) return proxyStarting;
 
-  return new Promise((resolve, reject) => {
+  const startEpoch = proxyStopEpoch;
+  const starting: Promise<number> = new Promise<number>((resolve, reject) => {
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", `http://localhost`);
       const requestId = nextDebugRequestId();
@@ -556,9 +568,19 @@ export async function startProxy(
       debugLog("http.client_error", { error: String(error) });
       socket.destroy();
     });
-    server.on("error", (error) => debugLog("http.server_error", { error: String(error) }));
+    // A bind failure used to be logged and the start promise never settled, so every caller
+    // (and Pi's session start behind it) waited forever. After the listener is up this is a no-op.
+    server.on("error", (error) => {
+      debugLog("http.server_error", { error: String(error) });
+      reject(error);
+    });
 
     server.listen(0, "127.0.0.1", () => {
+      if (startEpoch !== proxyStopEpoch) {
+        server.close();
+        reject(new Error("Cursor proxy was stopped while it was starting"));
+        return;
+      }
       const addr = server.address();
       if (typeof addr === "object" && addr) {
         proxyPort = addr.port;
@@ -574,7 +596,11 @@ export async function startProxy(
         reject(new Error("Failed to bind proxy"));
       }
     });
+  }).finally(() => {
+    if (proxyStarting === starting) proxyStarting = undefined;
   });
+  proxyStarting = starting;
+  return starting;
 }
 
 export function cleanupAllSessionState(): void {
@@ -587,6 +613,8 @@ export function cleanupAllSessionState(): void {
 
 export function stopProxy(): void {
   debugLog("proxy.stop", { port: proxyPort });
+  proxyStopEpoch++;
+  proxyStarting = undefined;
   if (proxyServer) {
     proxyServer.close();
     proxyServer = undefined;
@@ -2003,8 +2031,9 @@ function writeSSEStream(
     const message = `Cursor Run stalled: no ${missing} for ${formatStallDuration(silentForMs)}; stream timed out`;
     console.error(`[cursor-provider] ${kind} stall (${modelId}):`, message);
     debugLog("stream.upstream_stall", { requestId, bridgeKey, convKey, modelId, kind, silentForMs });
-    cancelled = true;
-    if (!toolCallsFlushed) {
+    const toolsStillQueued = phase.is("tools_queued");
+    phase.move("cancelled");
+    if (toolsStillQueued) {
       for (const exec of state.pendingExecs) {
         resumePendingExecWithToolResult(exec, message, true, (data) => bridge.write(data));
       }
@@ -2038,17 +2067,17 @@ function writeSSEStream(
 
   const state: StreamState = { toolCallIndex: 0, pendingExecs: [], outputTokens: 0, totalTokens: 0, promptTokenEstimate };
   const tagFilter = createThinkingTagFilter();
-  let mcpExecReceived = false;
-  let toolCallsFlushed = false;
-  let cancelled = false;
+  const phase = createStreamPhase({
+    strict: !!process.env.NODE_TEST_CONTEXT,
+    onIllegal: (from, to) => debugLog("stream.illegal_transition", { requestId, bridgeKey, from, to }),
+  });
   let latestCheckpoint: Uint8Array | null = null;
   const coalesceMs = resolveToolCallCoalesceMs();
 
   const flushPiToolCalls = () => {
     clearCoalesceTimer();
-    if (closed || cancelled || toolCallsFlushed || state.pendingExecs.length === 0) return;
-    toolCallsFlushed = true;
-    mcpExecReceived = true;
+    if (closed || !phase.is("tools_queued")) return;
+    phase.move("tools_paused");
 
     const flushed = tagFilter.flush();
     if (flushed.reasoning) sendSSE(makeChunk({ reasoning_content: flushed.reasoning }));
@@ -2079,13 +2108,13 @@ function writeSSEStream(
   };
 
   const queuePiTool = (exec: PendingExec) => {
-    if (closed || cancelled || toolCallsFlushed) {
+    if (closed || !phase.is("streaming", "tools_queued")) {
       debugLog("stream.late_exec_rejected", { requestId, bridgeKey, exec });
       resumePendingExecWithToolResult(exec, NATIVE_TOOL_UNAVAILABLE, true, (data) => bridge.write(data));
       return;
     }
     state.pendingExecs.push(exec);
-    mcpExecReceived = true;
+    if (phase.is("streaming")) phase.move("tools_queued");
     currentTurn.steps.push({
       kind: "toolCall",
       toolCallId: exec.toolCallId,
@@ -2098,7 +2127,8 @@ function writeSSEStream(
   };
 
   const finishOpenAITurn = () => {
-    if (closed || mcpExecReceived) return;
+    if (closed || !phase.is("streaming")) return;
+    phase.move("finished");
     const flushed = tagFilter.flush();
     if (flushed.reasoning) sendSSE(makeChunk({ reasoning_content: flushed.reasoning }));
     if (flushed.content) {
@@ -2114,9 +2144,9 @@ function writeSSEStream(
 
   // Detect client disconnect (e.g. user pressed Escape in pi)
   const onClientClose = () => {
-    if (cancelled || closed) return;
+    if (closed || !phase.is("streaming", "tools_queued")) return;
     debugLog("stream.client_close", { requestId, bridgeKey, convKey });
-    cancelled = true;
+    phase.move("cancelled");
     cleanupBridge(bridge, heartbeatTimer, bridgeKey);
     closeResponse();
   };
@@ -2159,7 +2189,7 @@ function writeSSEStream(
             debugLog("stream.checkpoint_buffered", { requestId, convKey, checkpointBytes });
           },
           () => {
-            debugLog("stream.turn_ended", { requestId, bridgeKey, convKey, mcpExecReceived, closed });
+            debugLog("stream.turn_ended", { requestId, bridgeKey, convKey, phase: phase.current, closed });
             finishOpenAITurn();
           },
         );
@@ -2176,6 +2206,7 @@ function writeSSEStream(
         sendSSE(makeChunk({ content: endError.message }, "error"));
         sendSSE(makeUsageChunk());
         sendDone();
+        if (phase.is("streaming", "tools_queued")) phase.move("finished");
         closeResponse();
       }
     },
@@ -2184,7 +2215,7 @@ function writeSSEStream(
   bridge.onData(processChunk);
 
   bridge.onClose((code) => {
-    debugLog("stream.bridge_close", { requestId, bridgeKey, convKey, code, cancelled, mcpExecReceived, toolCallsFlushed, currentTurn, latestCheckpoint });
+    debugLog("stream.bridge_close", { requestId, bridgeKey, convKey, code, phase: phase.current, currentTurn, latestCheckpoint });
     clearCoalesceTimer();
     transportWatchdog.stop();
     upstreamWatchdog.stop();
@@ -2195,25 +2226,27 @@ function writeSSEStream(
     if (stored) {
       for (const [k, v] of blobStore) stored.blobStore.set(k, v);
       stored.lastAccessMs = Date.now();
-      if (!cancelled && latestCheckpoint) {
+      if (!phase.is("cancelled") && latestCheckpoint) {
         stored.checkpoint = latestCheckpoint;
         debugLog("stream.checkpoint_committed", { requestId, convKey, stored });
       }
     }
-    if (cancelled || closed) return;
-    if (!mcpExecReceived) {
+    if (phase.is("tools_paused")) {
+      // The response ended when the tool calls were flushed, so there is nobody left to tell. What
+      // is left is the paused Run's registry entry: its bridge just died, so Pi's tool results can
+      // never resume it. Drop it now instead of leaving a dead handle for the next request.
+      if (activeBridges.get(bridgeKey)?.bridge === bridge) activeBridges.delete(bridgeKey);
+      return;
+    }
+    if (closed || phase.is("cancelled")) return;
+    if (phase.is("streaming")) {
       finishOpenAITurn();
-    } else if (!toolCallsFlushed) {
+    } else if (phase.is("tools_queued")) {
+      phase.move("finished");
       sendSSE(makeChunk({ content: "Cursor ended the turn before tools could run" }, "error"));
       sendSSE(makeUsageChunk());
       sendDone();
       closeResponse();
-    } else if (code !== 0) {
-      sendSSE(makeChunk({ content: "Bridge connection lost" }, "error"));
-      sendSSE(makeUsageChunk());
-      sendDone();
-      closeResponse();
-      activeBridges.delete(bridgeKey);
     }
   });
 }

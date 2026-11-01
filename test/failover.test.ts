@@ -7542,6 +7542,45 @@ test("a silent resumed turn is AUTO-cancelled and auto-resume armed — no manua
 	await t.fire("session_shutdown");
 });
 
+test("a watchdog abort the host never reports does not turn a later user Esc into a recovery", async () => {
+	// The watchdog flags its own abort so agent_end can tell it from a user cancel. If the host
+	// never answers that abort with an agent_end, the flag must not stay set: it would make the
+	// user's next Esc look like our own recovery and re-arm the very work they just cancelled.
+	let release: () => void = () => {};
+	const blocked = new Promise<void>((res) => {
+		release = res;
+	});
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		idle: false,
+		config: { stuckWatchdogMs: 40 },
+		continueBlocks: () => blocked,
+	});
+	const err = assistantError("anthropic", "claude-opus-4-8", "429 rate limit");
+	await t.fire("message_end", { message: err });
+	t.setIdle(true);
+	const pending = t.fire("agent_end", { messages: [err] });
+	await wait(120); // the watchdog fires and aborts once
+	assert.ok(t.rec.aborts >= 1, "the watchdog cancelled the wedged turn");
+	await wait(200); // the host stays silent: no agent_end for that abort
+	assert.ok(
+		readDebugLog().some((entry) => entry.kind === "resume_abort_unanswered"),
+		"an abort the host never reported is written off instead of staying armed",
+	);
+	release();
+	await pending;
+	await t.input("keep going");
+	await t.fire("agent_end", {
+		messages: [{ role: "assistant", stopReason: "aborted" }],
+	});
+	const state = t.readState();
+	assert.ok(
+		!state.pendingFrom && !state.pendingReason,
+		"a user Esc after an unanswered watchdog abort is a stop, not an auto-resume",
+	);
+	await t.fire("session_shutdown");
+});
+
 test("the watchdog never aborts a resumed turn while a tool (build/test) is running", async () => {
 	let release: () => void = () => {};
 	const blocked = new Promise<void>((res) => {
@@ -14456,6 +14495,70 @@ test("a failed guard compaction clears demand and backs off before retrying", as
 		"the next settled boundary must not immediately repeat a failed compaction",
 	);
 	await t.fire("session_shutdown");
+});
+
+test("a summarizer answering after its request was written off cannot settle the next compaction", async () => {
+	// A request the guard has already written off keeps its callbacks. Once a later request is in
+	// flight, a late answer from the first must not clear the second's in-flight flag or dispatch
+	// the second's continuation: the guard would then start a third summary while the second still
+	// runs, and "carry on" would be sent into a compaction that has not finished.
+	const realNow = Date.now;
+	let clockOffsetMs = 0;
+	mock.method(Date, "now", () => realNow() + clockOffsetMs);
+	try {
+		const t = setup({
+			current: { provider: "openai-codex", id: "gpt-5.6-sol" },
+			config: { compactionWatchdogMs: 600_000 },
+			compactSilent: true,
+		});
+		t.ctx.model.contextWindow = 272_000;
+		t.ctx.getSystemPrompt = () => "";
+
+		await t.fire("context", { messages: bigConversation(50) });
+		t.setIdle(true);
+		await t.fire("agent_settled", {});
+		assert.equal(t.rec.compacts.length, 1, "the guard asked for a summary");
+
+		await t.fire("session_compact_failed", {
+			reason: "manual",
+			aborted: true,
+			willRetry: false,
+			fromExtension: false,
+		});
+		await wait(0);
+		const sentAfterFirstWriteOff = t.rec.sent.length;
+		// The resumed turn finishes, which frees the recovery lease the next summary needs.
+		await t.fire("agent_end", {
+			messages: [{ role: "assistant", stopReason: "stop", content: [] }],
+		});
+
+		clockOffsetMs = 10 * 60_000; // past the failure backoff and the compaction cooldown
+		await t.fire("context", { messages: bigConversation(50) });
+		await t.fire("agent_settled", {});
+		assert.equal(t.rec.compacts.length, 2, "after the backoff the guard asks again");
+
+		const lateAnswerFromFirstRequest = t.rec.compacts[0].onComplete as (r: unknown) => void;
+		lateAnswerFromFirstRequest({ summary: "late summary" });
+		await wait(0);
+		assert.equal(
+			t.rec.sent.length,
+			sentAfterFirstWriteOff,
+			"a late answer from the written-off request must not dispatch the running compaction's continuation",
+		);
+		await t.fire("agent_settled", {});
+		assert.equal(
+			t.rec.compacts.length,
+			2,
+			"a late answer from the written-off request must not free the guard to start a third compaction",
+		);
+		assert.ok(
+			readDebugLog().some((entry) => entry.kind === "context_guard_stale_callback"),
+			"the ignored answer is recorded",
+		);
+		await t.fire("session_shutdown");
+	} finally {
+		mock.restoreAll();
+	}
 });
 
 test("an unanswered guard compaction still resumes the interrupted task", async () => {

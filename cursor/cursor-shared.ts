@@ -94,7 +94,13 @@ export async function ensureCursorProxy(resolve: TokenResolver): Promise<number>
     }
     return fallback;
   });
-  return proxyPromise;
+  // A failed bind must not be remembered: every later call would receive the same rejection and
+  // the proxy could never start for the rest of the process.
+  const starting = proxyPromise;
+  starting.catch(() => {
+    if (proxyPromise === starting) proxyPromise = undefined;
+  });
+  return starting;
 }
 
 function displayName(id: string): string {

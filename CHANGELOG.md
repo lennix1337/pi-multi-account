@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### State-machine audit
+
+- Catalog the implicit lifecycles in `docs/state-machines.md`.
+- Cursor loopback proxy: concurrent starts share one listener, a stop during a start releases the socket instead of publishing it, a failed bind rejects instead of hanging session start, and a failed shared start is no longer remembered for the rest of the process.
+- Cursor streams: one explicit phase replaces four booleans, and a paused run whose bridge died is dropped from the resume registry immediately.
+- Context guard: a late answer from a compaction request that was already written off can no longer settle the next compaction or send its "carry on" early.
+- Resume watchdog: an abort the host never reports is written off after a grace period instead of turning the user's next Esc into an automatic recovery.
+
 ### Selected model defaults during account rotation
 
 - Honor the model saved in Pi settings across sibling accounts, including cross-family failover and manual `use`. Do not promote a saved Codex Sol default to Astra because it leads the catalog. If the chosen model is unavailable, do not silently substitute another model. Explicit targets/pins and the paid-provider admission boundary remain intact.

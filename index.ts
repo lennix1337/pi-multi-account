@@ -5351,10 +5351,14 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		applyOnlyActiveFilter(ctx);
 	}
 
-	function cachedUsage(provider: string): UsageSnapshot | undefined {
+	/**
+	 * The provider's usage snapshot while its credential is unchanged. A caller that already read the
+	 * credential store passes it as `auth`, so a listing of N accounts reads auth.json once, not N+1 times.
+	 */
+	function cachedUsage(provider: string, auth?: Record<string, AuthEntry>): UsageSnapshot | undefined {
 		const snapshot = usageByProvider.get(provider);
 		if (!snapshot) return undefined;
-		const entry = readAuthFile()[provider];
+		const entry = (auth ?? readAuthFile())[provider];
 		const currentHash = entry ? credentialHash(entry) : undefined;
 		if (snapshot.credentialHash && snapshot.credentialHash !== currentHash)
 			return undefined;
@@ -5687,7 +5691,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const unconfigured = new Set(unconfiguredRotationMembers(ctx));
 		return ordered.map((provider) => {
 			const entry = auth[provider];
-			const snapshot = cachedUsage(provider);
+			const snapshot = cachedUsage(provider, auth);
 			const duplicate = duplicateOf.get(provider);
 			const recoveryAt = providerRecoveryAt(provider, now);
 			let status: string;

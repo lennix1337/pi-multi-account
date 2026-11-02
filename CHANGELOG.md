@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Autocomplete latency
+
+- `/multi-account use <Tab>` reads `auth.json` and the proxy sidecar once per keystroke instead of once per account. A usage snapshot is still dropped as soon as its account's credential changes. Measured on a disposable 8-account profile: mean 627 µs → 219 µs per keystroke, 18 → 2 credential-file reads.
+
 ### Startup and reload latency
 
 - Session start, `/multi-account reload` and `rediscover` read account usage and both live model catalogs (Codex, Ollama) together instead of one after another, so they wait for the slowest read rather than the sum. Failures are still reported per read. The periodic status refresh stays sequential, because it re-registers models only while Pi is idle.

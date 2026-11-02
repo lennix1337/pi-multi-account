@@ -5636,6 +5636,21 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		updateUsageStatus(ctx);
 	}
 
+	/**
+	 * Usage snapshots and both live model catalogs are independent network reads, and each writes only its
+	 * own cache, so they run together: startup and /reload wait for the slowest read instead of their sum.
+	 * A failure in one does not stop the others; the first failure is rethrown once they have all settled.
+	 */
+	async function refreshAccountMetadata(ctx: any, options: { usage: boolean; force: boolean }): Promise<void> {
+		const outcomes = await Promise.allSettled([
+			options.usage ? refreshRotationUsage(ctx) : undefined,
+			syncCodexModelCatalog(ctx, options.force),
+			syncOllamaModelCatalog(ctx, options.force),
+		]);
+		const failed = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+		if (failed) throw failed.reason;
+	}
+
 	function accountUsageCell(
 		snapshot: UsageSnapshot | undefined,
 		position: UsageWindowPosition,
@@ -9829,11 +9844,9 @@ ${note}` : basePrompt;
 				if (pendingResumeEnabled()) schedulePendingWake(ctx);
 				else clearPendingContinuation();
 			}
-			runBackground("reload account metadata refresh", ctx, async () => {
-				await refreshRotationUsage(ctx);
-				await syncCodexModelCatalog(ctx, true);
-				await syncOllamaModelCatalog(ctx, true);
-			});
+			runBackground("reload account metadata refresh", ctx, () =>
+				refreshAccountMetadata(ctx, { usage: true, force: true }),
+			);
 			ctx.ui.notify(
 				"pi-multi-account: config reloaded and accounts re-discovered",
 				"info",
@@ -9846,11 +9859,9 @@ ${note}` : basePrompt;
 				await publishProxiedSlots(ctx);
 				await publishOwnedNativeAliases(ctx);
 			});
-			runBackground("rediscover account metadata refresh", ctx, async () => {
-				await refreshRotationUsage(ctx);
-				await syncCodexModelCatalog(ctx, true);
-				await syncOllamaModelCatalog(ctx, true);
-			});
+			runBackground("rediscover account metadata refresh", ctx, () =>
+				refreshAccountMetadata(ctx, { usage: true, force: true }),
+			);
 			ctx.ui.notify(
 				`pi-multi-account: rediscovered accounts${changed ? "" : " (no auth.json change)"}. Rotation: ${rotation.join(" → ") || "none"}`,
 				"info",
@@ -12377,11 +12388,7 @@ ${note}` : basePrompt;
 		// already switched away from it using the old plan's stale 100% snapshot. The delegated
 		// runner owns fallback selection in a child, so multiplying that fleet-wide probe across
 		// every parallel child buys nothing.
-		if (!subagentChild) await refreshRotationUsage(ctx);
-		if (sessionClosed || chainEpoch !== startEpoch) return;
-		await syncCodexModelCatalog(ctx);
-		if (sessionClosed || chainEpoch !== startEpoch) return;
-		await syncOllamaModelCatalog(ctx);
+		await refreshAccountMetadata(ctx, { usage: !subagentChild, force: false });
 		if (sessionClosed || chainEpoch !== startEpoch) return;
 		// Pi restores the session model BEFORE extension catalogs finish registering
 		// unless the factory returned the Cursor setup promise. Re-apply anyway: a

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Startup and reload latency
+
+- Session start, `/multi-account reload` and `rediscover` read account usage and both live model catalogs (Codex, Ollama) together instead of one after another, so they wait for the slowest read rather than the sum. Failures are still reported per read. The periodic status refresh stays sequential, because it re-registers models only while Pi is idle.
+
 ### State-machine audit
 
 - Catalog the implicit lifecycles in `docs/state-machines.md`.

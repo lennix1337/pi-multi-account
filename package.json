@@ -74,7 +74,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
-    "verify": "npm run check && npm test",
+    "verify": "npm run check && npm test && npm run mutations && npm run pack:check",
     "mutations": "node test/mutations.mjs",
     "test:recovery": "node --test test/recovery-safety.test.ts test/quota-recovery-session.test.ts test/policy-refusal-core-retry.integration.test.ts",
     "pack:check": "node scripts/check-package.mjs && node scripts/check-tracked-privacy.mjs",

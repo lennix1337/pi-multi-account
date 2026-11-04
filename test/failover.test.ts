@@ -13431,6 +13431,70 @@ test("shutdown drains pending model publications before cleaning shared routes",
 	}
 });
 
+test("a reload keeps numbered accounts published, so the rebuilt registry never falls back to the base account", async () => {
+	// Live 2026-11-04: Pi's reload fires session_shutdown("reload"), rebuilds its model registry
+	// from models.json, then fires session_start. Unpublishing anthropic-account-2 on that shutdown
+	// left only the base `anthropic` (another account) for about a second; a summary requested in
+	// that gap went to account 1 and failed with "credit balance is too low".
+	rmSync(MODELS, { force: true });
+	const accounts: Account = {
+		anthropic: { type: "api_key", key: "sk-ant-api-base-fixture" },
+		"anthropic-account-2": { type: "oauth", access: "sk-ant-oat01-second", refresh: "second-refresh", expires: Date.now() + 3600_000 },
+	};
+	const first = setup({ accounts, current: { provider: "anthropic-account-2", id: "claude-opus-5" } });
+	first.ctx.sessionManager = { getBranch: () => [] };
+	let reloaded: ReturnType<typeof setup> | undefined;
+	try {
+		await first.fire("session_start");
+		const route = JSON.parse(readFileSync(MODELS, "utf8")).providers["anthropic-account-2"]?.baseUrl;
+		assert.match(route, /^http:\/\/127\.0\.0\.1:\d+\//);
+		await first.fire("session_shutdown", { reason: "reload" });
+		assert.equal(JSON.parse(readFileSync(MODELS, "utf8")).providers["anthropic-account-2"]?.baseUrl, route,
+			"Pi rebuilds its registry from models.json between reload's shutdown and start");
+		assert.equal(JSON.parse(readFileSync(AUTH, "utf8"))["anthropic-account-2"].type, "api_key",
+			"the child-facing placeholder stays while the same process restarts");
+		// A request in the handoff gap waits for the next root instead of failing.
+		const inGap = callProxy(route, "/v1/messages", {});
+		reloaded = setup({ reuseSlotProxyPort: true, preserveConfig: true,
+			accounts: JSON.parse(readFileSync(AUTH, "utf8")),
+			current: { provider: "anthropic-account-2", id: "claude-opus-5" } });
+		reloaded.ctx.sessionManager = { getBranch: () => [] };
+		await reloaded.fire("session_start", { reason: "reload" });
+		assert.equal((await inGap).status, 401, "the new root serves the request held during the handoff");
+		assert.equal(JSON.parse(readFileSync(MODELS, "utf8")).providers["anthropic-account-2"]?.baseUrl, route);
+	} finally {
+		await reloaded?.fire("session_shutdown", { reason: "quit" });
+		await first.fire("session_shutdown", { reason: "quit" });
+	}
+	assert.equal(JSON.parse(readFileSync(MODELS, "utf8")).providers?.["anthropic-account-2"]?.baseUrl, undefined,
+		"quitting still removes the route of a proxy that is gone");
+	rmSync(MODELS, { force: true });
+});
+
+test("a reload that never starts again still cleans the shared routes", async () => {
+	rmSync(MODELS, { force: true });
+	process.env.PI_MULTI_ACCOUNT_HANDOFF_MS = "50";
+	const t = setup({ accounts: {
+		"anthropic-account-2": { type: "oauth", access: "sk-ant-oat01-second", refresh: "second-refresh", expires: Date.now() + 3600_000 },
+	} });
+	try {
+		await t.fire("session_start");
+		const route = JSON.parse(readFileSync(MODELS, "utf8")).providers["anthropic-account-2"]?.baseUrl;
+		await t.fire("session_shutdown", { reason: "reload" });
+		assert.equal(JSON.parse(readFileSync(MODELS, "utf8")).providers["anthropic-account-2"]?.baseUrl, route);
+		await wait(200);
+		assert.equal(JSON.parse(readFileSync(MODELS, "utf8")).providers?.["anthropic-account-2"]?.baseUrl, undefined,
+			"a handoff nobody takes must not leave a dead proxy published");
+		assert.equal(JSON.parse(readFileSync(AUTH, "utf8"))["anthropic-account-2"].type, "oauth",
+			"and the hidden OAuth goes back to auth.json");
+		await assert.rejects(callProxy(route, "/v1/messages", {}), "the listener closes with it");
+	} finally {
+		delete process.env.PI_MULTI_ACCOUNT_HANDOFF_MS;
+		await t.fire("session_shutdown", { reason: "quit" });
+		rmSync(MODELS, { force: true });
+	}
+});
+
 test("user modelOverrides survive proxy publication, rediscovery, and shutdown cleanup", async () => {
 	rmSync(MODELS, { force: true });
 	const modelOverrides = {

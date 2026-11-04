@@ -61,6 +61,30 @@ test("busy state lock fails boundedly without mutation and permits a later retry
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a transient EPERM on the lock directory is contention, not a failed write", () => {
+  // Windows answers mkdir with EPERM while another process's rmdir of the same
+  // lock directory is still pending (seen in `npm run verify`, 04/11).
+  const dir = mkdtempSync(join(tmpdir(), "multi-state-eperm-")), path = join(dir, "state.json");
+  const lockfile = createRequire(import.meta.url)("proper-lockfile");
+  const real = lockfile.lockSync;
+  let refusals = 0;
+  lockfile.lockSync = (...args: unknown[]) => {
+    if (refusals++ < 2) throw Object.assign(new Error("EPERM: operation not permitted, mkdir"), { code: "EPERM" });
+    return real.apply(lockfile, args);
+  };
+  try {
+    mutateStateFile(path, disk => ({ ...disk, written: true }));
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { written: true });
+    lockfile.lockSync = () => { throw Object.assign(new Error("EPERM: operation not permitted, mkdir"), { code: "EPERM" }); };
+    const start = Date.now();
+    assert.throws(() => mutateStateFile(path, () => ({})), { code: "EPERM" });
+    assert.ok(Date.now() - start < 5000, "a lasting EPERM still fails boundedly");
+  } finally {
+    lockfile.lockSync = real;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("four real processes retain every independent state update without torn JSON", async () => {
   const dir = mkdtempSync(join(tmpdir(), "multi-state-")), path = join(dir, "state.json");
   const module = new URL("../state-file-transaction.ts", import.meta.url).href;

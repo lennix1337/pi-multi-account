@@ -8,6 +8,7 @@ import test from "node:test";
 const dir = mkdtempSync(join(tmpdir(), "multi-account-exempt-sdk-"));
 process.env.PI_CODING_AGENT_DIR = dir;
 process.env.PI_OFFLINE = "1";
+delete process.env.PI_SUBAGENT_CHILD; // This fixture exercises an interactive session.
 const { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } = await import("@earendil-works/pi-coding-agent");
 const { createAssistantMessageEventStream } = await import("@earendil-works/pi-ai");
 const { default: multiAccount } = await import("../index.ts");

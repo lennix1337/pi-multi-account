@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+delete process.env.PI_SUBAGENT_CHILD; // This fixture exercises an interactive session.
+
 // Real Pi agent retry loop with a synthetic local provider. The provider never performs a
 // network request; this checks the host retry independently from extension continuation hooks.
 test("provider policy refusal aborts Pi's native agent retry", { timeout: 15000 }, async () => {

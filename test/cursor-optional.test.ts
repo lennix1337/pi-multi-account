@@ -28,6 +28,7 @@ const DRIVER = `const agentDir = process.argv[2];
 const cursorRoot = process.argv[3];
 process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.PI_CURSOR_PROVIDER_ROOT = cursorRoot;
+delete process.env.PI_SUBAGENT_CHILD; // This fixture exercises an interactive session.
 
 const rejections = [];
 const registeredProviders = [];

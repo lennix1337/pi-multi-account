@@ -16,6 +16,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -44,6 +45,18 @@ process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
 let nextSlotProxyPort = 41500;
 function currentSlotProxyPort(): number {
 	return Number(process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT);
+}
+
+async function unusedLoopbackPort(): Promise<number> {
+	const server = createServer();
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	const address = server.address();
+	assert.ok(address && typeof address !== "string");
+	await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+	return address.port;
 }
 const CURSOR_ROOT = join(AGENT_DIR, "cursor-provider");
 process.env.PI_CURSOR_PROVIDER_ROOT = CURSOR_ROOT;
@@ -387,8 +400,12 @@ function setup(opts: {
 	preserveConfig?: boolean;
 	/** Contend for the port the previous instance is still listening on, instead of a fresh one. */
 	reuseSlotProxyPort?: boolean;
+	/** Use an independently allocated port for tests that must own shared publication. */
+	slotProxyPort?: number;
 }) {
-	if (!opts.reuseSlotProxyPort) {
+	if (opts.slotProxyPort !== undefined) {
+		process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT = String(opts.slotProxyPort);
+	} else if (!opts.reuseSlotProxyPort) {
 		process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT = String(nextSlotProxyPort++);
 	}
 	const accounts = opts.accounts ?? TWO_ACCOUNTS;
@@ -13979,12 +13996,26 @@ test("legacy set-only refresh persistence updates the private sidecar without wr
 test("production Anthropic refresh keeps a shadowed slot private throughout persistence", async () => {
 	rmSync(MODELS, { force: true });
 	const slotId = "anthropic-account-2";
-	const t = setup({ hostAuthStorage: "pi-0.84", accounts: { [slotId]: { type: "oauth", access: "sk-ant-oat01-expired-production-fixture", refresh: "production-refresh-fixture", expires: Date.now() - 1000 } } });
+	// A fixed fixture port can be held by an unrelated local socket; that makes Pi a
+	// non-publisher even though its private proxy starts successfully.
+	const occupied = createServer();
+	await new Promise<void>((resolve, reject) => {
+		occupied.once("error", reject);
+		occupied.listen(0, "127.0.0.1", resolve);
+	});
+	const address = occupied.address();
+	assert.ok(address && typeof address !== "string");
+	const savedNextPort = nextSlotProxyPort;
+	nextSlotProxyPort = address.port;
+	const port = await unusedLoopbackPort();
+	const t = setup({ slotProxyPort: port, hostAuthStorage: "pi-0.84", accounts: { [slotId]: { type: "oauth", access: "sk-ant-oat01-expired-production-fixture", refresh: "production-refresh-fixture", expires: Date.now() - 1000 } } });
+	nextSlotProxyPort = savedNextPort;
 	const originalFetch = globalThis.fetch;
 	const snapshots: any[] = [];
 	let refreshes = 0, forwarded: string | undefined;
 	try {
 		await t.fire("session_start");
+		assert.ok(existsSync(MODELS), "the fixture must own shared publication despite the occupied sequential port");
 		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers[slotId];
 		const modify = t.ctx.modelRegistry.authStorage.modify;
 		t.ctx.modelRegistry.authStorage.modify = async (...args: any[]) => {
@@ -14009,7 +14040,12 @@ test("production Anthropic refresh keeps a shadowed slot private throughout pers
 		assert.ok(snapshots.length > 0, "the real production AuthStorage persistence path was exercised");
 		assert.ok(snapshots.every(entry => entry.type === "api_key" && entry.key === slot.apiKey), JSON.stringify(snapshots));
 		assert.equal(JSON.parse(readFileSync(PROXY_OAUTH_SIDECAR, "utf8"))[slotId].access, "sk-ant-oat01-rotated-production-fixture");
-	} finally { globalThis.fetch = originalFetch; await t.fire("session_shutdown"); rmSync(MODELS, { force: true }); }
+	} finally {
+		globalThis.fetch = originalFetch;
+		await t.fire("session_shutdown");
+		await new Promise<void>((resolve, reject) => occupied.close(error => error ? reject(error) : resolve()));
+		rmSync(MODELS, { force: true });
+	}
 });
 
 test("the Anthropic wrapper preserves ordinary API-key request semantics and pre-dispatch cancellation", async () => {

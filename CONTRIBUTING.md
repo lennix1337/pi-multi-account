@@ -26,11 +26,11 @@ Requirements: Node.js >= 22.
 ## Before you open a PR
 
 ```bash
-npm run check        # TypeScript type-check (tsc --noEmit)
-npm run pack:check   # npm pack --dry-run — verify the published file set
+npm run verify       # type-check, full tests, guard mutations, and package/privacy checks
+node --test test/state-file-transaction.test.ts  # example focused module test
 ```
 
-CI runs the same checks on every pull request; they must pass before review.
+CI runs these local gates for code changes, plus a Pi host-version compatibility matrix; they must pass before review.
 
 ## Coding guidelines
 

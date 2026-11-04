@@ -3966,6 +3966,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		starting?: Promise<number | undefined>;
 		publisher?: object;
 		handlerOwner?: object;
+		// Set while the same process replaces its last root (reload, new, resume, fork): the
+		// socket and shared files wait for the next root until this deadline.
+		handoffUntil?: number;
+		handoffTimer?: ReturnType<typeof setTimeout>;
 	};
 	const coordinatorKey = Symbol.for("pi-multi-account:shared-slot-proxy-coordinators");
 	const coordinatorGlobals = globalThis as typeof globalThis & {
@@ -11489,6 +11493,10 @@ ${note}` : basePrompt;
 			coordinator = { members: new Map(), routes: new Map(), sessionOwners: new Map() };
 			coordinators.set(SLOT_PROXY_PORT, coordinator);
 		}
+		if (coordinator.handoffTimer) {
+			clearTimeout(coordinator.handoffTimer);
+			coordinator.handoffTimer = undefined;
+		}
 		slotProxyCoordinator = coordinator;
 		if (sessionId) {
 			const previousOwner = coordinator.sessionOwners.get(sessionId);
@@ -11513,6 +11521,7 @@ ${note}` : basePrompt;
 		if (!member || sessionClosed || subagentChild || !coordinator?.server?.listening) return;
 		member.ready = true;
 		coordinator.handlerOwner = activationOwner;
+		coordinator.handoffUntil = undefined;
 	}
 
 	refreshDiscovery(true);
@@ -11751,14 +11760,22 @@ ${note}` : basePrompt;
 		slotProxyStarting = new Promise<number | undefined>((resolve) => {
 			let retriedOnEphemeralPort = false;
 			let canonicalListener = false;
-			const server = createServer((req, res) => {
-				// The socket outlives its first session. Dispatch only to a live, ready root;
-				// a handoff gap must fail closed, never use a closed root's refresh context.
+			const readyHandler = () => {
+				if (!canonicalListener) return handleProxyRequest;
 				const owner = coordinator?.handlerOwner;
 				const member = owner ? coordinator?.members.get(owner) : undefined;
-				const handler = canonicalListener
-					? (member?.ready ? member.handleRequest : undefined)
-					: handleProxyRequest;
+				return member?.ready ? member.handleRequest : undefined;
+			};
+			const server = createServer(async (req, res) => {
+				// The socket outlives its first session. Dispatch only to a live, ready root,
+				// never to a closed root's refresh context. While the same process replaces its
+				// root, hold the request for the next one: failing it would send the caller to
+				// whatever account its registry still has.
+				let handler = readyHandler();
+				while (!handler && Date.now() < (coordinator?.handoffUntil ?? 0)) {
+					await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+					handler = readyHandler();
+				}
 				if (!handler) {
 					res.writeHead(503, { "content-type": "application/json" });
 					res.end(JSON.stringify({ error: { message: "slot proxy handoff in progress" } }));
@@ -11861,7 +11878,58 @@ ${note}` : basePrompt;
 		return slotProxyStarting;
 	}
 
-	function stopSlotProxy() {
+	/**
+	 * Final cleanup once a coordinator has no member: close the canonical listener and take the
+	 * shared routes out of auth.json/models.json, so no child is left pointing at a dead proxy.
+	 */
+	function releaseSharedProxy(coordinator: SharedProxyCoordinator, cleanupWithoutProxy: boolean): void {
+		if (coordinator.handoffTimer) clearTimeout(coordinator.handoffTimer);
+		coordinator.handoffTimer = undefined;
+		coordinator.handoffUntil = undefined;
+		if (coordinator.server) {
+			// Keep the canonical port claimed until shared files are restored; another
+			// process must not publish a new placeholder during our final cleanup.
+			coordinator.routes.clear();
+			restoreChildFacingAuth();
+			unprovisionOwnLoopbacks();
+			try { coordinator.server.close(); } catch { /* already closed */ }
+			coordinator.server = undefined;
+		}
+		if (!coordinator.server && cleanupWithoutProxy) {
+			unprovisionOwnLoopbacks();
+			restoreChildFacingAuth();
+		}
+		if (!coordinator.starting && coordinators.get(SLOT_PROXY_PORT) === coordinator) {
+			coordinators.delete(SLOT_PROXY_PORT);
+		}
+		coordinator.routes.clear();
+	}
+
+	/**
+	 * Pi's reload (and new/resume/fork) fires session_shutdown, rebuilds its model registry from
+	 * models.json, then fires session_start in the same process. Unpublishing on that shutdown
+	 * leaves the registry with only the base account of each family, so anything resolved in the
+	 * gap silently runs on another account. Hand the socket and files to the next root instead;
+	 * clean up only if none arrives before the deadline.
+	 */
+	function handOffSharedProxy(coordinator: SharedProxyCoordinator, cleanupWithoutProxy: boolean): void {
+		const handoffMs = Number(process.env.PI_MULTI_ACCOUNT_HANDOFF_MS) || 30_000;
+		coordinator.handlerOwner = undefined;
+		coordinator.publisher = undefined;
+		coordinator.handoffUntil = Date.now() + handoffMs;
+		if (coordinator.handoffTimer) clearTimeout(coordinator.handoffTimer);
+		coordinator.handoffTimer = setTimeout(() => {
+			coordinator.handoffTimer = undefined;
+			if (coordinator.members.size > 0) return;
+			logEvent("slot_proxy_handoff_expired", { port: SLOT_PROXY_PORT, waitedMs: handoffMs });
+			releaseSharedProxy(coordinator, cleanupWithoutProxy);
+		}, handoffMs);
+		coordinator.handoffTimer.unref?.();
+		logEvent("slot_proxy_handoff", { port: SLOT_PROXY_PORT, waitMs: handoffMs });
+	}
+
+	function stopSlotProxy(reason?: string) {
+		const sameProcessRestarts = reason === "reload" || reason === "new" || reason === "resume" || reason === "fork";
 		const coordinator = slotProxyCoordinator;
 		if (coordinator) {
 			const member = coordinator.members.get(activationOwner);
@@ -11881,23 +11949,8 @@ ${note}` : basePrompt;
 				try { slotProxyServer.close(); } catch { /* already closed */ }
 			}
 			if (member && coordinator.members.size === 0) {
-				if (coordinator.server) {
-					// Keep the canonical port claimed until shared files are restored; another
-					// process must not publish a new placeholder during our final cleanup.
-					coordinator.routes.clear();
-					restoreChildFacingAuth();
-					unprovisionOwnLoopbacks();
-					try { coordinator.server.close(); } catch { /* already closed */ }
-					coordinator.server = undefined;
-				}
-				if (!coordinator.server && cleanupWithoutProxy) {
-					unprovisionOwnLoopbacks();
-					restoreChildFacingAuth();
-				}
-				if (!coordinator.starting && coordinators.get(SLOT_PROXY_PORT) === coordinator) {
-					coordinators.delete(SLOT_PROXY_PORT);
-				}
-				coordinator.routes.clear();
+				if (sameProcessRestarts && coordinator.server?.listening) handOffSharedProxy(coordinator, cleanupWithoutProxy);
+				else releaseSharedProxy(coordinator, cleanupWithoutProxy);
 			}
 			slotProxyCoordinator = undefined;
 			slotProxyServer = undefined;
@@ -12417,7 +12470,7 @@ ${note}` : basePrompt;
 	// CRITICAL: when the current session ends — for ANY reason (quit, reload, or replacement
 	// by a new/resumed/forked session) — the extension's background activity must end with it.
 	// Kill every timer and drop the pending continuation so nothing survives the session.
-	safeOn("session_shutdown", async (_event, ctx) => {
+	safeOn("session_shutdown", async (event, ctx) => {
 		chainEpoch++;
 		if (activations[activationKey]?.owner === activationOwner) delete activations[activationKey];
 		sessionClosed = true;
@@ -12436,8 +12489,9 @@ ${note}` : basePrompt;
 		endResumeWatch();
 		// Let cancelled async writers release their file locks before synchronous route cleanup.
 		await Promise.all(pendingNativePublications);
-		// Release this root's membership; only the final root closes shared child routes.
-		stopSlotProxy();
+		// Release this root's membership; only the final root closes shared child routes,
+		// and not while the same process is about to start the next root.
+		stopSlotProxy(event?.reason);
 		watchdogAborting = false;
 		expectingInjectedContinuation = false;
 		userAbortedChain = false;

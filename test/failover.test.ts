@@ -9628,6 +9628,86 @@ test("repeated 500s on an automatic same-model retry slow down at the breaker an
 	});
 });
 
+for (const provider of ["openai-codex", "openai-codex-account-2"]) {
+	for (const omitContinueAgent of [false, true]) {
+		fakeClockTest(`Codex model-access verification resumes ${provider} without user input (${omitContinueAgent ? "follow-up" : "native continue"})`, async () => {
+			const model = "gpt-6.1-sol";
+			const error = "Codex error: Unable to verify model access right now. Please retry.";
+			const t = setup({
+				accounts: { [provider]: { type: "oauth", access: "b", refresh: "br", accountId: "codex-2" } },
+				current: { provider, id: model },
+				config: { transientCooldownMs: 25, pendingPollMs: 25 },
+				omitContinueAgent,
+			});
+			await t.fire("session_start");
+			await t.fire("agent_start");
+			try {
+				await finishError(t, provider, model, error);
+				assert.equal(t.readState().pendingFrom, `${provider}/${model}`, "the observed error must arm recovery");
+				await wait(1100);
+				assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 1, "resume without a new user message");
+				if (omitContinueAgent) {
+					assert.match(String(t.rec.sent[0].prompt), /do not restart|instead of redoing/i);
+				}
+
+				await t.fire("before_agent_start", {});
+				await finishError(t, provider, model, error);
+				assert.equal(t.readState().pendingFrom, `${provider}/${model}`, "another failure must not leave the task idle");
+				assert.deepEqual(t.rec.setModels, [], "access verification is not permission to switch routes");
+				assert.equal(t.readState().exhaustedUntilByProvider?.[provider], undefined);
+				assert.equal(t.readState().invalidatedByProvider?.[provider], undefined);
+
+				await t.fire("after_provider_response", { status: 200, headers: {} });
+				await wait(1100);
+				assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 1, "success cancels the duplicate wake");
+				assert.equal(t.readState().pendingFrom, undefined);
+			} finally {
+				await t.fire("session_shutdown");
+			}
+		});
+	}
+}
+
+fakeClockTest("Codex model-access recovery stops when the operator cancels", async () => {
+	const provider = "openai-codex";
+	const model = "gpt-6.1-sol";
+	const t = setup({
+		accounts: { [provider]: { type: "oauth", access: "b", refresh: "br", accountId: "codex-2" } },
+		current: { provider, id: model },
+		config: { transientCooldownMs: 25, pendingPollMs: 25 },
+		omitContinueAgent: true,
+	});
+	await t.fire("session_start");
+	try {
+		await finishError(t, provider, model, "Codex error: Unable to verify model access right now. Please retry.");
+		assert.equal(t.readState().pendingFrom, `${provider}/${model}`);
+		await t.command("stop");
+		await wait(1100);
+		assert.equal(t.readState().pendingFrom, undefined);
+		assert.equal(t.rec.sent.length, 0, "cancellation must prevent automatic recovery");
+		assert.equal(t.rec.continueCalls.length, 0);
+	} finally {
+		await t.fire("session_shutdown");
+	}
+});
+
+test("a permanent model-access denial is not a temporary verification failure", async () => {
+	const provider = "openai-codex";
+	const model = "gpt-6.1-sol";
+	const t = setup({
+		accounts: { [provider]: { type: "oauth", access: "b", refresh: "br", accountId: "codex-2" } },
+		current: { provider, id: model },
+	});
+	await t.fire("session_start");
+	try {
+		await finishError(t, provider, model, "Your account does not have access to model gpt-6.1-sol.");
+		assert.ok(t.readState().exhaustedUntilByModel?.[`${provider}/${model}`], "a denial must retain model-unavailable handling");
+		assert.doesNotMatch(t.readState().pendingReason ?? "", /^temporary provider failure:/);
+	} finally {
+		await t.fire("session_shutdown");
+	}
+});
+
 for (const errorText of ["Connection error.", "terminated"]) {
 	fakeClockTest(`"${errorText}" is a temporary failure retried on the same route`, async () => {
 		// Both were logged live as "unhandled" and left the session idle until the user typed.

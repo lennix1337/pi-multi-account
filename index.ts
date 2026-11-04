@@ -1309,6 +1309,8 @@ const DEFAULT_TRANSIENT_ERROR_PATTERNS = [
 	// which left the session idle until the user typed.
 	"connection error",
 	"terminated",
+	// Codex could not complete its access check; this is not a permanent access denial.
+	"unable to verify model access right now",
 ];
 
 /** Cursor watchdog text from `cursor/proxy.ts`. A Run failure, never quota evidence. */

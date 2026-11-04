@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Codex model-access verification recovery
+
+- Treat `Unable to verify model access right now. Please retry.` as a temporary failure, not an unhandled terminal stop. Existing automatic recovery resumes the same account and model without new user input, backs off on repeated failures, and respects cancellation. Permanent access denials keep their existing handling; credentials and account defaults are unchanged.
+
 ### Autocomplete latency
 
 - `/multi-account use <Tab>` reads `auth.json` and the proxy sidecar once per keystroke instead of once per account. A usage snapshot is still dropped as soon as its account's credential changes. Measured on a disposable 8-account profile: mean 627 µs → 219 µs per keystroke, 18 → 2 credential-file reads.

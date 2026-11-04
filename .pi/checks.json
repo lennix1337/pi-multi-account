@@ -32,6 +32,11 @@
       "argv": ["node", "--test", "test/interrupted-context.test.ts"],
       "timeoutMs": 30000
     },
+    "codex-access-recovery": {
+      "description": "Offline Codex access-check transient retry, cancellation and permanent-denial regressions",
+      "argv": ["node", "--test", "--test-name-pattern", "Codex model-access|model.access denial|real Pi resumes Codex", "test/failover.test.ts", "test/codex-access-recovery-session.test.ts"],
+      "timeoutMs": 120000
+    },
     "compaction-dispatch": {
       "description": "Offline context-guard continuation acceptance and async rejection regressions",
       "argv": ["node", "--test", "--test-name-pattern", "context-guard.*(compaction continues|continuation rejection|cannot revive recovery)", "test/failover.test.ts"],

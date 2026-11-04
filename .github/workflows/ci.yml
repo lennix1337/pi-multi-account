@@ -57,6 +57,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm test
+      - run: npm run mutations
       - run: npm run pack:check
 
   host-compatibility:

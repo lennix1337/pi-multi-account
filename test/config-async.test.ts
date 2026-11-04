@@ -3,7 +3,24 @@ import test from 'node:test';
 import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mutateConfigFileAsync } from '../config-file-transaction.ts';
+import { createRequire } from 'node:module';
+import { mutateConfigFile, mutateConfigFileAsync } from '../config-file-transaction.ts';
+
+test('a transient EPERM on the config lock directory is retried within the bound', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'multi-config-eperm-'));
+  const path = join(dir, 'models.json');
+  writeFileSync(path, '{}\n');
+  const lockfile = createRequire(import.meta.url)('proper-lockfile');
+  const real = lockfile.lockSync;
+  let refusals = 0;
+  lockfile.lockSync = (...args: unknown[]) => {
+    if (refusals++ < 2) throw Object.assign(new Error('EPERM: operation not permitted, mkdir'), { code: 'EPERM' });
+    return real.apply(lockfile, args);
+  };
+  t.after(() => { lockfile.lockSync = real; rmSync(dir, { recursive: true, force: true }); });
+  mutateConfigFile(path, () => ({ providers: {} }));
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { providers: {} });
+});
 
 test('Windows publication lets a same-process reader close and leaves the UI responsive', { skip: process.platform !== 'win32' }, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'pma-async-'));

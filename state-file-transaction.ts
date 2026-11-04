@@ -11,6 +11,12 @@ const MAP_FIELDS = ["exhaustedUntilByProvider", "exhaustedUntilByModel", "invali
   "usageUntrustedUntilByProvider", "usageByProvider", "codexModelCatalogByProvider", "lastProbeAtByProvider"];
 type State = Record<string, any>;
 
+/** A lock attempt that another process may release within the bound. Windows answers
+ * mkdir with EPERM while another process's rmdir of the same lock directory is pending. */
+export function isLockContention(error: any): boolean {
+  return error?.code === "ELOCKED" || error?.code === "EPERM";
+}
+
 export function mergeStateDeltas<T extends State>(base: T, local: T, disk: T): T {
   const merged = { ...local };
   for (const field of MAP_FIELDS) {
@@ -44,7 +50,7 @@ export function mutateStateFile<T extends State>(path: string, transform: (disk:
   while (!release) {
     try { release = lockfile.lockSync(path, { realpath: false }); }
     catch (error: any) {
-      if (error?.code !== "ELOCKED" || Date.now() >= deadline) throw error;
+      if (!isLockContention(error) || Date.now() >= deadline) throw error;
       Atomics.wait(pause, 0, 0, 5);
     }
   }

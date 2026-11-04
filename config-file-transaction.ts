@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { replaceFile, replaceFileSync } from "./replace-file.ts";
+import { isLockContention } from "./state-file-transaction.ts";
 
 const require = createRequire(import.meta.url);
 const pause = new Int32Array(new SharedArrayBuffer(4));
@@ -57,7 +58,7 @@ export function mutateConfigFile(
 		if (!canCommit()) throw new Error("session changed before config persistence");
 		try { release = lockfile.lockSync(target, { realpath: false }); }
 		catch (error: any) {
-			if (error?.code !== "ELOCKED" || Date.now() >= deadline) throw error;
+			if (!isLockContention(error) || Date.now() >= deadline) throw error;
 			Atomics.wait(pause, 0, 0, 5);
 		}
 	}

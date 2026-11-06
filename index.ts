@@ -1254,6 +1254,22 @@ const DEFAULT_LIMIT_PATTERNS = [
 	"resource_exhausted",
 ];
 
+export function isTemporaryApiThrottle(errorText: string): boolean {
+	if (/^429 status code \(no body\)$/i.test(errorText.trim())) return true;
+	if (!/^429\s*:/i.test(errorText.trim())) return false;
+	const start = errorText.indexOf("{");
+	if (start < 0) return false;
+	try {
+		const body = JSON.parse(errorText.slice(start));
+		const error = body?.error ?? body;
+		return error?.code === "rate_limit_exceeded" &&
+			error?.type === "rate_limit_error";
+	} catch (error) {
+		if (error instanceof SyntaxError) return false;
+		throw error;
+	}
+}
+
 // Errors that mean "this account's authorization is dead" → drop from rotation
 // until the user re-logs in (not a temporary cooldown).
 const DEFAULT_AUTH_ERROR_PATTERNS = [
@@ -12995,7 +13011,8 @@ ${note}` : basePrompt;
 			provider,
 			id: modelId,
 		};
-		const failureKind = classifyRouteAttempt(
+		const temporaryApiThrottle = !managed && isTemporaryApiThrottle(errorText);
+		const failureKind = temporaryApiThrottle ? "transient" : classifyRouteAttempt(
 			{
 				operationId: `foreground:${sessionInstanceId}`,
 				purpose: "agent-turn",
@@ -13014,11 +13031,7 @@ ${note}` : basePrompt;
 			classified: failureKind,
 			error: errorText,
 		});
-		const bodylessRateLimit = /^429 status code \(no body\)$/i.test(errorText.trim());
-		if (
-			!bodylessRateLimit &&
-			!(["auth", "limit", "model", "transient", "cursor_stall"] as string[]).includes(failureKind)
-		) return;
+		if (!(["auth", "limit", "model", "transient", "cursor_stall"] as string[]).includes(failureKind)) return;
 		if (!managed && isFailoverExempt(provider)) {
 			logEvent("failover_suppressed", {
 				provider,
@@ -13055,13 +13068,6 @@ ${note}` : basePrompt;
 		if (!managed) {
 			// Providers with their own retry policy were handled before recovery arbitration.
 			if (failureKind === "transient" || failureKind === "cursor_stall") {
-				retryTemporaryFailure(ctx, failedModel, errorText);
-				return;
-			}
-			// A bodyless 429 proves throttling, not account-level credit exhaustion.
-			// Retry the same route after Retry-After (or the normal transient minute)
-			// instead of poisoning the whole provider for six hours.
-			if (/^429 status code \(no body\)$/i.test(errorText.trim())) {
 				const retryDelayMs =
 					responseCooldownHints.get(provider) ?? config.transientCooldownMs;
 				responseCooldownHints.delete(provider);

@@ -116,6 +116,7 @@ const {
 	canPersistRefreshedCredentials,
 	mergeRefreshedCredentials,
 	modelIdentityKey,
+	isTemporaryApiThrottle,
 	modelQualityBand,
 	removeCredentialFromAuthStorage,
 	persistRefreshedCredentials,
@@ -130,6 +131,7 @@ const {
 		authWritable?: () => boolean,
 	) => boolean;
 	mergeRefreshedCredentials: (credentials: any, refreshed: any) => any;
+	isTemporaryApiThrottle: (errorText: string) => boolean;
 	modelIdentityKey: (modelId: string) => string;
 	modelQualityBand: (modelId: string, provider?: string) => "apex" | "frontier" | "balanced" | "fast" | undefined;
 	removeCredentialFromAuthStorage: (authStorage: any, provider: string) => Promise<boolean>;
@@ -7732,6 +7734,33 @@ test("repeated identical internal faults are reported once, not spammed", async 
 	);
 });
 
+test("structured API throttling requires explicit valid throttle evidence", () => {
+	const error = { code: "rate_limit_exceeded", type: "rate_limit_error", message: "Rate limit exceeded." };
+	assert.equal(isTemporaryApiThrottle(`429: ${JSON.stringify(error)}`), true);
+	assert.equal(isTemporaryApiThrottle(`429: ${JSON.stringify({ error })}`), true);
+	assert.equal(isTemporaryApiThrottle(`401: ${JSON.stringify(error)}`), false);
+	for (const text of [
+		'429: {"code":"insufficient_quota","type":"rate_limit_error"}',
+		'429: {"code":"rate_limit_exceeded","type":"billing_error"}',
+		'429: {"code":"rate_limit_exceeded"',
+		'429: null', '429: []', '429: Too Many Requests',
+	]) assert.equal(isTemporaryApiThrottle(text), false, text);
+});
+
+test("structured API throttling does not hide insufficient credits", async () => {
+	const t = setup({
+		current: { provider: "abliteration", id: "abliterated-model-large-flash" },
+		accounts: { ...TWO_ACCOUNTS, abliteration: { type: "api_key", key: "fixture-only" } },
+		config: { childProxy: false },
+	});
+	try {
+		await finishError(t, "abliteration", "abliterated-model-large-flash",
+			'429: {"error":{"code":"insufficient_quota","type":"rate_limit_error","message":"Insufficient credits"}}');
+		assert.ok(t.rec.setModels.length > 0);
+		assert.ok(t.readState().exhaustedUntilByProvider?.abliteration > Date.now());
+	} finally { await t.fire("session_shutdown"); }
+});
+
 test("a quota error on the ACTIVE unmanaged provider (e.g. plain openai API) still fails over to a managed account", async () => {
 	const t = setup({
 		// The user is actively working on a plain `openai` API model (not managed by the extension).
@@ -7768,6 +7797,35 @@ test("a bodyless 429 on an active unmanaged provider retries the same route", as
 	assert.match(t.rec.notifies.join("\n"), /temporary error.*cerebras\/qwen-3\.8-27b/i);
 	assert.doesNotMatch(t.rec.notifies.join("\n"), /out of quota/i);
 });
+
+for (const retryAfter of [undefined, "120"]) {
+	test(`structured API throttling retains the selected route (Retry-After: ${retryAfter ?? "absent"})`, async (context) => {
+		const now = Date.now();
+		context.mock.method(Date, "now", () => now);
+		const provider = "abliteration";
+		const id = "abliterated-model-large-flash";
+		const t = setup({
+			current: { provider, id },
+			accounts: { ...TWO_ACCOUNTS, [provider]: { type: "api_key", key: "fixture-only" } },
+			config: { transientCooldownMs: 60_000, childProxy: false },
+		});
+		try {
+			if (retryAfter) await t.fire("after_provider_response", { status: 429, headers: { "retry-after": retryAfter } });
+			await finishError(t, provider, id,
+				'429: {"code":"rate_limit_exceeded","message":"Rate limit exceeded.","type":"rate_limit_error","param":null}');
+			const state = t.readState();
+			assert.deepEqual(t.rec.setModels, [], "throttling is not evidence of spent credits");
+			assert.equal(state.exhaustedUntilByProvider?.[provider], undefined);
+			assert.equal(state.exhaustedUntilByModel?.[`${provider}/${id}`], undefined);
+			assert.equal(state.pendingFrom, `${provider}/${id}`);
+			assert.match(t.rec.notifies.join("\n"), retryAfter ? /same account and model in ~2m/i : /same account and model in ~1m/i);
+			assert.match(t.rec.notifies.join("\n"), /temporary error/i);
+			assert.doesNotMatch(t.rec.notifies.join("\n"), /out of quota/i);
+			await t.input("another request");
+			assert.deepEqual(t.rec.setModels, [], "a later preflight must not reroute a throttled API account");
+		} finally { await t.fire("session_shutdown"); }
+	});
+}
 
 test("a bodyless unmanaged 429 honors Retry-After on the same-route retry", async () => {
 	const t = setup({

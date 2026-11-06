@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Structured API throttling
+
+- Retry structured unmanaged API `429 rate_limit_exceeded / rate_limit_error` on the same account and model, respecting `Retry-After`, instead of treating a temporary throttle as six hours of exhausted credits. Insufficient credit errors and managed subscription limits retain their existing failover behavior.
+- Exclude independent nested worktree checkouts from the root TypeScript program; they retain their own validation.
+
 ### Codex model-access verification recovery
 
 - Treat `Unable to verify model access right now. Please retry.` as a temporary failure, not an unhandled terminal stop. Existing automatic recovery resumes the same account and model without new user input, backs off on repeated failures, and respects cancellation. Permanent access denials keep their existing handling; credentials and account defaults are unchanged.

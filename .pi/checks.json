@@ -19,6 +19,7 @@
     },
     "unit": {"description":"Full offline lifecycle and routing regression suite", "argv":["node","--test","test/*.test.ts"], "timeoutMs":600000},
     "pack": {"description":"npm pack --dry-run contents, size, version and peer-range checks; no publication", "argv":["node","scripts/check-package.mjs"], "timeoutMs":120000},
+    "mutations": {"description":"Offline proxy guard and API-throttle regression mutants in disposable copies", "argv":["node","test/mutations.mjs"], "timeoutMs":120000},
     "privacy": {"description":"Personal-identifier scan over tracked files", "argv":["node","scripts/check-tracked-privacy.mjs"], "timeoutMs":60000},
     "handoff-unreadable": {
       "description": "Unreadable session branch must produce an explicit continuity warning",
@@ -31,6 +32,11 @@
       "watch": ["index.ts", "test/interrupted-context.test.ts"],
       "argv": ["node", "--test", "test/interrupted-context.test.ts"],
       "timeoutMs": 30000
+    },
+    "api-throttle": {
+      "description": "Offline API throttling versus exhausted credits, Retry-After and subsequent preflight; no live inference",
+      "argv": ["node", "--test", "--test-name-pattern", "structured API throttling|bodyless.*429|quota error on the ACTIVE unmanaged", "test/failover.test.ts"],
+      "timeoutMs": 120000
     },
     "codex-access-recovery": {
       "description": "Offline Codex access-check transient retry, cancellation and permanent-denial regressions",

@@ -7799,7 +7799,9 @@ test("a bodyless 429 on an active unmanaged provider retries the same route", as
 });
 
 for (const retryAfter of [undefined, "120"]) {
-	test(`structured API throttling retains the selected route (Retry-After: ${retryAfter ?? "absent"})`, async () => {
+	test(`structured API throttling retains the selected route (Retry-After: ${retryAfter ?? "absent"})`, async (context) => {
+		const now = Date.now();
+		context.mock.method(Date, "now", () => now);
 		const provider = "abliteration";
 		const id = "abliterated-model-large-flash";
 		const t = setup({
@@ -7816,7 +7818,7 @@ for (const retryAfter of [undefined, "120"]) {
 			assert.equal(state.exhaustedUntilByProvider?.[provider], undefined);
 			assert.equal(state.exhaustedUntilByModel?.[`${provider}/${id}`], undefined);
 			assert.equal(state.pendingFrom, `${provider}/${id}`);
-			assert.match(t.rec.notifies.join("\n"), retryAfter ? /same account and model in ~2m/i : /same account and model in ~60s/i);
+			assert.match(t.rec.notifies.join("\n"), retryAfter ? /same account and model in ~2m/i : /same account and model in ~1m/i);
 			assert.match(t.rec.notifies.join("\n"), /temporary error/i);
 			assert.doesNotMatch(t.rec.notifies.join("\n"), /out of quota/i);
 			await t.input("another request");

@@ -47,12 +47,12 @@
  * 3. **A group nobody ranked sorts after every group somebody did**, keeping its existing order
  *    among its unranked peers. Silence is not a preference, so it must not act like one.
  *
- * Within those bounds the ladder outranks the liveness heuristics (`confirmed`, `predictedBusy`),
- * and that is the point. Those heuristics answer "did the provider recently tell us it is free?",
- * whose honest answer for an unmeasurable provider is always "no" — absence of measurement, not
- * evidence of exhaustion. A stated preference is better evidence than a missing measurement. The
- * cost when the ladder is wrong is bounded and self-correcting: one request, one refusal, a
- * cooldown, and the account drops out of the candidate list on its own.
+ * Within those bounds the ladder sits BELOW the liveness heuristics (`confirmed`, `predictedBusy`).
+ * Those answer "did the provider recently tell us this account is free?" — evidence about a specific
+ * account — and a preference about its category must not pull work onto an account the provider has
+ * already reported as spent while a live one waits. The ladder therefore decides only among the
+ * candidates that liveness cannot separate, which is where the cross-family hops were arbitrary.
+ * The comparator order is pinned by the seeded properties in test/completion-route-properties.test.ts.
  */
 
 /** Groups this extension manages directly: OAuth refresh, quota telemetry, live catalogue. */

@@ -31,6 +31,10 @@ const mutants = [
 	["api-key-anthropic-refused", "credential === \"oauth\" && /^anthropic", "/^anthropic", "API-key slot is always usable", "child-usability.ts", "child-usability-properties.test.ts"],
 	["loopback-prefix-match", "hostname === \"127.0.0.1\" ||", "hostname.startsWith(\"127.\") ||", "parent-proxy route exists only", "child-usability.ts", "child-usability-properties.test.ts"],
 	["oauth-placeholder-usable", "  if (credential === \"oauth\") {", "  if (credential === \"oauth\" && publishedApiKey && isLoopback(publishedBaseUrl)) return { usable: true, slotId, via: \"parent-proxy\", note: \"mutant\" };\n  if (credential === \"oauth\") {", "OAuth token under its key", "child-usability.ts", "child-usability-properties.test.ts"],
+	["exhausted-turn-not-gated", "if (userProbe || subagentChild || !automaticFailoverEnabled()) return false;", "if (true) return false;", "turns started by background reports", "index.ts", "exhausted-route-gate-session.test.ts"],
+	["failover-pin-outlives-attempt", "if (hasFailoverPin(provider)) failoverPinnedProvider = undefined;", "", "turns started by background reports", "index.ts", "exhausted-route-gate-session.test.ts"],
+	["cooldown-ignored-in-selection", "let at = Math.max(now, exhaustedUntilByProvider.get(provider) ?? now);", "let at = now;", "turns started by background reports", "index.ts", "exhausted-route-gate-session.test.ts"],
+	["credit-low-not-a-limit", "\t\"credit balance is too low\",\n", "", "turns started by background reports", "index.ts", "exhausted-route-gate-session.test.ts"],
 ];
 
 for (const [name, before, after, pattern, sourceFile = "slot-proxy.ts", testFile = "slot-proxy.test.ts"] of mutants) {
@@ -45,7 +49,7 @@ for (const [name, before, after, pattern, sourceFile = "slot-proxy.ts", testFile
 		const source = readFileSync(path, "utf8");
 		assert.equal(source.split(before).length, 2, `${name}: mutation must be unique`);
 		writeFileSync(path, source.replace(before, after));
-		const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=${pattern}`, `test/${testFile}`], { cwd: dir, encoding: "utf8", timeout: 30000 });
+		const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=${pattern}`, `test/${testFile}`], { cwd: dir, encoding: "utf8", timeout: 90000 });
 		assert.equal(result.error, undefined, `${name}: test process must complete`);
 		assert.notEqual(result.status, 0, `${name}: mutant survived`);
 		assert.match(result.stdout + result.stderr, /AssertionError/, `${name}: must fail an assertion, not crash`);

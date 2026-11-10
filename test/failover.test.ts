@@ -2844,6 +2844,7 @@ test("rotated (refreshed) tokens 401ing past the threshold invalidate a refresha
 			}),
 		);
 		t.setCurrent("anthropic", "claude-opus-4-8");
+		await t.input("go");
 		await t.fire("agent_start");
 		await finishError(
 			t,
@@ -2868,6 +2869,7 @@ test("rotated (refreshed) tokens 401ing past the threshold invalidate a refresha
 		}),
 	);
 	t.setCurrent("anthropic", "claude-opus-4-8");
+	await t.input("go");
 	await t.fire("agent_start");
 	await finishError(
 		t,
@@ -14491,6 +14493,8 @@ fakeClockTest("a rotation that reaches nothing usable stops instead of polling f
 		}),
 	});
 	await t.fire("session_start");
+	// A typed prompt is the one turn allowed to probe a fleet that is cooling down.
+	await t.input("go");
 	await t.fire("agent_start");
 
 	await finishError(

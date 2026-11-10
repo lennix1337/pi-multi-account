@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Exhausted accounts stop collecting requests
+
+- A failover hop pinned its account for one attempt, but the pin outlived that attempt. When the account answered "usage limit" or "credit balance is too low", every later turn that did not come from a typed prompt (a background-worker report, a custom message) still passed the readiness check and sent a new request to the same refused account, once per turn. The pin now ends as soon as the account refuses with a limit or auth error.
+- A turn started by anything but a typed prompt while the selected account is cooling down and no other account is ready is cancelled before any request is sent. One notice names every cooling account and when it returns (UTC); repeating turns do not repeat it, and the quota-recovery wait stays armed. Typed prompts still probe a cooling account, as before.
+
 ### Structured API throttling
 
 - Retry structured unmanaged API `429 rate_limit_exceeded / rate_limit_error` on the same account and model, respecting `Retry-After`, instead of treating a temporary throttle as six hours of exhausted credits. Insufficient credit errors and managed subscription limits retain their existing failover behavior.

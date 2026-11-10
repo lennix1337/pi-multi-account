@@ -4469,6 +4469,15 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	let lastContractVerdicts: ShapeVerdict[] = [];
 
 	let watchdogAborting = false;
+	// The turn about to start was typed by the user. A user prompt is the one request allowed to
+	// probe a cooling account (a stale forecast is only ever found out that way); a turn started
+	// by anything else (a background-worker report, a custom message) is not.
+	let userPromptStartsTurn = false;
+	// We aborted a turn ourselves because every account is exhausted: agent_end must not read it
+	// as the user pressing Esc, and the aborted message is not provider-health evidence.
+	let exhaustedGateAborting = false;
+	// What the last exhausted-gate notice said, so a run of refused turns states it once.
+	let exhaustedGateNoticeKey: string | undefined;
 	// How many tools are executing right now on the resumed turn. A long build/test command is
 	// silent for minutes but is NOT stuck — never abort while a tool is in flight.
 	let toolInFlight = 0;
@@ -7554,6 +7563,85 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			providerRecoveryAt(model.provider, now) <= now &&
 			(exhaustedUntilByModel.get(ref(model.provider, model.id)) ?? 0) <= now
 		);
+	}
+
+	/**
+	 * One line per account that is cooling down, and when the first of them returns. Absolute UTC
+	 * time next to the relative one: the status line is read hours later, "in 3h" no longer means
+	 * anything by then.
+	 */
+	function exhaustedAccountsSummary(now: number): { text: string; firstReturnAt: number } {
+		const cooling = [...exhaustedUntilByProvider.entries()]
+			.filter(([provider, until]) => until > now && !isInvalidated(provider))
+			.sort((a, b) => a[1] - b[1]);
+		const firstReturnAt = cooling[0]?.[1] ?? now;
+		const parts = cooling.map(
+			([provider, until]) =>
+				`${provider} returns in ${formatResetDuration(until, now)} (${new Date(until).toISOString().slice(0, 16)}Z)`,
+			);
+		return { text: parts.join("; "), firstReturnAt };
+	}
+
+	/**
+	 * Last line of defence for a turn nobody typed. A turn that starts while the selected
+	 * account is cooling down and no other account is ready can only re-collect the refusal we
+	 * already hold, once per turn; abort it before it reaches the provider and keep the wait armed.
+	 * A user prompt keeps its probe (the `input` hook lets it through on purpose, because a stale
+	 * forecast is only ever found out that way), so this applies to turns started by anything else.
+	 */
+	function gateExhaustedTurn(ctx: any, userProbe: boolean): boolean {
+		if (userProbe || subagentChild || !automaticFailoverEnabled()) return false;
+		const model = ctx.model;
+		if (!model?.provider || !model?.id || !isAccountChatModel(model) || isFailoverExempt(model.provider)) return false;
+		pruneCooldowns();
+		const now = Date.now();
+		const cooling =
+			providerRecoveryAt(model.provider, now) > now ||
+			(exhaustedUntilByModel.get(ref(model.provider, model.id)) ?? 0) > now;
+		if (!cooling || hasManualPin(model.provider) || hasFailoverPin(model.provider)) {
+			exhaustedGateNoticeKey = undefined;
+			return false;
+		}
+		if (
+			findFallbackModels(ctx, model, {
+				availableNowOnly: true,
+				includeCurrent: true,
+				preserveQualityBand: true,
+			}).length > 0
+		) {
+			return false;
+		}
+		if (typeof ctx.abort !== "function") return false;
+		const summary = exhaustedAccountsSummary(now);
+		logEvent("turn_gated_exhausted", {
+			session: sessionInstanceId,
+			provider: model.provider,
+			model: model.id,
+			firstReturnAt: new Date(summary.firstReturnAt).toISOString(),
+		});
+		// Same state, same words: the minute-by-minute countdown must not make each turn's notice new.
+		const key = `${summary.firstReturnAt}|${summary.text.replace(/returns in [^(]*/g, "")}`;
+		if (key !== exhaustedGateNoticeKey) {
+			exhaustedGateNoticeKey = key;
+			ctx.ui.notify(
+				`Provider failover: every account is exhausted, so no request was sent. ${summary.text}. The work resumes by itself when the first one returns.`,
+				"error",
+			);
+		}
+		if (!hasPendingResume() && config.resumeAfterAllAccountsRecover) {
+			setPendingContinuation(ctx, model, "all accounts exhausted: waiting for quota recovery", {
+				mode: "quota-recovery",
+				quiet: true,
+			});
+		}
+		exhaustedGateAborting = true;
+		try {
+			ctx.abort();
+		} catch {
+			exhaustedGateAborting = false;
+			return false;
+		}
+		return true;
 	}
 
 	function rememberUserModel(model: { provider?: string; id?: string } | undefined) {
@@ -12633,6 +12721,7 @@ ${note}` : basePrompt;
 		// makes /login, /model, /export, and even recovery commands appear completely broken.
 		if (/^\s*[/!]/.test(text)) return { action: "continue" as const };
 		claimUserControl("interactive input", true);
+		userPromptStartsTurn = true;
 		noteRecoveryProgress(); // a fresh user prompt → clean slate, re-enable auto-continue
 		// A manual choice is owed ONE message. This is the next one, so a reprieve that already
 		// carried a message retires here — before the readiness check consults it.
@@ -12766,6 +12855,10 @@ ${note}` : basePrompt;
 	});
 
 	safeOn("agent_start", async (_event, ctx) => {
+		exhaustedGateAborting = false;
+		const userProbe = userPromptStartsTurn;
+		userPromptStartsTurn = false;
+		if (gateExhaustedTurn(ctx, userProbe)) return;
 		noteResumeProgress(); // a resumed turn actually started → it is making progress
 		currentPromptSwitch = undefined;
 		automaticModelTarget = undefined;
@@ -12963,6 +13056,7 @@ ${note}` : basePrompt;
 
 	safeOn("message_end", async (event, ctx) => {
 		if (!isAccountChatModel(ctx.model)) return;
+		if (exhaustedGateAborting && (event as any).message?.stopReason === "aborted") return;
 		const errorEpoch = chainEpoch;
 		const staleError = () => sessionClosed || errorEpoch !== chainEpoch || userAbortedChain || ctx.signal?.aborted;
 		const message = (event as any).message;
@@ -12971,6 +13065,7 @@ ${note}` : basePrompt;
 			// A model reply that is not an error is a request that went out and came back — the
 			// second, independent witness for the governor, so a host that reports responses
 			// differently cannot make a healthy session look like a spinning one.
+			exhaustedGateNoticeKey = undefined;
 			noteProviderSuccessObserved();
 			noteRecoveryProgress();
 			if (message.provider) noteAuthSuccess(message.provider, message.model);
@@ -13032,6 +13127,12 @@ ${note}` : basePrompt;
 			error: errorText,
 		});
 		if (!(["auth", "limit", "model", "transient", "cursor_stall"] as string[]).includes(failureKind)) return;
+		// The one attempt a pinned account was owed has been made and refused. A pin that outlived it
+		// let every later turn (a background report, not a typed prompt) probe the account again.
+		if (failureKind === "limit" || failureKind === "auth") {
+			if (hasFailoverPin(provider)) failoverPinnedProvider = undefined;
+			if (hasManualPin(provider)) manualPinnedProvider = undefined;
+		}
 		if (!managed && isFailoverExempt(provider)) {
 			logEvent("failover_suppressed", {
 				provider,
@@ -13214,6 +13315,14 @@ ${note}` : basePrompt;
 		try {
 		if (!isAccountChatModel(ctx.model)) return;
 		if (!automaticFailoverEnabled()) return;
+		if (exhaustedGateAborting) {
+			// Our own gate stopped this turn before any request left: the wait for recovery stays armed.
+			exhaustedGateAborting = false;
+			endResumeWatch();
+			currentPromptSwitch = undefined;
+			continuationDispatchedForAgentTurn = false;
+			return;
+		}
 		const stop = lastAssistantStopReason((event as any).messages ?? []);
 		// Our own watchdog aborted a wedged resumed turn — this is RECOVERY, not a user cancel.
 		// Arm auto-resume so the work continues by itself the moment any account is free again;

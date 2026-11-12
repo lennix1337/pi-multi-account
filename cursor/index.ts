@@ -382,11 +382,19 @@ export const FALLBACK_MODELS: CursorModel[] = (rawFallbackModels as CursorModel[
 
 // ── Extension ──
 
+/** Runners of this extension instance that use its proxy; sessions in the same cwd share one instance. */
+const proxyRunners = new Set<ExtensionAPI>();
+
 export function registerSessionLifecycleCleanup(pi: ExtensionAPI) {
+  proxyRunners.add(pi);
   registerSessionLifecycleHooks(pi, {
     cleanupSessionState,
     resetConversationForSession,
     stopProxy,
+    releaseSession: () => {
+      proxyRunners.delete(pi);
+      return proxyRunners.size === 0;
+    },
     debug: debugExtensionLog,
   });
 }

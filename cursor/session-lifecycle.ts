@@ -11,6 +11,8 @@ export function registerSessionLifecycleHooks(
     debug?: (event: string, data: Record<string, unknown>) => void;
     /** A reload loads a fresh copy of the extension that binds its own proxy; the old one would stay bound, holding the old runtime. */
     stopProxy?: () => void;
+    /** Forget this session's runner; true when no other session of this extension instance still uses the proxy. */
+    releaseSession?: () => boolean;
   },
 ): void {
   const cleanupCurrentSession = (_event: unknown, ctx: SessionContext) => {
@@ -38,6 +40,10 @@ export function registerSessionLifecycleHooks(
   }) as any);
   pi.on("session_shutdown", ((event: unknown, ctx: SessionContext) => {
     cleanupCurrentSession(event, ctx);
-    if ((event as { reason?: string } | undefined)?.reason === "reload") dependencies.stopProxy?.();
+    const reason = (event as { reason?: string } | undefined)?.reason;
+    const last = dependencies.releaseSession?.() ?? true;
+    // `quit` also ends embedded sessions (subagents, OptChat workers) while the process lives on;
+    // the last one out closes the listener, which would otherwise keep their runtimes in memory.
+    if (reason === "reload" || (reason === "quit" && last)) dependencies.stopProxy?.();
   }) as any);
 }

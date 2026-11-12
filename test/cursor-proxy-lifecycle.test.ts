@@ -64,3 +64,26 @@ test("a failed shared proxy start is not remembered for the rest of the process"
 	`);
 	assert.match(output, /ok/);
 });
+
+// An embedded session (an OptChat worker, a subagent) ends with `quit` while the process lives on.
+// Its listener is a GC root: left bound, it keeps that session's whole runtime in memory.
+test("the last session to quit releases the proxy; one still using it keeps it", () => {
+	const output = runInProxyChild(`
+		const { registerSessionLifecycleCleanup } = await import("./cursor/index.ts");
+		const session = () => {
+			const handlers = new Map();
+			const pi = { on: (name, handler) => handlers.set(name, handler) };
+			registerSessionLifecycleCleanup(pi);
+			return (reason) => handlers.get("session_shutdown")({ reason }, { sessionManager: { getSessionId: () => "s" } });
+		};
+		const port = await ensureCursorProxy(token);
+		const endMain = session();
+		const endWorker = session();
+		endWorker("quit");
+		assert.equal(getProxyPort(), port, "another session of this extension instance still serves through the proxy");
+		endMain("quit");
+		assert.equal(getProxyPort(), undefined, "the last session to quit must release the listener");
+		console.log("ok");
+	`);
+	assert.match(output, /ok/);
+});

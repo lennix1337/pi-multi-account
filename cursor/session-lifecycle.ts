@@ -9,6 +9,8 @@ export function registerSessionLifecycleHooks(
     /** Start a new Cursor-side conversation, keeping the session alive. */
     resetConversationForSession?: (sessionId: string) => void;
     debug?: (event: string, data: Record<string, unknown>) => void;
+    /** A reload loads a fresh copy of the extension that binds its own proxy; the old one would stay bound, holding the old runtime. */
+    stopProxy?: () => void;
   },
 ): void {
   const cleanupCurrentSession = (_event: unknown, ctx: SessionContext) => {
@@ -36,5 +38,6 @@ export function registerSessionLifecycleHooks(
   }) as any);
   pi.on("session_shutdown", ((event: unknown, ctx: SessionContext) => {
     cleanupCurrentSession(event, ctx);
+    if ((event as { reason?: string } | undefined)?.reason === "reload") dependencies.stopProxy?.();
   }) as any);
 }

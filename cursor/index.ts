@@ -26,7 +26,7 @@ import {
   pollCursorAuth,
   refreshCursorToken,
 } from "./auth.ts";
-import { cleanupSessionState, getCursorModels, resetConversationForSession, startProxy, type CursorModel } from "./proxy.ts";
+import { cleanupSessionState, getCursorModels, resetConversationForSession, startProxy, stopProxy, type CursorModel } from "./proxy.ts";
 import { registerSessionLifecycleHooks } from "./session-lifecycle.ts";
 
 // ── Cost estimation ──
@@ -386,6 +386,7 @@ export function registerSessionLifecycleCleanup(pi: ExtensionAPI) {
   registerSessionLifecycleHooks(pi, {
     cleanupSessionState,
     resetConversationForSession,
+    stopProxy,
     debug: debugExtensionLog,
   });
 }

@@ -42,21 +42,30 @@ process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
 // the first instance would own the port for the whole file and every later publication test
 // would silently exercise the non-owner path instead. `reuseSlotProxyPort` is how a test asks
 // for the opposite — a second instance contending for a port the first one still holds.
-let nextSlotProxyPort = 41500;
-function currentSlotProxyPort(): number {
-	return Number(process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT);
-}
-
-async function unusedLoopbackPort(): Promise<number> {
-	const server = createServer();
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(0, "127.0.0.1", resolve);
-	});
+// The ports come from the OS and stay bound by this process until a test takes one: a fixed
+// sequence collided with a second run of this file (parallel worktrees) and with a live Pi on
+// 41977, which turned the publication tests into non-owner runs and hung the blocker test.
+const SLOT_PROXY_PORT_POOL = await Promise.all(
+	Array.from({ length: 1024 }, async () => {
+		const server = createServer();
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		server.unref();
+		return server;
+	}),
+);
+function takeSlotProxyPort(): number {
+	const server = SLOT_PROXY_PORT_POOL.pop();
+	assert.ok(server, "the reserved slot-proxy port pool is exhausted; raise its size");
 	const address = server.address();
 	assert.ok(address && typeof address !== "string");
-	await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+	server.close();
 	return address.port;
+}
+function currentSlotProxyPort(): number {
+	return Number(process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT);
 }
 const CURSOR_ROOT = join(AGENT_DIR, "cursor-provider");
 process.env.PI_CURSOR_PROVIDER_ROOT = CURSOR_ROOT;
@@ -408,7 +417,7 @@ function setup(opts: {
 	if (opts.slotProxyPort !== undefined) {
 		process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT = String(opts.slotProxyPort);
 	} else if (!opts.reuseSlotProxyPort) {
-		process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT = String(nextSlotProxyPort++);
+		process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT = String(takeSlotProxyPort());
 	}
 	const accounts = opts.accounts ?? TWO_ACCOUNTS;
 	writeFileSync(AUTH, JSON.stringify(accounts));
@@ -13432,7 +13441,7 @@ test("a canonical port held by an independent process cannot hang session_start"
 	// A same-process listener can re-enter listen() synchronously after EADDRINUSE on some Node
 	// versions, which let the ownership test below pass while every second real Pi process hung.
 	// Hold the canonical port from another process to reproduce the actual multi-session boundary.
-	process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT = String(nextSlotProxyPort++);
+	process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT = String(takeSlotProxyPort());
 	const port = currentSlotProxyPort();
 	const blocker = spawn(
 		process.execPath,
@@ -13442,8 +13451,10 @@ test("a canonical port held by an independent process cannot hang session_start"
 		],
 		{ stdio: ["ignore", "pipe", "inherit"] },
 	);
+	// A blocker that cannot bind exits without a word; waiting only for "ready" hung the file.
 	await new Promise<void>((resolve, reject) => {
 		blocker.once("error", reject);
+		blocker.once("exit", (code) => reject(new Error(`the port blocker exited (${code}) before listening on ${port}`)));
 		blocker.stdout.once("data", () => resolve());
 	});
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -14056,26 +14067,13 @@ test("legacy set-only refresh persistence updates the private sidecar without wr
 test("production Anthropic refresh keeps a shadowed slot private throughout persistence", async () => {
 	rmSync(MODELS, { force: true });
 	const slotId = "anthropic-account-2";
-	// A fixed fixture port can be held by an unrelated local socket; that makes Pi a
-	// non-publisher even though its private proxy starts successfully.
-	const occupied = createServer();
-	await new Promise<void>((resolve, reject) => {
-		occupied.once("error", reject);
-		occupied.listen(0, "127.0.0.1", resolve);
-	});
-	const address = occupied.address();
-	assert.ok(address && typeof address !== "string");
-	const savedNextPort = nextSlotProxyPort;
-	nextSlotProxyPort = address.port;
-	const port = await unusedLoopbackPort();
-	const t = setup({ slotProxyPort: port, hostAuthStorage: "pi-0.84", accounts: { [slotId]: { type: "oauth", access: "sk-ant-oat01-expired-production-fixture", refresh: "production-refresh-fixture", expires: Date.now() - 1000 } } });
-	nextSlotProxyPort = savedNextPort;
+	const t = setup({ hostAuthStorage: "pi-0.84", accounts: { [slotId]: { type: "oauth", access: "sk-ant-oat01-expired-production-fixture", refresh: "production-refresh-fixture", expires: Date.now() - 1000 } } });
 	const originalFetch = globalThis.fetch;
 	const snapshots: any[] = [];
 	let refreshes = 0, forwarded: string | undefined;
 	try {
 		await t.fire("session_start");
-		assert.ok(existsSync(MODELS), "the fixture must own shared publication despite the occupied sequential port");
+		assert.ok(existsSync(MODELS), "the fixture must own shared publication");
 		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers[slotId];
 		const modify = t.ctx.modelRegistry.authStorage.modify;
 		t.ctx.modelRegistry.authStorage.modify = async (...args: any[]) => {
@@ -14103,7 +14101,6 @@ test("production Anthropic refresh keeps a shadowed slot private throughout pers
 	} finally {
 		globalThis.fetch = originalFetch;
 		await t.fire("session_shutdown");
-		await new Promise<void>((resolve, reject) => occupied.close(error => error ? reject(error) : resolve()));
 		rmSync(MODELS, { force: true });
 	}
 });

@@ -287,6 +287,10 @@ written is `terminal`, never `transient`. Explicit and correct.
 
 - Versioned (`stateVersion`), migrated, read-latest/merge under a lock. Field types are trusted:
   `JSON.parse(...) as ProviderFailoverState`.
+- One fact may be newer in memory than on disk: a usage reading from response headers that repeats
+  the previous one (`usageTelemetryUnsaved`). Any `persist()` writes it; `flushUsageTelemetry` does
+  so at `agent_end`, on the status tick and at `session_shutdown`. Every other change is written
+  when it happens.
 - **F12 P3:** a hand-edited or foreign file with `lastSwitches: 5` throws inside `activateFallback`
   after the model switch succeeded; non-finite or string cooldown values are accepted. The extension
   is the only writer and `loadState` falls back to an empty state on parse errors, so this is

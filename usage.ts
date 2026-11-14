@@ -1051,6 +1051,22 @@ export function mergeUsageSnapshot(
 	};
 }
 
+/**
+ * True when `next` says what `previous` already said: the same windows, verdict, plan, credits
+ * and identity, taken at a later instant. Readers of the shared state decide on every one of
+ * those fields (some on a percentage line of their own choosing), so any difference is news;
+ * the instant alone is not.
+ */
+export function sameUsageReading(
+	previous: UsageSnapshot | undefined,
+	next: UsageSnapshot,
+): boolean {
+	return (
+		!!previous &&
+		JSON.stringify({ ...previous, fetchedAt: 0 }) === JSON.stringify({ ...next, fetchedAt: 0 })
+	);
+}
+
 export function formatUsageCompact(
 	snapshot: UsageSnapshot,
 	now = Date.now(),

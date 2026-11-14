@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type UsageFamily = "codex" | "anthropic" | "ollama" | "cursor" | "qwen" | "kimi-coding" | "xai" | "zai-coding-cn";
+export type UsageFamily = "codex" | "anthropic" | "ollama" | "cursor" | "qwen" | "kimi-coding" | "xai" | "zai-coding-cn" | "agy";
 
 export type UsageWindow = {
 	usedPercent: number;
@@ -181,6 +181,63 @@ export function parseAnthropicUsageBody(
 		primary,
 		secondary,
 	};
+}
+
+/**
+ * Parse `agy -p=/quota` tab-separated output into a UsageSnapshot for the Gemini Models bucket.
+ * Note: `usageFamily("agy")` intentionally stays `undefined` because agy is not a Pi provider.
+ */
+export function parseAgyQuota(
+	output: string,
+	fetchedAt = Date.now(),
+): UsageSnapshot | undefined {
+	const rows = output
+		.split(/\r?\n/)
+		.map((line) => line.split("\t"))
+		.filter((cols) => cols.length === 4 && /^\d+%$/.test(cols[2].trim()))
+		.map(([bucket, limit, left, reset]) => ({
+			bucket: bucket.trim(),
+			limit: limit.trim(),
+			left: Number.parseInt(left, 10),
+			reset: reset.trim(),
+		}));
+	let primary: UsageWindow | undefined;
+	let secondary: UsageWindow | undefined;
+	for (const row of rows) {
+		if (row.bucket.toLowerCase() !== "gemini models") continue;
+		const usedPercent = percent(100 - row.left);
+		const resetAt = epochMs(row.reset);
+		if (usedPercent === undefined || resetAt === undefined) continue;
+		const lowerLimit = row.limit.toLowerCase();
+		if (lowerLimit.includes("five hour") || lowerLimit.includes("5h")) {
+			primary = { usedPercent, resetAt, windowSeconds: 18_000 };
+		} else if (lowerLimit.includes("weekly") || lowerLimit.includes("7d")) {
+			secondary = { usedPercent, resetAt, windowSeconds: 604_800 };
+		}
+	}
+	if (!primary && !secondary) return undefined;
+	return {
+		provider: "agy",
+		family: "agy",
+		fetchedAt,
+		...(primary ? { primary } : {}),
+		...(secondary ? { secondary } : {}),
+	};
+}
+
+export function formatAgyQuotaLine(snapshot: UsageSnapshot, now = Date.now()): string {
+	const parts: string[] = [];
+	const resets: string[] = [];
+	if (snapshot.primary) {
+		parts.push(`5h ${Math.round(snapshot.primary.usedPercent)}% used`);
+		resets.push(formatResetDuration(snapshot.primary.resetAt, now));
+	}
+	if (snapshot.secondary) {
+		parts.push(`7d ${Math.round(snapshot.secondary.usedPercent)}% used`);
+		resets.push(formatResetDuration(snapshot.secondary.resetAt, now));
+	}
+	if (parts.length === 0) return "agy (Gemini): unavailable";
+	return `agy (Gemini): ${parts.join(" · ")} (reset ${resets.join(" / ")})`;
 }
 
 function headerValue(headers: unknown, name: string): string | undefined {

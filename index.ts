@@ -25,6 +25,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { execFile } from "node:child_process";
 import { createPayloadStream } from "./provider-payload-stream.ts";
 import {
 	AutomaticRecoveryArbiter,
@@ -317,9 +318,11 @@ import {
 import {
 	ANTHROPIC_API_KEY_BILLING_NOTE,
 	fetchUsageSnapshot,
+	formatAgyQuotaLine,
 	formatResetDuration,
 	formatUsageCompact,
 	formatUsageDetails,
+	parseAgyQuota,
 	parseCodexUsageHeaders,
 	mergeUsageSnapshot,
 	providerUsageLabel,
@@ -5691,6 +5694,83 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * is stale. Qwen keeps an honest capability-only snapshot (its plans expose no quota API);
 	 * Cursor reads its three Pro+ pools from the dashboard service.
 	 */
+	const AGY_QUOTA_REFRESH_MS = 15 * 60_000;
+	let agyQuotaFetch: Promise<UsageSnapshot | undefined> | undefined;
+	let lastAgyQuotaAttemptAt = 0;
+
+	function runAgyQuotaCommand(agyBin: string): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const isWinCmd = process.platform === "win32" && /\.(cmd|bat)$/i.test(agyBin);
+			const file = isWinCmd ? process.env.ComSpec || "cmd.exe" : agyBin;
+			const args = isWinCmd ? ["/d", "/s", "/c", agyBin, "-p=/quota"] : ["-p=/quota"];
+			execFile(
+				file,
+				args,
+				{
+					encoding: "utf8",
+					windowsHide: true,
+					timeout: 30_000,
+					env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+				},
+				(error, stdout) => {
+					if (error) reject(error);
+					else resolve(stdout ?? "");
+				},
+			);
+		});
+	}
+
+	/**
+	 * Reads Antigravity CLI (`agy`) quota at most once every 15 minutes and persists it under
+	 * `usageByProvider.agy` for external observers (OptChat footer, `/cota`, `/multi-account accounts`).
+	 * Not routed through `storeUsage` because `agy` has no Pi credential in `auth.json`.
+	 */
+	async function refreshAgyQuota(force = false): Promise<UsageSnapshot | undefined> {
+		const previous = usageByProvider.get("agy");
+		const configuredBin = process.env.AGY_BIN?.trim();
+		if (process.env.PI_OFFLINE === "1" && !configuredBin) return previous;
+		const now = Date.now();
+		if (
+			!force &&
+			((previous && now - previous.fetchedAt < AGY_QUOTA_REFRESH_MS) ||
+				(lastAgyQuotaAttemptAt > 0 && now - lastAgyQuotaAttemptAt < AGY_QUOTA_REFRESH_MS))
+		) {
+			return previous;
+		}
+		if (agyQuotaFetch) return agyQuotaFetch;
+		lastAgyQuotaAttemptAt = now;
+		const agyBin = configuredBin || "agy";
+		agyQuotaFetch = (async () => {
+			try {
+				const stdout = await runAgyQuotaCommand(agyBin);
+				const snapshot = parseAgyQuota(stdout, Date.now());
+				if (!snapshot) {
+					logEvent("agy_quota_failed", { reason: "empty_or_malformed" });
+					return previous;
+				}
+				if (sessionClosed) return previous;
+				usageByProvider.set("agy", snapshot);
+				usageTelemetryUnsaved = true;
+				logEvent("usage_refresh", {
+					provider: "agy",
+					family: "agy",
+					primaryUsedPercent: snapshot.primary?.usedPercent ?? "unknown",
+					secondaryUsedPercent: snapshot.secondary?.usedPercent ?? "unknown",
+				});
+				persist();
+				return snapshot;
+			} catch (error) {
+				logEvent("agy_quota_failed", {
+					reason: error instanceof Error ? error.message : String(error),
+				});
+				return previous;
+			} finally {
+				agyQuotaFetch = undefined;
+			}
+		})();
+		return agyQuotaFetch;
+	}
+
 	async function refreshRotationUsage(ctx: any, force = false) {
 		if (!config.showUsage) {
 			updateUsageStatus(ctx);
@@ -5706,9 +5786,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				),
 			),
 		];
-		await Promise.all(
-			providers.map((provider) => refreshUsage(ctx, provider, force)),
-		);
+		await Promise.all([
+			...providers.map((provider) => refreshUsage(ctx, provider, force)),
+			refreshAgyQuota(force),
+		]);
 		updateUsageStatus(ctx);
 	}
 
@@ -5821,8 +5902,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				status,
 			];
 		});
+		const agySnapshot = usageByProvider.get("agy");
+		const agyLines = agySnapshot ? [formatAgyQuotaLine(agySnapshot, now)] : [];
 		if (rows.length === 0) {
-			return "pi-multi-account accounts: no configured accounts in auth.json";
+			return [
+				"pi-multi-account accounts: no configured accounts in auth.json",
+				...agyLines,
+			].join("\n");
 		}
 		const header = ["Slot", "Alias", "Account", "Plan", "Primary", "Secondary", "Tertiary", "Status"];
 		const widths = header.map((title, column) =>
@@ -5835,6 +5921,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			line(header),
 			line(widths.map((width) => "-".repeat(width))),
 			...rows.map(line),
+			...agyLines,
 			...(accounts.some(({ snapshot }) => snapshot?.family === "anthropic" && snapshot.plan === "api-key")
 				? [ANTHROPIC_API_KEY_BILLING_NOTE] : []),
 			"Use /multi-account accounts refresh to refresh every supported account explicitly.",
@@ -6743,6 +6830,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			...credentialHashes.keys(),
 			...Object.keys(auth),
 		])) {
+			if (provider === "agy") continue;
 			const entry = auth[provider];
 			const nextHash = entry ? credentialHash(entry) : undefined;
 			const previousHash = credentialHashes.get(provider);
@@ -10274,9 +10362,10 @@ ${note}` : basePrompt;
 							!duplicates.has(provider),
 					)
 					.map(([provider]) => provider);
-				await Promise.all(
-					providers.map((provider) => refreshUsage(ctx, provider, true, true)),
-				);
+				await Promise.all([
+					...providers.map((provider) => refreshUsage(ctx, provider, true, true)),
+					refreshAgyQuota(true),
+				]);
 			}
 			ctx.ui.notify(renderAccountTable(ctx), "info");
 			return;

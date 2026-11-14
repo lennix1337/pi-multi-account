@@ -19,6 +19,7 @@ import {
 	parseCursorSandUsage,
 	parseOllamaMeBody,
 	parseOllamaUsageBody,
+	sameUsageReading,
 	UsageFetchError,
 } from "../usage.ts";
 
@@ -312,6 +313,34 @@ test("partial usage never refreshes stale serviceability or missing quota window
 		assert.equal(merged.account, "fixture@example.com");
 		assert.equal(merged.fetchedAt, NOW);
 		assert.equal(mergeUsageSnapshot(old, { ...next, credentialHash: undefined }).account, undefined);
+	}
+});
+
+test("a usage reading repeats the last one only when nothing but the instant it was taken differs", () => {
+	const provider = "openai-codex-account-2";
+	const headers = (primaryUsed: string, at: number) => parseCodexUsageHeaders(provider, {
+		"x-codex-plan-type": "pro",
+		"x-codex-primary-used-percent": primaryUsed,
+		"x-codex-primary-window-minutes": "300",
+		"x-codex-primary-reset-at": String(NOW / 1000 + 3600),
+		"x-codex-secondary-used-percent": "40",
+		"x-codex-secondary-reset-at": String(NOW / 1000 + 86400),
+	}, at, "same")!;
+	const first = mergeUsageSnapshot(undefined, headers("25", NOW));
+	const repeated = mergeUsageSnapshot(first, headers("25", NOW + 5000));
+	assert.equal(sameUsageReading(first, repeated), true);
+	// What a process reads back from the state file: JSON drops the fields left undefined.
+	assert.equal(sameUsageReading(JSON.parse(JSON.stringify(first)), repeated), true);
+	assert.equal(sameUsageReading(undefined, first), false, "a first reading is always news");
+	for (const [what, changed] of [
+		["a window's percentage", headers("26", NOW + 5000)],
+		["a window's reset", { ...repeated, primary: { ...repeated.primary!, resetAt: repeated.primary!.resetAt + 1000 } }],
+		["a window that is gone", { ...repeated, secondary: undefined }],
+		["the plan", { ...repeated, plan: "plus" }],
+		["the provider's verdict", { ...repeated, serviceable: true }],
+		["the credential", { ...repeated, credentialHash: "other" }],
+	] as const) {
+		assert.equal(sameUsageReading(first, mergeUsageSnapshot(first, changed)), false, what);
 	}
 });
 

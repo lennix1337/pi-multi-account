@@ -258,6 +258,8 @@ Companion quota displays can emit `pi:usage:request:v1` with `{ provider }` for 
 
 State (cooldowns, invalidations, recent switches, credential-free Codex model catalogs, and a diagnostic pending marker) is persisted to `~/.pi/agent/provider-failover-state.json`. The actual pending task is session-local: one Pi window never consumes or resumes another window's work. Pending work is discarded when its owning session closes.
 
+The same file holds each account's last usage reading (`usageByProvider`). Codex repeats that reading in the headers of every response. One that differs from the last (a window's percentage or reset, the plan, the provider's own verdict) is written at once, like every cooldown and block. One that only repeats it is written at the end of the agent run, on the status refresh (`usageStatusRefreshMs`, while `showUsage` or `autoDiscoverModels` is on) and at session shutdown, so its `fetchedAt` on disk can be older than the one in `pi:usage:snapshot:v1`.
+
 ### Session model ownership
 
 Requires the supported Agent Pi versions listed above. Pi's session branch and explicit SDK/CLI launch model are authoritative. Shared account telemetry and legacy `lastUserModel` / `lastUserThinkingLevel` state cannot replace another pane's live selection, and shutdown does not publish that selection as a global default. Cold-catalog repair uses this session's model history once at startup. Configure Pi's saved default explicitly for new sessions.

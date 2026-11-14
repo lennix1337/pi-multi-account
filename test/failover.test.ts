@@ -5,9 +5,9 @@
  * provider responses (possibly retried) -> final assistant message -> agent_end.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
+import fs, {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -16,11 +16,12 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { syncBuiltinESMExports } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import test, { mock } from "node:test";
+import test, { mock, type TestContext } from "node:test";
 import { ModelRuntime, VERSION as PI_HOST_VERSION } from "@earendil-works/pi-coding-agent";
 import { piAutoPersistsSelectedModel, piHasContextWithSystem } from "../pi-contract.ts";
 import { childFacingAuthEntryForSlot } from "../slot-proxy-auth.ts";
@@ -1156,11 +1157,16 @@ function wait(ms: number): Promise<unknown> {
 	return fakeTick ? fakeTick(ms) : new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Fixtures share this file's agent directory, so one a test left running would still write to it. */
+async function shutDownLiveFixtures() {
+	for (const shutdown of liveFixtures) await shutdown().catch(() => undefined);
+	liveFixtures.clear();
+}
+
 /** A test whose recovery timers run on the fake clock: its waits cost no wall time, and every timer still fires in order. */
 function fakeClockTest(name: string, body: () => Promise<void>) {
 	test(name, async () => {
-		for (const shutdown of liveFixtures) await shutdown().catch(() => undefined);
-		liveFixtures.clear();
+		await shutDownLiveFixtures();
 		await onFakeClock(() => body());
 	});
 }
@@ -11067,6 +11073,284 @@ test("header quota refresh preserves identity without reviving an old availabili
 	assert.equal(snapshot.primary.usedPercent, 100);
 	await finishError(t, "anthropic", "claude-opus-4-8", "429 usage limit reached");
 	assert.ok(!t.rec.setModels.some(target => target.startsWith(`${provider}/`)), "100% account must not be selected");
+	await t.fire("session_shutdown");
+});
+
+// ---------------------------------------------------------------------------
+// Codex usage headers: what reaches the shared state file, and when
+// ---------------------------------------------------------------------------
+// Every Codex response carries the account's quota windows. Other processes act on the copy in the
+// shared state file: their own account selection, OptChat's wake routes and 90% warning, the bench's
+// stop lines at 60% (5-hour window) and 50% (weekly). A reading that differs from the last one must
+// therefore reach the file at once; one the provider merely repeats waits for the next boundary.
+
+const CODEX_ACTIVE = "openai-codex-account-2";
+const CODEX_SIBLING = "openai-codex-account-3";
+type CodexReading = { primary: number; primaryResetAt: number; secondary: number; secondaryResetAt: number };
+
+function codexUsageHeaders(reading: CodexReading) {
+	return {
+		"x-codex-plan-type": "pro",
+		"x-codex-primary-used-percent": String(reading.primary),
+		"x-codex-primary-window-minutes": "300",
+		"x-codex-primary-reset-at": String(reading.primaryResetAt / 1000),
+		"x-codex-secondary-used-percent": String(reading.secondary),
+		"x-codex-secondary-window-minutes": "10080",
+		"x-codex-secondary-reset-at": String(reading.secondaryResetAt / 1000),
+	};
+}
+
+/**
+ * Two Codex accounts with different readings, the first one selected, on a clock the test moves by hand.
+ * `respond` delivers one provider response carrying that account's usage headers: the selected account
+ * through a foreground turn, its sibling through a background request.
+ */
+async function codexUsageFixture(
+	context: TestContext,
+	opts: (start: number) => Parameters<typeof setup>[0] = () => ({}),
+	mockedTimers: Array<"setInterval"> = [],
+) {
+	await shutDownLiveFixtures();
+	const start = Math.floor(Date.now() / 1000) * 1000;
+	context.mock.timers.enable({ apis: ["Date", ...mockedTimers], now: start });
+	const t = setup({
+		accounts: {
+			[CODEX_ACTIVE]: { type: "oauth", access: codexAccessToken("ws-2", "user-2"), refresh: "codex-refresh-2", accountId: "ws-2" },
+			[CODEX_SIBLING]: { type: "oauth", access: codexAccessToken("ws-3", "user-3"), refresh: "codex-refresh-3", accountId: "ws-3" },
+		},
+		current: { provider: CODEX_ACTIVE, id: "gpt-5.5" },
+		idle: false,
+		...opts(start),
+	});
+	const readings: Record<string, CodexReading> = {
+		[CODEX_ACTIVE]: { primary: 25, primaryResetAt: start + 1_800_000, secondary: 40, secondaryResetAt: start + 86_400_000 },
+		[CODEX_SIBLING]: { primary: 70, primaryResetAt: start + 900_000, secondary: 15, secondaryResetAt: start + 172_800_000 },
+	};
+	const respond = (provider: string, change: Partial<CodexReading> = {}, status = 200) => {
+		readings[provider] = { ...readings[provider], ...change };
+		return t.fire("after_provider_response", {
+			...(provider === CODEX_ACTIVE ? {} : { request: { kind: "background", model: { provider, id: "gpt-5.5" } } }),
+			status,
+			headers: codexUsageHeaders(readings[provider]),
+		});
+	};
+	/** Moves the clock to `seconds` after the start and returns that instant. */
+	const at = (seconds: number) => {
+		context.mock.timers.setTime(start + seconds * 1000);
+		return start + seconds * 1000;
+	};
+	/** What the shared state file holds for an account: when the reading was taken, and both windows. */
+	const saved = (provider: string) => {
+		const usage = t.readState().usageByProvider?.[provider];
+		return { fetchedAt: usage?.fetchedAt, primary: usage?.primary?.usedPercent, secondary: usage?.secondary?.usedPercent };
+	};
+	return { t, start, respond, at, saved };
+}
+
+/** Runs `body` with outbound requests refused, and fails if it attempted one. */
+async function withoutNetwork(body: () => Promise<void>) {
+	const originalFetch = globalThis.fetch;
+	const attempted: string[] = [];
+	globalThis.fetch = (async (input: string | URL | Request) => {
+		attempted.push(String(input instanceof Request ? input.url : input));
+		throw new Error("this test must stay offline");
+	}) as typeof fetch;
+	try {
+		await body();
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+	assert.deepEqual(attempted, [], "the test attempted an outbound request");
+}
+
+/** Counts writes of the shared state file and reads of the credential files made while `run` executes. */
+async function countAccountFileIo(run: () => Promise<unknown>) {
+	const realRename = fs.renameSync;
+	const realRead = fs.readFileSync;
+	const counts = { stateWrites: 0, authReads: 0, sidecarReads: 0 };
+	fs.renameSync = function (this: unknown, from: any, to: any) {
+		if (String(to) === STATE) counts.stateWrites++;
+		return (realRename as any).call(this, from, to);
+	} as typeof fs.renameSync;
+	fs.readFileSync = function (this: unknown, path: any, ...rest: any[]) {
+		if (String(path) === AUTH) counts.authReads++;
+		else if (String(path) === PROXY_OAUTH_SIDECAR) counts.sidecarReads++;
+		return (realRead as any).call(this, path, ...rest);
+	} as typeof fs.readFileSync;
+	syncBuiltinESMExports();
+	try {
+		await run();
+		return counts;
+	} finally {
+		fs.renameSync = realRename;
+		fs.readFileSync = realRead;
+		syncBuiltinESMExports();
+	}
+}
+
+test("Codex usage headers that repeat the previous reading do not rewrite the shared state file", async (context) => {
+	const { t, start, respond, at, saved } = await codexUsageFixture(context, () => ({ config: { showUsage: true } }));
+	await withoutNetwork(async () => {
+		// The first reading of an account is news: it is written at once.
+		await respond(CODEX_ACTIVE);
+		await respond(CODEX_SIBLING);
+		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start, primary: 25, secondary: 40 });
+		assert.deepEqual(saved(CODEX_SIBLING), { fetchedAt: start, primary: 70, secondary: 15 });
+
+		const io = await countAccountFileIo(async () => {
+			for (let second = 1; second <= 20; second++) {
+				at(second);
+				await respond(CODEX_ACTIVE);
+				if (second % 5 === 0) await respond(CODEX_SIBLING);
+			}
+		});
+		assert.deepEqual(
+			io,
+			{ stateWrites: 0, authReads: 24, sidecarReads: 24 },
+			"24 responses repeating a reading: no state write, and the credential files read once per response",
+		);
+		// Readers in this process (the footer, pi:usage:snapshot:v1) still receive every reading as it arrives.
+		assert.deepEqual(t.rec.usageSnapshots.at(-1), {
+			provider: CODEX_ACTIVE,
+			family: "codex",
+			fetchedAt: start + 20_000,
+			primary: { usedPercent: 25, resetAt: start + 1_800_000 },
+			secondary: { usedPercent: 40, resetAt: start + 86_400_000 },
+		});
+		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start, primary: 25, secondary: 40 });
+
+		// The end of the run puts both accounts' latest readings on disk in a single write.
+		t.setIdle(true);
+		const end = await countAccountFileIo(() => t.fire("agent_end", { messages: [okAssistant(CODEX_ACTIVE, "gpt-5.5")] }));
+		assert.equal(end.stateWrites, 1);
+		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start + 20_000, primary: 25, secondary: 40 });
+		assert.deepEqual(saved(CODEX_SIBLING), { fetchedAt: start + 20_000, primary: 70, secondary: 15 });
+	});
+	await t.fire("session_shutdown");
+});
+
+test("a Codex usage reading that changes what another reader decides is written to the shared state at once", async (context) => {
+	const { t, start, respond, at, saved } = await codexUsageFixture(context);
+	await withoutNetwork(async () => {
+		await respond(CODEX_ACTIVE);
+		await respond(CODEX_SIBLING);
+		// The lines other readers act on: 60% and 50% stop the bench, 90% raises OptChat's warning.
+		await respond(CODEX_ACTIVE, { primary: 61 });
+		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start, primary: 61, secondary: 40 });
+		at(1);
+		await respond(CODEX_ACTIVE, { secondary: 50 });
+		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start + 1000, primary: 61, secondary: 50 });
+		at(2);
+		await respond(CODEX_ACTIVE, { primary: 90 });
+		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start + 2000, primary: 90, secondary: 50 });
+
+		// A spent window benches the account for every process the moment it is refused...
+		const refusedAt = at(3);
+		await respond(CODEX_ACTIVE, { primary: 100 }, 429);
+		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: refusedAt, primary: 100, secondary: 50 });
+		assert.ok(t.readState().exhaustedUntilByProvider?.[CODEX_ACTIVE] > refusedAt, "the cooldown is on disk");
+		// ...and a window that reset frees it just as promptly.
+		const freedAt = at(4);
+		await respond(CODEX_ACTIVE, { primary: 3, primaryResetAt: start + 18_000_000 });
+		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: freedAt, primary: 3, secondary: 50 });
+		assert.equal(t.readState().exhaustedUntilByProvider?.[CODEX_ACTIVE], undefined, "the cooldown is gone from disk");
+
+		assert.deepEqual(saved(CODEX_SIBLING), { fetchedAt: start, primary: 70, secondary: 15 }, "the sibling's reading is untouched");
+		assert.equal(t.readState().exhaustedUntilByProvider?.[CODEX_SIBLING], undefined);
+	});
+	await t.fire("session_shutdown");
+});
+
+test("a Codex usage reading that retires the provider's own availability verdict is written to the shared state at once", async (context) => {
+	const credentialHash = createHash("sha256").update(codexAccessToken("ws-2", "user-2")).digest("hex").slice(0, 12);
+	const { t, start, respond, saved } = await codexUsageFixture(context, (start) => ({
+		seedState: {
+			stateVersion: 5,
+			usageByProvider: {
+				// The usage endpoint's answer, a minute old: the same windows, plus "usable right now".
+				[CODEX_ACTIVE]: {
+					provider: CODEX_ACTIVE, family: "codex", fetchedAt: start - 60_000, credentialHash,
+					plan: "pro", account: "fixture@example.com", serviceable: true,
+					primary: { usedPercent: 25, resetAt: start + 1_800_000, windowSeconds: 18_000 },
+					secondary: { usedPercent: 40, resetAt: start + 86_400_000, windowSeconds: 604_800 },
+				},
+			},
+		},
+	}));
+	await withoutNetwork(async () => {
+		await respond(CODEX_ACTIVE);
+		const usage = t.readState().usageByProvider[CODEX_ACTIVE];
+		assert.equal(usage.serviceable, undefined, "headers state no verdict, so the old one must not stay on disk");
+		assert.equal(usage.account, "fixture@example.com");
+		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start, primary: 25, secondary: 40 });
+	});
+	await t.fire("session_shutdown");
+});
+
+test("a subagent child's latest Codex reading is on disk for other processes when its run ends", async (context) => {
+	const { t, start, respond, at } = await codexUsageFixture(context, () => ({ subagentChild: true }));
+	await withoutNetwork(async () => {
+		await respond(CODEX_ACTIVE);
+		await respond(CODEX_SIBLING);
+		at(30);
+		await respond(CODEX_ACTIVE);
+		at(31);
+		await respond(CODEX_SIBLING);
+		t.setIdle(true);
+		await t.fire("agent_end", { messages: [okAssistant(CODEX_ACTIVE, "gpt-5.5")] });
+	});
+	// What a second process finds in the file.
+	const reader = spawnSync(process.execPath, [
+		"-e",
+		"process.stdout.write(JSON.stringify(JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8')).usageByProvider))",
+		STATE,
+	], { encoding: "utf8" });
+	assert.equal(reader.status, 0, reader.stderr);
+	const seen = JSON.parse(reader.stdout);
+	assert.deepEqual(
+		[seen[CODEX_ACTIVE]?.fetchedAt, seen[CODEX_ACTIVE]?.primary?.usedPercent],
+		[start + 30_000, 25],
+	);
+	assert.deepEqual(
+		[seen[CODEX_SIBLING]?.fetchedAt, seen[CODEX_SIBLING]?.primary?.usedPercent],
+		[start + 31_000, 70],
+	);
+	await t.fire("session_shutdown");
+});
+
+test("a subagent child's latest Codex reading is on disk after the session shuts down", async (context) => {
+	const { t, start, respond, at, saved } = await codexUsageFixture(context, () => ({ subagentChild: true }));
+	await withoutNetwork(async () => {
+		await respond(CODEX_ACTIVE);
+		await respond(CODEX_SIBLING);
+		// Arrives after the last run boundary: only the shutdown is left to write it.
+		at(45);
+		await respond(CODEX_ACTIVE);
+		await t.fire("session_shutdown");
+	});
+	assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start + 45_000, primary: 25, secondary: 40 });
+	assert.deepEqual(saved(CODEX_SIBLING), { fetchedAt: start, primary: 70, secondary: 15 });
+});
+
+test("the periodic status tick puts the latest Codex reading of a long run on disk", async (context) => {
+	const { t, start, respond, saved } = await codexUsageFixture(
+		context,
+		() => ({ config: { showUsage: true, usageStatusRefreshMs: 60_000 } }),
+		["setInterval"],
+	);
+	await withoutNetwork(async () => {
+		await t.fire("agent_start", {});
+		await respond(CODEX_ACTIVE);
+		await respond(CODEX_SIBLING);
+		// One second before the first tick of the run, the same reading arrives again.
+		context.mock.timers.tick(59_000);
+		await respond(CODEX_ACTIVE);
+		context.mock.timers.tick(1_000);
+		// The tick's own usage refresh runs in the background; let it settle before the network check.
+		for (let turn = 0; turn < 5; turn++) await new Promise<void>((resolve) => setImmediate(resolve));
+	});
+	assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start + 59_000, primary: 25, secondary: 40 });
+	assert.deepEqual(saved(CODEX_SIBLING), { fetchedAt: start, primary: 70, secondary: 15 });
 	await t.fire("session_shutdown");
 });
 

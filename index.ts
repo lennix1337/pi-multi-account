@@ -324,6 +324,7 @@ import {
 	mergeUsageSnapshot,
 	providerUsageLabel,
 	remainingPercent,
+	sameUsageReading,
 	usageColor,
 	usageFamily,
 	UsageFetchError,
@@ -4356,6 +4357,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	let pendingWakeTimer: ReturnType<typeof setTimeout> | undefined;
 	let queuedInputWakeTimer: ReturnType<typeof setTimeout> | undefined;
 	let usageStatusTimer: ReturnType<typeof setInterval> | undefined;
+	/** A usage reading is in memory that the shared state file does not hold yet. */
+	let usageTelemetryUnsaved = false;
 	// Pending work is session-local. The shared state file may contain another Pi window's marker;
 	// using that marker as this window's runtime state makes two unrelated tasks resume each other.
 	type PendingResumeMode = "auto-continue" | "quota-recovery";
@@ -4826,6 +4829,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				for (const [key, value] of Object.entries(values ?? {})) map.set(key, value);
 			}
 			lastSavedState = structuredClone(next);
+			usageTelemetryUnsaved = false;
 		} catch {
 			logEvent("state_write_deferred", { reason: "storage_unavailable_or_busy" });
 		}
@@ -5434,13 +5438,17 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * is whether anywhere else is ready. Counted from bookkeeping already in memory — no probes,
 	 * no reconciliation — because this runs on a footer timer, not on a decision.
 	 */
-	function readyElsewhereCount(ctx: any, current: string | undefined): number {
+	function readyElsewhereCount(
+		ctx: any,
+		current: string | undefined,
+		auth: Record<string, AuthEntry> = readAuthFile(),
+	): number {
 		const now = Date.now();
 		return rotation.filter(
 			(provider) =>
 				provider !== current &&
 				!isInvalidated(provider) &&
-				providerHasUsableAuth(ctx, provider) &&
+				providerHasUsableAuth(ctx, provider, auth) &&
 				providerRecoveryAt(provider, now) <= now,
 		).length;
 	}
@@ -5457,9 +5465,14 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		});
 	}
 
-	function renderUsageStatus(ctx: any, provider: string, snapshot: UsageSnapshot) {
+	function renderUsageStatus(
+		ctx: any,
+		provider: string,
+		snapshot: UsageSnapshot,
+		auth?: Record<string, AuthEntry>,
+	) {
 		const display = displayUsageSnapshot(snapshot);
-		const spare = readyElsewhereCount(ctx, provider);
+		const spare = readyElsewhereCount(ctx, provider, auth);
 		const text = `${formatUsageCompact(display, Date.now(), { windows: config.showUsageWindows })} | ${
 			spare > 0 ? `+${spare} ready` : "no spare"
 		}`;
@@ -5481,7 +5494,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		ctx.ui.setStatus("multi-account-quota", rendered);
 	}
 
-	function updateUsageStatus(ctx: any, provider = ctx?.model?.provider) {
+	/** `auth` is the credential store when the caller has already read it, so it is not read again here. */
+	function updateUsageStatus(
+		ctx: any,
+		provider = ctx?.model?.provider,
+		auth?: Record<string, AuthEntry>,
+	) {
 		if (typeof ctx?.ui?.setStatus !== "function") return;
 		// Footer rendering touches host UI + formatting helpers; never let a render hiccup
 		// (theme shape change, formatter edge case) bubble up and break the turn it runs in.
@@ -5496,7 +5514,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// Qwen may have no snapshot at all (nothing to fetch) — synthesize a bare one so its live
 			// availability/rate-limit status still shows.
 			const snapshot: UsageSnapshot | undefined =
-				cachedUsage(provider) ??
+				cachedUsage(provider, auth) ??
 				usageByProvider.get(provider) ??
 				(usageFamily(provider) === "qwen"
 					? {
@@ -5511,7 +5529,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				ctx.ui.setStatus("multi-account-quota", undefined);
 				return;
 			}
-			renderUsageStatus(ctx, provider, snapshot);
+			renderUsageStatus(ctx, provider, snapshot, auth);
 		} catch {
 			/* footer is cosmetic — a render error must not affect failover */
 		}
@@ -5523,16 +5541,30 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 	});
 
-	function usageSnapshotIsCurrent(snapshot: UsageSnapshot): boolean {
+	function usageSnapshotIsCurrent(
+		snapshot: UsageSnapshot,
+		auth: Record<string, AuthEntry> = readAuthFile(),
+	): boolean {
 		if (sessionClosed) return false;
-		const entry = readAuthFile()[snapshot.provider];
+		const entry = auth[snapshot.provider];
 		return !!entry && (!snapshot.credentialHash || snapshot.credentialHash === credentialHash(entry));
 	}
 
-	function storeUsage(ctx: any, snapshot: UsageSnapshot): boolean {
-		if (!usageSnapshotIsCurrent(snapshot)) return false;
-		snapshot = mergeUsageSnapshot(usageByProvider.get(snapshot.provider), snapshot);
+	/** Writes a usage reading that so far only this process holds. */
+	function flushUsageTelemetry() {
+		if (usageTelemetryUnsaved) persist();
+	}
+
+	function storeUsage(
+		ctx: any,
+		snapshot: UsageSnapshot,
+		options: { fromResponseHeaders?: boolean; auth?: Record<string, AuthEntry> } = {},
+	): boolean {
+		if (!usageSnapshotIsCurrent(snapshot, options.auth)) return false;
+		const previous = usageByProvider.get(snapshot.provider);
+		snapshot = mergeUsageSnapshot(previous, snapshot);
 		usageByProvider.set(snapshot.provider, snapshot);
+		usageTelemetryUnsaved = true;
 		usageErrors.delete(snapshot.provider);
 		// AUTHORITATIVE PROACTIVE BENCH. If the account's own usage endpoint reports a hard block (a
 		// window at >=100% with a future reset), record the cooldown NOW — even if the account never
@@ -5554,6 +5586,15 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			// the quota endpoint is known not to see.
 			applyUsageToCooldown(snapshot.provider, snapshot, Date.now());
 		}
+		// Response headers repeat the account's reading on every LLM response. One that says what the
+		// last one said changes nothing a reader of the shared state decides on, so it waits in memory
+		// for the next write or run boundary (flushUsageTelemetry) instead of taking the cross-process
+		// state lock and rewriting the file once per response. A reading that differs in anything but
+		// the instant it was taken is written now: other processes act on percentage lines of their own.
+		if (options.fromResponseHeaders && blockMs === 0 && sameUsageReading(previous, snapshot)) {
+			updateUsageStatus(ctx, undefined, options.auth);
+			return true;
+		}
 		logEvent("usage_refresh", {
 			provider: snapshot.provider,
 			family: snapshot.family,
@@ -5562,7 +5603,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			blocked: blockMs !== undefined && blockMs > 0,
 		});
 		persist();
-		updateUsageStatus(ctx);
+		updateUsageStatus(ctx, undefined, options.auth);
 		return true;
 	}
 
@@ -5817,6 +5858,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 		usageStatusTimer = setInterval(() => {
 			runBackground("rotation metadata refresh", ctx, async () => {
+				flushUsageTelemetry();
 				await refreshRotationUsage(ctx);
 				// Re-registering provider models is safe while idle and avoids touching the registry in
 				// the middle of a streaming request. The five-minute catalog TTL keeps this sweep cheap.
@@ -6794,8 +6836,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 
 	// ----- fallback selection ----------------------------------------------
 
-	function providerHasUsableAuth(ctx: any, provider: string) {
-		const entry = readAuthFile()[provider];
+	function providerHasUsableAuth(
+		ctx: any,
+		provider: string,
+		auth: Record<string, AuthEntry> = readAuthFile(),
+	) {
+		const entry = auth[provider];
 		if (entry) return isEntryUsable(entry);
 		try {
 			return (
@@ -12588,6 +12634,7 @@ ${note}` : basePrompt;
 		}
 		clearQueuedInputs();
 		if (!subagentChild) clearPendingContinuation();
+		flushUsageTelemetry();
 		clearUsageStatusTimer();
 		contextGuardWantsCompaction = false;
 		contextGuardCompactionRetryAfter = 0;
@@ -12998,14 +13045,15 @@ ${note}` : basePrompt;
 		if (request?.kind === "background") {
 			const route = request.model;
 			if (route && usageFamily(route.provider) === "codex") {
-				const entry = readAuthFile()[route.provider];
+				const auth = readAuthFile();
+				const entry = auth[route.provider];
 				const snapshot = parseCodexUsageHeaders(
 					route.provider,
 					(event as any).headers ?? {},
 					Date.now(),
 					entry ? credentialHash(entry) : undefined,
 				);
-				if (snapshot) storeUsage(ctx, snapshot);
+				if (snapshot) storeUsage(ctx, snapshot, { fromResponseHeaders: true, auth });
 			}
 			return;
 		}
@@ -13015,14 +13063,15 @@ ${note}` : basePrompt;
 		// something this extension's own settings get an opinion about.
 		noteProviderRequestObserved();
 		if (ctx.model && usageFamily(ctx.model.provider) === "codex") {
-			const entry = readAuthFile()[ctx.model.provider];
+			const auth = readAuthFile();
+			const entry = auth[ctx.model.provider];
 			const snapshot = parseCodexUsageHeaders(
 				ctx.model.provider,
 				(event as any).headers ?? {},
 				Date.now(),
 				entry ? credentialHash(entry) : undefined,
 			);
-			if (snapshot) storeUsage(ctx, snapshot);
+			if (snapshot) storeUsage(ctx, snapshot, { fromResponseHeaders: true, auth });
 		}
 		if (!automaticFailoverEnabled()) return;
 		const status = (event as any).status;
@@ -13380,6 +13429,8 @@ ${note}` : basePrompt;
 		if (!config.enabled || !config.autoContinue || userAbortedChain) return;
 		await maybeDispatchContinuation(ctx, { recoveryLease });
 		} finally {
+			// After the branches above: most of them write the state themselves, which carries the reading.
+			flushUsageTelemetry();
 			if (continuationRecoveryLease?.token === recoveryLease?.token) {
 				continuationRecoveryLease = undefined;
 			}

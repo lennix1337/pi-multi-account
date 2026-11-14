@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Codex usage headers and the shared state file
+
+- A Codex response whose usage headers repeat the account's last reading no longer rewrites `provider-failover-state.json`. Every response used to take the cross-process state lock, rewrite the whole file and append a log line, synchronously; while another Pi process held the lock, each response waited out the 250 ms lock bound and then dropped the write. A reading that differs from the last one in anything but the instant it was taken (a window's percentage or reset, the plan, the provider's own verdict) is still written at once, and so is every block and cooldown. A repeated reading is written at the end of the agent run, on the status refresh tick and at session shutdown, so its `fetchedAt` on disk can lag; the footer and `pi:usage:snapshot:v1` still update on every response.
+- That response path reads `auth.json` and the proxy sidecar once instead of once per account in the rotation plus two.
+- Measured on a disposable 10-account profile with a 96 KB state file, per response that repeats the reading: 37 → 2 synchronous file operations, 51 ms → 1.4 ms blocked (shared CPU, so only the order of magnitude is stable); with the state lock held by another process: 260–338 ms → 1 ms per response. A response whose reading changed: 37 → 15 file operations.
+
 ### Exhausted accounts stop collecting requests
 
 - A failover hop pinned its account for one attempt, but the pin outlived that attempt. When the account answered "usage limit" or "credit balance is too low", every later turn that did not come from a typed prompt (a background-worker report, a custom message) still passed the readiness check and sent a new request to the same refused account, once per turn. The pin now ends as soon as the account refuses with a limit or auth error.

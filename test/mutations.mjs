@@ -35,6 +35,8 @@ const mutants = [
 	["failover-pin-outlives-attempt", "if (hasFailoverPin(provider)) failoverPinnedProvider = undefined;", "", "turns started by background reports", "index.ts", "exhausted-route-gate-session.test.ts"],
 	["cooldown-ignored-in-selection", "let at = Math.max(now, exhaustedUntilByProvider.get(provider) ?? now);", "let at = now;", "turns started by background reports", "index.ts", "exhausted-route-gate-session.test.ts"],
 	["credit-low-not-a-limit", "\t\"credit balance is too low\",\n", "", "turns started by background reports", "index.ts", "exhausted-route-gate-session.test.ts"],
+	["usage-reading-always-deferred", "if (options.fromResponseHeaders && blockMs === 0 && sameUsageReading(previous, snapshot)) {", "if (options.fromResponseHeaders) {", "changes what another reader decides", "index.ts", "failover.test.ts"],
+	["usage-reading-never-flushed", "if (usageTelemetryUnsaved) persist();", "", "latest Codex reading", "index.ts", "failover.test.ts"],
 ];
 
 for (const [name, before, after, pattern, sourceFile = "slot-proxy.ts", testFile = "slot-proxy.test.ts"] of mutants) {

@@ -56,7 +56,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { dirname, join } from "node:path";
 import { getModel as getHostModel } from "@earendil-works/pi-ai/compat";
@@ -5695,6 +5695,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	 * Cursor reads its three Pro+ pools from the dashboard service.
 	 */
 	const AGY_QUOTA_REFRESH_MS = 15 * 60_000;
+	const AGY_QUOTA_HOME = join(tmpdir(), "agy-quota-home");
 	let agyQuotaFetch: Promise<UsageSnapshot | undefined> | undefined;
 	let lastAgyQuotaAttemptAt = 0;
 
@@ -5710,7 +5711,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					encoding: "utf8",
 					windowsHide: true,
 					timeout: 30_000,
-					env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+					// Login lives in the OS credential store; a home without ~/.gemini/antigravity/mcp_config.json
+					// keeps agy from starting every MCP server (consoles flash on screen) just to print quota.
+					env: { ...process.env, MSYS_NO_PATHCONV: "1", USERPROFILE: AGY_QUOTA_HOME, HOME: AGY_QUOTA_HOME },
 				},
 				(error, stdout) => {
 					if (error) reject(error);

@@ -91,7 +91,7 @@ test("index.ts persists agy quota, shows it in accounts, keeps previous on failu
 		fakeScript,
 		`import { appendFileSync, readFileSync } from "node:fs";
 appendFileSync(${JSON.stringify(callsFile)}, process.argv.slice(2).join(" ") + "\\n");
-appendFileSync(${JSON.stringify(callsFile + ".home")}, (process.env.USERPROFILE ?? "") + "|" + (process.env.HOME ?? "") + "\\n");
+appendFileSync(${JSON.stringify(callsFile + ".home")}, (process.env.USERPROFILE ?? "") + "|" + (process.env.HOME ?? "") + "|" + (process.env.AGY_CLI_DISABLE_AUTO_UPDATE ?? "") + "\\n");
 const mode = readFileSync(${JSON.stringify(modeFile)}, "utf8").trim();
 if (mode === "fail") {
   process.stderr.write("agy failed");
@@ -253,7 +253,8 @@ process.stdout.write(${JSON.stringify(SAMPLE_AGY_QUOTA)} + "\\n");
 		// A home without the user's mcp_config.json keeps agy from starting every MCP server (and flashing consoles) just to read quota.
 		const homes = readFileSync(callsFile + ".home", "utf8").trim().split(/\r?\n/);
 		const quietHome = join(tmpdir(), "agy-quota-home");
-		assert.ok(homes.every((h) => h === `${quietHome}|${quietHome}`), homes.join(", "));
+		// The updater agy spawns in the background opens a visible console window; a quota read never needs it.
+		assert.ok(homes.every((h) => h === `${quietHome}|${quietHome}|true`), homes.join(", "));
 
 		await created.session.dispose();
 	} finally {

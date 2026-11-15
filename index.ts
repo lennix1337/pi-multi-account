@@ -5713,7 +5713,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					timeout: 30_000,
 					// Login lives in the OS credential store; a home without ~/.gemini/antigravity/mcp_config.json
 					// keeps agy from starting every MCP server (consoles flash on screen) just to print quota.
-					env: { ...process.env, MSYS_NO_PATHCONV: "1", USERPROFILE: AGY_QUOTA_HOME, HOME: AGY_QUOTA_HOME },
+					env: { ...process.env, MSYS_NO_PATHCONV: "1", USERPROFILE: AGY_QUOTA_HOME, HOME: AGY_QUOTA_HOME, AGY_CLI_DISABLE_AUTO_UPDATE: "true" },
 				},
 				(error, stdout) => {
 					if (error) reject(error);

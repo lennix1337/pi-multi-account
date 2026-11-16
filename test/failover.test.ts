@@ -325,6 +325,14 @@ let messageTimestamp = 1;
 
 /** Shuts down each fixture a test left running; a leftover's real-time wake would otherwise fire inside a later fake-clock test. */
 const liveFixtures = new Set<() => Promise<unknown>>();
+const fixtureInfo = new WeakMap<() => Promise<unknown>, { id: number; line: number | null; active: () => boolean }>();
+let nextFixtureId = 0;
+function activeFixtures() {
+	return [...liveFixtures].flatMap((shutdown) => {
+		const info = fixtureInfo.get(shutdown);
+		return info?.active() ? [{ id: info.id, line: info.line }] : [];
+	});
+}
 
 function setup(opts: {
 	accounts?: Account;
@@ -825,7 +833,9 @@ function setup(opts: {
 		else process.env.PI_MULTI_ACCOUNT_INDEPENDENT_ROOTS = previousIndependentRoots;
 	}
 
+	let active = true;
 	const fire = async (event: string, payload: any = {}) => {
+		if (event === "session_start") active = true;
 		const handlers = events[event];
 		if (!handlers || handlers.length === 0) return undefined;
 		if (event === "context") {
@@ -861,6 +871,7 @@ function setup(opts: {
 				if (out?.cancel) return out;
 			}
 		}
+		if (event === "session_shutdown") active = false;
 		return result;
 	};
 	const setIdle = (value: boolean) => {
@@ -908,8 +919,16 @@ function setup(opts: {
 		}
 	};
 
-	liveFixtures.add(() => fire("session_shutdown", {}));
+	const shutdown = () => fire("session_shutdown", {});
+	const fixtureId = ++nextFixtureId;
+	// Keep only the caller's line number, never a stack or fixture contents.
+	const caller = new Error().stack?.split("\n").slice(2)
+		.map((line) => line.match(/failover\.test\.ts:(\d+):\d+/)?.[1])
+		.find(Boolean);
+	liveFixtures.add(shutdown);
+	fixtureInfo.set(shutdown, { id: fixtureId, line: caller ? Number(caller) : null, active: () => active });
 	return {
+		fixtureId,
 		ctx,
 		rec,
 		fire,
@@ -15447,15 +15466,105 @@ async function onFakeClock(body: (tick: (ms: number) => Promise<void>) => Promis
 const QUOTA_ERROR = "429 usage limit reached";
 const QUOTA_CONFIG = { cooldownMs: 60_000, probeCooldownMs: 60_000, pendingPollMs: 30_000 };
 
+type QuotaTimerTrace = { scheduled: Array<{ id: number; delay: number; at: number }>; executed: Array<{ id: number; delay: number; at: number }> };
+async function onQuotaFakeClock(body: (tick: (ms: number) => Promise<void>, trace: QuotaTimerTrace) => Promise<void>) {
+	await onFakeClock(async (tick) => {
+		const trace: QuotaTimerTrace = { scheduled: [], executed: [] };
+		const original = globalThis.setTimeout;
+		globalThis.setTimeout = ((callback: (...args: any[]) => void, delay = 0, ...args: any[]) => {
+			const id = trace.scheduled.length + 1;
+			trace.scheduled.push({ id, delay, at: Date.now() });
+			return original(function (this: unknown, ...callbackArgs: any[]) {
+				trace.executed.push({ id, delay, at: Date.now() });
+				callback.apply(this, callbackArgs);
+			}, delay, ...args);
+		}) as typeof setTimeout;
+		try { await body(tick, trace); } finally { globalThis.setTimeout = original; }
+	});
+}
+function assertQuotaResumed(t: ReturnType<typeof setup>, trace: QuotaTimerTrace) {
+	const actual = t.rec.continueCalls.length + t.rec.sent.length;
+	if (actual === 1) return;
+	let state: any;
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(STATE, "utf8"));
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) state = parsed;
+	} catch {
+		// A missing or unreadable state must not masquerade as an empty, readable state.
+	}
+	const diagnostic = {
+		now: Date.now(),
+		stateReadable: !!state,
+		timers: trace,
+		persistedResume: {
+			pendingFrom: !!state?.pendingFrom,
+			pendingReason: !!state?.pendingReason,
+			pendingSince: typeof state?.pendingSince === "number" ? state.pendingSince : null,
+			continueCalls: t.rec.continueCalls.length,
+			sent: t.rec.sent.length,
+		},
+		cooldown: {
+			anthropic: typeof state?.exhaustedUntilByProvider?.anthropic === "number" ? state.exhaustedUntilByProvider.anthropic : null,
+			model: typeof state?.exhaustedUntilByModel?.["anthropic/claude-opus-4-8"] === "number" ? state.exhaustedUntilByModel["anthropic/claude-opus-4-8"] : null,
+			lastProbe: typeof state?.lastProbeAtByProvider?.anthropic === "number" ? state.lastProbeAtByProvider.anthropic : null,
+		},
+		activeFixtures: activeFixtures(),
+	};
+	assert.equal(actual, 1, `resumes once the account is back: ${JSON.stringify(diagnostic)}`);
+}
+
+test("quota auto-resume failure includes safe clock, timer, state and fixture diagnostics", async () => {
+	const previous = setup({ accounts: ONE_ACCOUNT });
+	assert.ok(activeFixtures().some((fixture) => fixture.id === previous.fixtureId));
+	await previous.fire("session_shutdown");
+	assert.ok(!activeFixtures().some((fixture) => fixture.id === previous.fixtureId));
+	await previous.fire("session_start");
+	assert.ok(activeFixtures().some((fixture) => fixture.id === previous.fixtureId));
+	await previous.fire("session_shutdown");
+	const t = setup({ accounts: ONE_ACCOUNT });
+	writeFileSync(STATE, JSON.stringify({
+		pendingFrom: "SECRET-PENDING", pendingReason: "SECRET-REASON",
+		exhaustedUntilByProvider: { anthropic: 123456 },
+		exhaustedUntilByModel: { "anthropic/claude-opus-4-8": 234567 },
+		lastProbeAtByProvider: { anthropic: 345678 },
+	}));
+	await onQuotaFakeClock(async (tick, trace) => {
+		setTimeout(() => {}, 100);
+		setTimeout(() => {}, 500);
+		await tick(100);
+		let message = "";
+		try { assertQuotaResumed(t, trace); } catch (error) { message = String(error); }
+		assert.match(message, /"now":\d+/);
+		assert.match(message, /"scheduled":\[\{"id":1,"delay":100,"at":\d+\},\{"id":2,"delay":500,"at":\d+\}\]/);
+		assert.match(message, /"executed":\[\{"id":1,"delay":100,"at":\d+\}\]/);
+		assert.match(message, /"stateReadable":true/);
+		assert.match(message, /"pendingFrom":true/);
+		assert.match(message, /"pendingReason":true/);
+		assert.match(message, /"anthropic":123456/);
+		assert.match(message, /"model":234567/);
+		assert.match(message, /"lastProbe":345678/);
+		assert.match(message, /"persistedResume":/);
+		const diagnostic = JSON.parse(message.match(/resumes once the account is back: (\{[^\n]+\})/)![1]);
+		assert.ok(diagnostic.activeFixtures.some((fixture: { id: number; line: number | null }) => fixture.id === t.fixtureId && fixture.line !== null));
+		assert.ok(!diagnostic.activeFixtures.some((fixture: { id: number }) => fixture.id === previous.fixtureId));
+		assert.equal(diagnostic.timers.scheduled[0].at + 100, diagnostic.now);
+		assert.equal(diagnostic.timers.executed[0].at, diagnostic.now);
+		assert.doesNotMatch(message, /SECRET-|a-tok-1|a-ref-1/);
+		writeFileSync(STATE, "{invalid");
+		assert.throws(() => assertQuotaResumed(t, trace), /"stateReadable":false/);
+	});
+	await t.fire("session_shutdown");
+});
+
 test("quota auto-resume: no goal, all accounts exhausted -> one continuation at the reset, never earlier", async () => {
 	const t = setup({ accounts: ONE_ACCOUNT, current: { provider: "anthropic", id: "claude-opus-4-8" }, config: QUOTA_CONFIG });
-	await onFakeClock(async (tick) => {
+	await onQuotaFakeClock(async (tick, trace) => {
 		await finishError(t, "anthropic", "claude-opus-4-8", QUOTA_ERROR);
 		assert.ok(t.readState().pendingFrom, "the stopped turn is parked, not dropped");
 		await tick(50_000);
 		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 0, "no probe or resume before the reset");
 		await tick(15_000);
-		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 1, "resumes once the account is back");
+		assertQuotaResumed(t, trace);
 		await tick(600_000);
 		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 1, "exactly once: no double resume");
 		assert.equal(t.readState().pendingFrom, undefined);

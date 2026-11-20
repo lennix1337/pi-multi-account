@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { formatAgyQuotaLine, parseAgyQuota, usageFamily } from "../usage.ts";
+import { agyFailureReason, formatAgyQuotaLine, parseAgyQuota, usageFamily } from "../usage.ts";
 
 const SAMPLE_AGY_QUOTA = [
 	"Gemini Models\tWeekly Limit Remaining\t100%\t2026-11-21T14:13:00Z",
@@ -269,4 +269,11 @@ process.stdout.write(${JSON.stringify(SAMPLE_AGY_QUOTA)} + "\\n");
 		if (prevWeb === undefined) delete process.env.PI_WEB_SESSION;
 		else process.env.PI_WEB_SESSION = prevWeb;
 	}
+});
+
+test("agyFailureReason names AGY_BIN when agy is not on PATH and no binary is configured", () => {
+	const enoent = Object.assign(new Error("spawn agy ENOENT"), { code: "ENOENT" });
+	assert.match(agyFailureReason(enoent, undefined), /agy_not_found.*AGY_BIN/);
+	assert.equal(agyFailureReason(enoent, "/x/agy-quota-pc"), "spawn agy ENOENT");
+	assert.equal(agyFailureReason(new Error("boom"), undefined), "boom");
 });

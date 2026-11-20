@@ -225,6 +225,13 @@ export function parseAgyQuota(
 	};
 }
 
+/** Failure reason for the agy quota log; a missing binary names the variable that fixes it. */
+export function agyFailureReason(error: unknown, configuredBin: string | undefined): string {
+	const message = error instanceof Error ? error.message : String(error);
+	const missing = (error as { code?: string } | undefined)?.code === "ENOENT";
+	return missing && !configuredBin ? `agy_not_found: set AGY_BIN to the agy launcher (${message})` : message;
+}
+
 export function formatAgyQuotaLine(snapshot: UsageSnapshot, now = Date.now()): string {
 	const parts: string[] = [];
 	const resets: string[] = [];

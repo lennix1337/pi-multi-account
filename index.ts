@@ -318,6 +318,7 @@ import {
 import {
 	ANTHROPIC_API_KEY_BILLING_NOTE,
 	fetchUsageSnapshot,
+	agyFailureReason,
 	formatAgyQuotaLine,
 	formatResetDuration,
 	formatUsageCompact,
@@ -5764,7 +5765,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				return snapshot;
 			} catch (error) {
 				logEvent("agy_quota_failed", {
-					reason: error instanceof Error ? error.message : String(error),
+					reason: agyFailureReason(error, configuredBin),
 				});
 				return previous;
 			} finally {

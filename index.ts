@@ -8672,14 +8672,6 @@ ${note}` : basePrompt;
 				return;
 			}
 			claimUserControl(`manual switch ${target}`, true);
-			// Manual switch is an EXPLICIT override, so give the target a clean slate:
-			//  - clear any cooldown (the user is overriding a rate-limit wait), AND
-			//  - clear a STALE invalidation. An account can stay invalidated long after its real
-			//    cause is gone — e.g. it was killed by a since-fixed provider bug (the wrong Qwen
-			//    endpoint), or the key was replaced but its hash-based auto-revive never ran because
-			//    the auth-file mtime hadn't changed. Refusing the user's own switch in that state was
-			//    the "fresh key still says: not logged in" bug. Revive, reload auth, force
-			//    re-discovery, and let the account prove itself on the real request instead.
 			const wasInvalid = invalidatedByProvider.delete(parsed.provider);
 			authFailures.delete(parsed.provider);
 			exhaustedUntilByProvider.delete(parsed.provider);
@@ -8690,8 +8682,6 @@ ${note}` : basePrompt;
 			}
 			persist();
 			refreshDiscovery(true, ctx);
-			// Use the RESOLVED slot id, not the raw text: a short name that resolved above would
-			// otherwise be handed on verbatim and find nothing.
 			const resolvedTarget = parsed.modelId
 				? `${parsed.provider}/${parsed.modelId}`
 				: parsed.provider;
@@ -8734,16 +8724,6 @@ ${note}` : basePrompt;
 			}
 			return;
 		}
-		/**
-		 * Resolve what the user typed to a real slot.
-		 *
-		 * The slot ids are internal (`kimi-coding`, `openai-codex-account-6`) and `switch` demanded
-		 * one exactly, so the only command that reaches a chosen account directly answered
-		 * `unknown provider "kimi"` to the name a person would actually type — leaving `next` and
-		 * its walk through every spent account as the only way there. An exact id always wins; a
-		 * short name resolves only when it is unambiguous, because guessing between two Codex slots
-		 * would silently spend the wrong account's quota.
-		 */
 		function resolveSwitchTarget(
 			target: string,
 			ctx: any,
@@ -8767,11 +8747,6 @@ ${note}` : basePrompt;
 		}
 
 		if (command === "best" || command === "live") {
-			// `next` walks the ring a step at a time and `switch` needs an exact name, so on a
-			// machine with a dozen accounts — most of them spent — reaching a working one meant
-			// pressing next until something answered, landing on and being bounced off each dead
-			// account on the way. This asks the one question a person actually has: put me
-			// somewhere that can work right now.
 			if (!ctx.model) {
 				ctx.ui.notify(
 					"pi-multi-account: no active model to switch from",
@@ -8820,9 +8795,6 @@ ${note}` : basePrompt;
 			if (switched) {
 				announceManualChoice(ctx);
 				await resumeQueuedInputsAfterManualSwitch(ctx, true);
-				// Saying "best" of an account nobody can measure overstates what was done. When no
-				// account confirms availability, this is the least-bad guess, and calling it that
-				// is the difference between a considered choice and looking random.
 				if (!verified)
 					ctx.ui.notify(
 						`pi-multi-account: no account confirmed availability — ${ctx.model?.provider} has no quota endpoint to check, so this is an unverified guess. Everything measurable is spent.`,
@@ -8844,7 +8816,6 @@ ${note}` : basePrompt;
 			try {
 				mutateConfigFile(CONFIG_PATH, () => ({ onlyActive: next2 }));
 			} catch (error) {
-				// non-fatal: the in-memory flag still applies for this session
 				warnConfigNotSaved(ctx, error);
 			}
 			if (next2) applyOnlyActiveFilter(ctx);
@@ -8863,8 +8834,6 @@ ${note}` : basePrompt;
 				...new Set(rotation.map((id) => normalizeGroup(id))),
 			].filter(Boolean);
 
-			// No argument: report, never change. The ladder is the kind of setting people check
-			// far more often than they set.
 			if (!rest) {
 				const lines = describePriority(config.providerPriority, groupsPresent);
 				ctx.ui.notify(
@@ -8885,8 +8854,6 @@ ${note}` : basePrompt;
 
 			const reset = /^(reset|default|defaults)$/i.test(rest);
 			const cleared = /^(none|off|clear)$/i.test(rest);
-			// "none" is a real answer, distinct from resetting: it says "I have no preference,
-			// decide by liveness alone", which is what an empty ladder means to the comparator.
 			const next = reset
 				? [...DEFAULT_PROVIDER_PRIORITY]
 				: cleared
@@ -8904,13 +8871,10 @@ ${note}` : basePrompt;
 			try {
 				mutateConfigFile(CONFIG_PATH, () => ({ providerPriority: next }));
 			} catch (error) {
-				// non-fatal: the ladder still applies for this session
 				warnConfigNotSaved(ctx, error);
 			}
 			logEvent("priority_set", { priority: next, reset, cleared });
 
-			// Naming a provider that is not logged in is not an error — people set the ladder they
-			// intend to have, then log in. But it must be said, or a typo looks like it worked.
 			const unknown = next.filter((group) => !groupsPresent.includes(group));
 			ctx.ui.notify(
 				[
@@ -8934,11 +8898,6 @@ ${note}` : basePrompt;
 		if (command === "next") {
 			if (ctx.model) {
 				claimUserControl("manual next", true);
-				// Manual rotation is a user override, NOT a rate-limit event: cooling the account
-				// we're leaving (the old 5-minute cooldown) drained the pool — after one lap every
-				// provider was "cooling" and the round-robin collapsed onto whatever was left. Pass
-				// 0 so we only record lastLeftProvider (anti-ping-pong) and keep every account
-				// selectable, so repeated /multi-account next truly cycles through them all.
 				const switched = await switchToFallback(
 					ctx,
 					ctx.model,
@@ -8955,9 +8914,6 @@ ${note}` : basePrompt;
 			return;
 		}
 		if (command === "stop") {
-			// First, so every async chain already past its guards abandons itself instead of
-			// re-arming the wait a moment after this line clears it. That race is why stop used to
-			// need typing two or three times.
 			chainEpoch++;
 			userAbortedChain = true;
 			resetGovernor();
@@ -8990,11 +8946,6 @@ ${note}` : basePrompt;
 		const current = ctx.model
 			? `${ctx.model.provider}/${ctx.model.id}`
 			: "none";
-		// What the rotation looks like to anything that does NOT load this extension: a memory
-		// extension consolidating its notes, an external CLI, any `pi -p --no-extensions` child.
-		// An unpinned child reads the saved global default from settings.json. Since Pi 0.84.3
-		// that value intentionally need not equal this session's live rotation slot; broker and
-		// subagent children pass an explicit model and bypass this fallback entirely.
 		const childView = slotsAsAChildSeesThem(rotation, readAuthFileRaw());
 		const childUnusable = childView.filter((verdict) => !verdict.usable);
 		const childRouteWarning = defaultRouteWarning(
@@ -9023,8 +8974,6 @@ ${note}` : basePrompt;
 							: "not loaded"
 				}`,
 				`Rotation (${rotation.length}): ${rotation.join(" → ") || "none — log in to an account"}`,
-				// Naming them is the point: they used to be dropped from rotation in silence, so
-				// nothing inside the tool ever revealed that logged-in accounts were sitting idle.
 				`Metered native providers (pay per token): ${meteredNativeMembers().join(", ") || "none"}`,
 				`Other providers (no quota tracking): ${resellerRotationMembers().join(", ") || (config.includeOtherProviders ? "none" : "disabled by includeOtherProviders")}`,
 				`Needs models configured (in rotation but unusable): ${unconfiguredRotationMembers(ctx).join(", ") || "none"}`,
@@ -9039,9 +8988,6 @@ ${note}` : basePrompt;
 				`Resume watchdog: ${activeResumeWatch ? `watching${toolInFlight ? " · tool running" : ""}` : "idle"} · auto-recover ${config.autoRecoverStuck ? "ON" : "OFF"}`,
 				`Compaction routing: ${config.routeCompactionToHealthyAccount ? "to healthy account" : "off"}${compactionRoutedNote ? ` (last: ${compactionRoutedNote})` : ""}${lastContextOverflowAt ? ` · last overflow ${formatUntil(lastContextOverflowAt)}` : ""}`,
 				`Auto-continue breaker: ${isBreakerOpen() ? `OPEN — advisory mode until ${formatUntil(breakerOpenUntil)} (manual switching; /multi-account reset to re-enable)` : `closed${recoveryFailures ? ` (${recoveryFailures}/${BREAKER_FAILURE_THRESHOLD} recent failures)` : ""}`}`,
-				// The one line that answers "is it spinning?" without reading a log. A session that
-				// has stopped itself must be able to say so when asked, or the stop is just a
-				// quieter version of the hang.
 				`Governor: ${
 					governorStopped()
 						? `STOPPED — ${governorStoppedReason}. Send a message or run /multi-account reset to re-enable.`
@@ -9054,8 +9000,7 @@ ${note}` : basePrompt;
 						: ""
 				}${childRouteWarning ? `\n  ⚠️ ${childRouteWarning}` : ""}`,
 				`Config: ${CONFIG_PATH}`,
-				// Pi publishes three files and versions none of the formats, so a silent upgrade is
-				// the failure mode. Stating the last look at them here is what makes it checkable.
+				// external: Pi publishes these configuration files without versioned schemas.
 				`Pi file contract: ${
 					lastContractVerdicts.length === 0
 						? "not checked yet"
@@ -9066,18 +9011,11 @@ ${note}` : basePrompt;
 									.map((verdict) => `${verdict.file}: ${verdict.problems.join("; ")}`)
 									.join(" | ")
 				}`,
-				// The ladder decides a step people only notice when it surprises them — the hop taken
-				// once a whole provider is spent. Stating it here is what makes it checkable before it
-				// matters, rather than after.
 				`Failover priority (after every account of the current provider is spent): ${
 					config.providerPriority.length > 0
 						? `${config.providerPriority.join(" → ")} → everything else`
 						: "none set — decided by live availability alone"
 				} · /multi-account priority to change`,
-				// Switching accounts is the reason most people open this at all, so it gets its own
-				// line with a real account name filled in. Buried mid-way through the pipe-separated
-				// list below, `switch` was effectively undiscoverable and `next` pressed repeatedly
-				// was the only way anyone found to reach a chosen account.
 				`Switch accounts: /multi-account best — jump straight to an account that can work now · /multi-account switch <provider> — e.g. /multi-account switch ${rotation.find((p) => p !== ctx.model?.provider) ?? rotation[0] ?? "<provider>"} · /multi-account next steps through the rotation in order`,
 				`Model pins: ${Object.entries(config.pinnedModels).map(([scope, id]) => `${scope}/${id}`).join(", ") || "none"} · /multi-account pins to inspect`,
 				`Other commands: status | accounts [refresh] | best | priority [...] | limits [refresh] | models | pick | pin <provider/model> | unpin <provider-or-family> | pins [list] | save-default | log [N|on|off] | only-active [on|off] | rediscover | add [anthropic|codex|kimi|cursor|ollama|qwen] | remove [anthropic|codex|kimi|cursor|ollama|qwen|<provider-id>] | revive <provider|all> | clear | stop | reset | reload | enable | disable`,
@@ -9086,8 +9024,6 @@ ${note}` : basePrompt;
 		);
 	}
 
-	// A throw inside a command handler should surface as a friendly message, never crash Pi
-	// or leave the user with a raw stack trace.
 	const safeHandleCommand = async (args: string, ctx: any) => {
 		try {
 			return await handleCommand(args, ctx);
@@ -9108,7 +9044,6 @@ ${note}` : basePrompt;
 				try {
 					return multiAccountCompletions(prefix, accountChoices);
 				} catch (error) {
-					// Autocomplete must never break typing; the command itself still works.
 					logEvent("command_completion_failed", { error: String(error).slice(0, 200) });
 					return null;
 				}
@@ -9116,11 +9051,6 @@ ${note}` : basePrompt;
 		});
 	}
 
-	// ----- Anthropic OAuth out of the box -----------------------------------
-	// Enable Claude Pro/Max OAuth login on the base `anthropic` provider and shape
-	// every Anthropic OAuth request so subscription tokens are accepted — without
-	// requiring a separate pi-anthropic-auth install. Idempotent, so it coexists
-	// safely if pi-anthropic-auth is also present.
 	registerAnthropicLoginMethods(pi, ANTHROPIC_BASE);
 	pi.registerProvider("openai-codex", {
 		oauth: codexOAuthOverride(
@@ -9129,13 +9059,6 @@ ${note}` : basePrompt;
 		),
 	} as any);
 
-	// ----- API-key base providers (Ollama, Alibaba/Qwen) ---------------------
-	// Pi registers providers from models.json, but if the apiKey field there is a
-	// placeholder (e.g. "ollama") Pi may not expose the provider to modelRegistry,
-	// which makes resolveTargets() return [] and the family never failovers. To
-	// make the extension self-contained, register the base API-key provider here
-	// whenever a real key exists in auth.json. Idempotent: if Pi already registered
-	// it natively, registerProvider merges/overrides harmlessly.
 	const ensureApiKeyBaseProvider = (
 		family: "ollama" | "qwen",
 		baseId: string,
@@ -9145,13 +9068,10 @@ ${note}` : basePrompt;
 			entry && typeof entry.key === "string" && entry.key.length > 0
 				? entry.key
 				: undefined;
-		if (!key) return; // nothing to register — no real credential
+		if (!key) return;
 		const baseUrl = family === "ollama" ? OLLAMA_CLOUD_BASE_URL : QWEN_BASE_URL;
 		const preferred =
 			family === "ollama" ? DEFAULT_OLLAMA_MODELS : DEFAULT_QWEN_MODELS;
-		// Built-in tags lead, so the flagship this extension knows stays the representative and
-		// nothing is downgraded — but everything the user configured is carried too, instead of
-		// being replaced by this list.
 		const ids = [...preferred];
 		if (family === "ollama") {
 			for (const discovered of discoveredOllamaModelIds) {
@@ -9177,11 +9097,6 @@ ${note}` : basePrompt;
 	ensureApiKeyBaseProvider("ollama", OLLAMA_BASE);
 	ensureApiKeyBaseProvider("qwen", config.qwenProvider);
 
-	// Runs before every LLM request, on AgentMessage[] — the last point where a turn that
-	// pi-ai is about to drop (stopReason error/aborted) is still intact. Rewriting it into a
-	// `user` record is what lets the account we failed over TO see where the previous one
-	// actually stopped, instead of being told "don't repeat completed work" with no record
-	// of that work. See preserveInterruptedTurns() for the full rationale.
 	safeOn("context", (event: any) => {
 		if (!automaticFailoverEnabled() || !config.preserveInterruptedContext) return undefined;
 		const messages = event?.messages;
@@ -9196,26 +9111,6 @@ ${note}` : basePrompt;
 		return { messages: preserved };
 	});
 
-	// ---- mid-run context guard --------------------------------------------
-	// Pi measures the context in exactly two places: after a whole agent run has ended, and just
-	// before a new user prompt. Inside a run — which is where an autonomous session spends almost
-	// all of its time — nothing measures anything. Worse, a retryable provider error takes the
-	// retry branch of _handlePostAgentRun() and returns BEFORE the compaction check, so the one
-	// checkpoint that exists is routinely spent on a retry.
-	//
-	// Measured across 18 real sessions: one 78-minute agent run grew from 85 663 to 542 529 tokens
-	// against a 272 000 window without a single check; across the corpus 30 % of all requests on
-	// gpt-5.6-sol went out above 100 % of the advertised window.
-	//
-	// So the guard measures every outgoing request itself and, above the soft line, elides the
-	// oldest tool results out of THAT REQUEST ONLY — the session transcript is never touched. Real
-	// compaction is requested separately and only at a settled boundary, because ctx.compact()
-	// begins with an abort() and mid-run would kill the agent's work.
-	//
-	// It deliberately does not trust the provider's reported prompt size: Cursor answers from its
-	// own checkpointed conversation and openai-codex continues one server-side via WebSocket
-	// deltas and `previous_response_id`, so both report their bookkeeping rather than the request
-	// we built. See context-guard.ts for the accounting and the evidence behind each threshold.
 	const contextGuardTrackers = new Map<string, OverheadTracker>();
 	const contextGuardElided = new Set<string>();
 	let contextGuardLastRaw = 0;
@@ -9224,22 +9119,14 @@ ${note}` : basePrompt;
 	let contextGuardCompactionInFlight = false;
 	let contextGuardCompactionRetryAfter = 0;
 	let contextGuardLastCompactionAt = 0;
-	// `ctx.compact()` is fire-and-forget. Keep this separate from the in-flight flag because the
-	// host invokes onComplete only AFTER it emits session_compact; the callback is the first safe
-	// idle boundary at which a guard-triggered summary can start the next turn.
+	// external: ctx.compact() initiates compaction without waiting for its completion.
 	let contextGuardContinuationPending = false;
 	let contextGuardNotifiedThisRun = false;
-	// Health of the guard itself. Nothing here lives inside Pi — the guard hangs entirely off Pi's
-	// extension hooks — so a host update cannot delete it, but it CAN quietly stop calling it. Every
-	// handler is crash-isolated, which means a removed or renamed hook does not fail loudly: the
-	// guard simply never runs again and the session goes back to overflowing with nobody watching.
-	// Silent inertness is the failure mode worth reporting, so it is detected and said out loud.
 	let contextGuardHookSeen = false;
 	let contextGuardWindowSeen = false;
 	let contextGuardLlmCalls = 0;
 	const contextGuardWarned = new Set<string>();
 
-	/** How many real LLM responses to wait for before concluding the guard is not being called. */
 	const CONTEXT_GUARD_HEALTH_AFTER_CALLS = 5;
 
 	function contextGuardWarn(ctx: any, kind: string, message: string) {
@@ -9249,20 +9136,11 @@ ${note}` : basePrompt;
 		try {
 			ctx?.ui?.notify?.(`pi-multi-account: ${message}`, "warning");
 		} catch {
-			/* a health warning must never be the thing that breaks a turn */
 		}
 	}
 
-	/** Minimum spacing between two guard-driven compactions, so a session cannot loop on them. */
 	const CONTEXT_GUARD_COMPACTION_COOLDOWN_MS = 120_000;
-	/** After a failed/cancelled compaction, do not retry the same still-large context immediately. */
 	const CONTEXT_GUARD_COMPACTION_FAILURE_BACKOFF_MS = 120_000;
-	/**
-	 * Grace on top of the routing budget before an unanswered `ctx.compact()` is written off.
-	 *
-	 * Proportional rather than a flat half minute, so a session configured for a short compaction
-	 * budget does not have to sit through a fixed 30 s of extra silence to get its guard back.
-	 */
 	const contextGuardCompactionWaitMs = () =>
 		config.compactionWatchdogMs + Math.min(30_000, config.compactionWatchdogMs);
 
@@ -9280,14 +9158,11 @@ ${note}` : basePrompt;
 		return automaticFailoverEnabled() && config.contextGuard.enabled && !recoveryArbiter.policyRefusalStopped;
 	}
 
-	// Measure the request that actually goes out. Where Pi has `context_with_system` (0.87+), that
-	// phase runs after every `context` handler and after context-owning extensions loaded before
-	// this one: OptChat replaces the whole conversation there, so in the `context` phase the guard
-	// measured (and "trimmed") a 300k-token transcript while the provider received 136k.
+	// external: Pi 0.87 and later can expose context_with_system.
 	const contextGuardPhase = piHasContextWithSystem(PI_HOST_VERSION) ? "context_with_system" : "context";
 	safeOn(contextGuardPhase, (event: any, ctx: any) => {
 		if (!contextGuardActive()) return undefined;
-		contextGuardHookSeen = true; // proof the host still calls us before each request
+		contextGuardHookSeen = true;
 		if (typeof ctx?.compact !== "function")
 			contextGuardWarn(
 				ctx,
@@ -9301,7 +9176,6 @@ ${note}` : basePrompt;
 
 		let systemPrompt = "";
 		if (contextGuardPhase === "context_with_system") {
-			// Here the prompt travels inside the list as system messages, which may differ from Pi's own.
 			systemPrompt = messages
 				.filter((message: any) => message?.role === "system")
 				.map((message: any) =>
@@ -9316,7 +9190,7 @@ ${note}` : basePrompt;
 			try {
 				systemPrompt = ctx?.getSystemPrompt?.() ?? "";
 			} catch {
-				systemPrompt = ""; // a provider-less context still deserves a measurement
+				systemPrompt = "";
 			}
 		}
 		const raw = estimateRawTokens(messages as GuardMessage[], systemPrompt);
@@ -9328,26 +9202,16 @@ ${note}` : basePrompt;
 		);
 		contextGuardLastRaw = raw;
 		contextGuardTrimmedLastRequest = false;
-		if (decision.window <= 0) return undefined; // unknown window ⇒ no basis to act
+		if (decision.window <= 0) return undefined;
 		contextGuardWindowSeen = true;
 		if (decision.wantCompaction) {
-			// Demand is level-triggered, but a failed compaction must not immediately
-			// re-arm itself on the next settled event. The next context observation after
-			// the bounded backoff may request it again.
 			if (Date.now() >= contextGuardCompactionRetryAfter)
 				contextGuardWantsCompaction = true;
 		} else {
-			// If the context has fallen back below the compaction line, an old demand is
-			// no longer actionable and must not fire later after an unrelated event.
 			contextGuardWantsCompaction = false;
 		}
-		// Below the soft line there is still work to do once anything has been elided: re-apply it,
-		// or the request prefix flips back and forth and the prompt cache is thrown away each turn.
 		if (!decision.trim && contextGuardElided.size === 0) return undefined;
 
-		// Reapply existing stubs BEFORE deciding whether another batch is needed.
-		// Raw transcript growth still drives real compaction, but must not move the
-		// cached prefix on every tool turn while the outgoing request fits (#54).
 		const existing = planElision(messages as GuardMessage[], contextGuardElided, {
 			targetTokens: Number.POSITIVE_INFINITY,
 			keepVerbatimTokens: settings.keepVerbatimTokens,
@@ -9391,17 +9255,12 @@ ${note}` : basePrompt;
 						"info",
 					);
 				} catch {
-					/* a notification must never break the request */
 				}
 			}
 		}
 		return { messages: plan.messages };
 	});
 
-	// Learn how far the provider's real prompt count sits above our estimate — but only from a
-	// request we left alone, and only when the number is plausible. An implausible one is the
-	// provider reporting its own copy of the conversation, and learning from it would wedge the
-	// guard's accounting for the rest of the session.
 	safeOn("message_end", (event: any, ctx: any) => {
 		if (!contextGuardActive()) return undefined;
 		const usage = event?.message?.usage;
@@ -9440,16 +9299,8 @@ ${note}` : basePrompt;
 	});
 
 	let contextGuardCompactionTimer: ReturnType<typeof setTimeout> | undefined;
-	/**
-	 * Identifies the newest `ctx.compact()` the guard asked for. A summarizer that answers only
-	 * after its request was written off (watchdog, cancellation) reports through callbacks that
-	 * still hold their own request's number; once a later request exists those answers describe a
-	 * different compaction and must not clear the newer one's in-flight flag or dispatch its
-	 * continuation.
-	 */
 	let contextGuardRequestSeq = 0;
 
-	/** The compaction we asked for has reported back (either way): let the next one be asked for. */
 	function clearContextGuardCompactionWait() {
 		contextGuardCompactionInFlight = false;
 		if (contextGuardCompactionTimer) {
@@ -9472,11 +9323,6 @@ ${note}` : basePrompt;
 		releaseContextGuardRecovery();
 	}
 
-	/**
-	 * Mark the current guard request as failed. This is intentionally separate from merely
-	 * settling the in-flight flag: a failed request must clear its level-triggered demand and
-	 * enter backoff, otherwise `agent_settled` starts the same compaction again immediately.
-	 */
 	function failContextGuardCompaction(
 		kind: "context_guard_compaction_failed" | "context_guard_compaction_unanswered",
 		error?: unknown,
@@ -9507,8 +9353,6 @@ ${note}` : basePrompt;
 		} else {
 			clearContextGuardCompactionWait();
 		}
-		// Compaction failed or was cancelled; the task is not done. Resume on the next tick so a
-		// host flush of "Queued for after compaction" can claim the session first.
 		if (resumeAfterFailure && ctx && !userAbortedChain) {
 			queueMicrotask(() => {
 				if ((epoch !== undefined && epoch !== chainEpoch) || recoveryArbiter.policyRefusalStopped) {
@@ -9523,7 +9367,6 @@ ${note}` : basePrompt;
 		}
 	}
 
-	/** Nothing reported back in time ⇒ assume it will not, and let the guard retry only after backoff. */
 	function armContextGuardCompactionWatchdog(ctx: any) {
 		if (contextGuardCompactionTimer) clearTimeout(contextGuardCompactionTimer);
 		const waitedMs = contextGuardCompactionWaitMs();
@@ -9539,9 +9382,6 @@ ${note}` : basePrompt;
 		contextGuardCompactionTimer.unref?.();
 	}
 
-	// The only safe place to run a real compaction: the agent has settled, nothing is streaming,
-	// and no continuation is waiting to be dispatched (compact() aborts, and aborting a queued
-	// continuation would strand the work the failover logic just rescued).
 	safeOn("agent_settled", (_event: any, ctx: any) => {
 		if (!contextGuardActive()) return undefined;
 		if (!contextGuardWantsCompaction || contextGuardCompactionInFlight) return undefined;
@@ -9559,10 +9399,6 @@ ${note}` : basePrompt;
 		});
 		if (!recoveryLease) return undefined;
 		recoveryLease.markRecovering("context_limit", ctx?.model?.provider, ctx?.model?.id);
-		// Asking for a summary is an action like any other. In a healthy session it produces a
-		// provider request, which clears the governor's counter, so gating it costs nothing there
-		// — and in a session where compaction is failing repeatedly, it is one of the mechanisms
-		// that must be allowed to stop.
 		if (!allowAction("ask for a summary", ctx)) {
 			recoveryLease.release();
 			return undefined;
@@ -9583,12 +9419,6 @@ ${note}` : basePrompt;
 			model: `${ctx?.model?.provider}/${ctx?.model?.id}`,
 			elided: contextGuardElided.size,
 		});
-		// `ctx.compact()` reports back through two callbacks, and this flag is the only thing
-		// standing between the guard and a second compaction. So a host that answers with
-		// NEITHER callback — a cancel that reports nowhere, a build that drops the handler — does
-		// not merely lose one summary: the guard is switched off for the rest of the session
-		// while the context keeps growing, which from the outside is a session that stops being
-		// able to compact at all and then stops being able to do anything. Time-bound the wait.
 		armContextGuardCompactionWatchdog(ctx);
 		try {
 			ctx.compact({
@@ -9599,11 +9429,6 @@ ${note}` : basePrompt;
 				},
 				onError: (error: Error) => {
 					if (supersededRequest("onError")) return;
-					// "Nothing to compact" is a normal answer, not a reason to retry on
-					// every settled event. Clear the demand and back off until a fresh
-					// context observation proves the context still needs a summary. The
-					// interrupted task still has to continue — dropping continuation here
-					// is how the session sat in Working after a summarizer abort.
 					failContextGuardCompaction(
 						"context_guard_compaction_failed",
 						String(error?.message ?? error),
@@ -9625,8 +9450,6 @@ ${note}` : basePrompt;
 		return undefined;
 	});
 
-	// A compaction happened (ours, Pi's, or the user's /compact): the message list is rebuilt, so
-	// every elision key now points at history that is no longer in the request. Start clean.
 	safeOn("session_compact", () => {
 		contextGuardElided.clear();
 		contextGuardWantsCompaction = false;
@@ -9637,30 +9460,6 @@ ${note}` : basePrompt;
 		return undefined;
 	});
 
-	// ---- carry the task on after an automatic compaction --------------------
-	// Pi stops the run whenever a threshold compaction fires, and the user has to type
-	// "продовжуй" to get the work moving again. That is not a missing feature so much as an
-	// unused one: `_runAutoCompaction` ends with
-	//
-	//     return this.agent.hasQueuedMessages();
-	//
-	// and `_runAgentPrompt` turns a `true` there into `await this.agent.continue()`, which drains
-	// the follow-up queue and resumes the run. Pi relies on that path for overflow recovery but
-	// never queues anything itself after a threshold compaction, so `hasQueuedMessages()` is
-	// false and the run simply ends. Queueing one follow-up while the compaction is still in
-	// flight is therefore not a workaround — it is the host's own documented continuation route
-	// ("Auto-compaction can complete while follow-up/steering/custom messages are waiting").
-	//
-	// Measured across this machine's logs (59 compactions): 49 % were followed by the user
-	// typing a short "продовжуй", and most of the remainder were the user pasting the summary
-	// back in by hand or the failover's own continuation prompt. Only a handful were a genuinely
-	// new task.
-	//
-	// `stopReason` does NOT separate "unfinished" from "finished" — after a clean `stop` the
-	// split was 17 continues to 15 new tasks — and neither does any cheap textual signal (no
-	// assistant message in the corpus even ends in a question mark). So instead of guessing from
-	// the outside, the follow-up says plainly that finishing is an allowed answer: a genuinely
-	// complete task is reported in one line rather than padded with invented work.
 	const CONTINUE_AFTER_COMPACTION_TYPE = "multi-account:continue-after-compaction";
 	const CONTINUE_AFTER_COMPACTION_PROMPT = [
 		"The conversation history above was just compacted automatically: it is now a summary plus",
@@ -9673,12 +9472,6 @@ ${note}` : basePrompt;
 		"- If the task really is finished, do not invent more work: say so in one line and stop.",
 	].join("\n");
 
-	/**
-	 * Resume a compaction requested by the context guard only after Pi's completion callback.
-	 * Unlike threshold compaction, this path starts while Pi is already idle; queueing a follow-up
-	 * during session_compact would merely append it to history and never run it. A user message
-	 * after the callback both starts a real turn and keeps the normal continuation budget/marker.
-	 */
 	async function dispatchContextGuardContinuation(
 		ctx: any,
 		parentLease?: AutomaticRecoveryLease,
@@ -9781,20 +9574,12 @@ ${note}` : basePrompt;
 	safeOn("session_compact", (event: any, ctx: any) => {
 		if (!automaticFailoverEnabled() || !config.continueAfterCompaction) return undefined;
 		if (recoveryArbiter.policyRefusalStopped || contextGuardContinuationPending) return undefined;
-		// Only automatic compactions. A manual /compact (or the context guard's own request at a
-		// settled boundary) is a deliberate pause, not an interruption to paper over.
 		if (event?.reason !== "threshold" && event?.reason !== "overflow") return undefined;
-		// Pi is already retrying this turn by itself; a second queued message would double up.
+		// external: Pi can retry a turn after automatic compaction.
 		if (event?.willRetry) return undefined;
-		// The run loop must still be live: that is what makes `hasQueuedMessages()` be consulted
-		// and the follow-up queue be drained. When the session is idle the same call would instead
-		// append a stray message that nothing ever delivers.
 		if (ctx?.isIdle?.() !== false) return undefined;
-		// The user pressed Esc, or something is already queued and Pi will continue regardless.
 		if (userAbortedChain || ctx?.signal?.aborted) return undefined;
 		if (ctx?.hasPendingMessages?.()) return undefined;
-		// Shares the failover budget on purpose: between them they must not be able to keep a
-		// task alive forever without the user saying anything.
 		if (autoContinuesThisPrompt >= config.maxAutoContinuesPerPrompt) {
 			logEvent("compaction_continue_skipped", {
 				reason: "auto-continue budget spent",
@@ -9819,21 +9604,14 @@ ${note}` : basePrompt;
 		try {
 			if (!allowAction("carry on after compaction", ctx)) return undefined;
 			recoveryLease.markRecovering("context_limit", ctx?.model?.provider, ctx?.model?.id);
-			// This custom follow-up starts a new host run without passing through `input`.
-			// Mark it before queueing so `before_agent_start` cannot mistake it for fresh owner
-			// intent and reset the failover evidence/budget that survived the compaction.
 			const wasExpectingInjectedContinuation = expectingInjectedContinuation;
 			expectingInjectedContinuation = true;
 			try {
-				// Queued synchronously: `sendCustomMessage` reaches `agent.followUp()` before its first
-				// await, so the queue is populated by the time `_runAutoCompaction` reads
-				// `hasQueuedMessages()` a few lines later.
+				// external: Pi sendCustomMessage queues follow-up before its first await.
 				pi.sendMessage(
 					{
 						customType: CONTINUE_AFTER_COMPACTION_TYPE,
 						content: CONTINUE_AFTER_COMPACTION_PROMPT,
-						// Visible on purpose: the agent carrying on by itself must be something the user
-						// can see a reason for in the transcript, not something that just happens.
 						display: true,
 					} as any,
 					{ deliverAs: "followUp" },
@@ -9861,10 +9639,6 @@ ${note}` : basePrompt;
 	});
 
 	safeOn("before_provider_request", (event: any, ctx?: any) => {
-		// A payload is being built, so a request is on its way out. This is the earliest and most
-		// reliable place to say "the session is not spinning", and it is a hook this extension
-		// already depends on — so the governor is watching something known to work on this host
-		// rather than something it hopes exists.
 		const request = event?.request as
 			| { kind?: string; sessionId?: string; model?: RouteModelRef }
 			| undefined;
@@ -9878,7 +9652,7 @@ ${note}` : basePrompt;
 			if (isCursorProviderId(provider)) {
 				payload.pi_session_id = request?.sessionId ?? ctx?.sessionManager?.getSessionId?.();
 			}
-			// Qwen/Alibaba rejects the OpenAI-only `developer` role — normalize it to `system`.
+			// external: Qwen rejects the OpenAI developer role.
 			if (classifyProvider(provider, config.qwenProvider) === "qwen") {
 				rewriteDeveloperRoleToSystem(payload);
 			}
@@ -9886,34 +9660,17 @@ ${note}` : basePrompt;
 		return shaped;
 	});
 
-	// ----- lifecycle hooks --------------------------------------------------
 
 	let slotProxyServer: Server | undefined;
 	let slotProxyPort: number | undefined;
 	let slotProxyStarting: Promise<number | undefined> | undefined;
 	let completionRouterContext: any;
-	/**
-	 * Another live process already holds the canonical port.
-	 *
-	 * The port is the ownership token for the SHARED FILES published under it. Listening on an
-	 * ephemeral port instead is harmless and stays process-local; rewriting models.json and
-	 * auth.json is not. A short-lived process — a second session, or a `pi-subagents` child,
-	 * which is just another process on this machine — that republished the fleet against itself
-	 * would point the owner's children at a socket that dies with it, and would then restore
-	 * credentials and unpublish routes that were never its own on its way out.
-	 */
 	let slotProxyForeignOwner = false;
 	let slotProxyContext: any;
 	const slotProxyRoutes = new Map<string, ProxyRoute>();
-	/**
-	 * Preferred port, so a route published last session usually still works. Holding it is what
-	 * makes this process the publisher of the shared files. Overridable because a fixed port can
-	 * collide with unrelated software, and because the suite needs a port it can own outright.
-	 */
 	const SLOT_PROXY_PORT =
 		Number(process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT) || 41977;
 
-	/** A shared publisher must still own the canonical socket and a live root membership. */
 	function ownsSharedChildPublication(): boolean {
 		if (subagentChild) return false;
 		if (!config.childProxy) {
@@ -10013,31 +9770,11 @@ ${note}` : basePrompt;
 
 	refreshDiscovery(true);
 
-	// Runtime capability preflight. The RECURRING class of breakage in this extension is the
-	// pi↔extension BOUNDARY drifting: a host method the failover depends on gets renamed or removed
-	// (e.g. pi.continueAgent() vanished in @earendil-works/pi-coding-agent 0.80.3), and the failure
-	// only surfaces weeks later as a cryptic error the instant a real limit hits. Unit tests can
-	// never catch this — they mock `pi` and always implement every method. So we probe the REAL host
-	// object at every session start: record which capabilities are present (dated, in the debug log
-	// for instant diagnosis) and, ONCE per process, tell the user in plain terms if switching is
-	// impossible or resume is degraded — instead of letting them discover it under fire.
-	// ----- parent-owned slot proxy ------------------------------------------
-	//
-	// A bare child spawned without this extension and without an explicit --model reads the saved
-	// global default from settings.json. Since Pi 0.84.3 that saved route is deliberately separate
-	// from this session's live rotation. A numbered OAuth slot still needs to be usable when it is
-	// explicitly selected or saved: otherwise it resolves by name and then fails at auth, because
-	// Pi honours OAuth only for a provider definition declaring the flow. The Cursor slots
-	// already solve this by publishing a loopback route the parent serves with a non-secret
-	// placeholder; this extends the same pattern to the Anthropic and Codex families. Decisions
-	// live in slot-proxy.ts; what is here is the socket and the credential lookup.
 
 	function proxyFamilyOf(slotId: string): ProxyFamily | undefined {
 		return proxyFamilyFor(slotId);
 	}
 
-	// An existing child-facing placeholder (possibly published by another root)
-	// must also stay on its canonical loopback, even when this instance's proxy is off.
 	function numberedAnthropicBaseUrl(id: string): string {
 		const raw = readAuthFileRaw()[id];
 		if (raw?.type === "api_key" && !isChildFacingPlaceholderForSlot(raw, id)) return "https://api.anthropic.com";
@@ -10046,25 +9783,6 @@ ${note}` : basePrompt;
 		return "https://api.anthropic.com";
 	}
 
-	/**
-	 * Route for a numbered Codex alias.
-	 *
-	 * With `config.childProxy` enabled this extension publishes a child-facing placeholder into
-	 * auth.json. That placeholder is meaningless to ChatGPT: it is only ever valid against the
-	 * loopback route this extension serves, which swaps in the real OAuth credential. Sending
-	 * it to the public upstream is what produces "Could not parse your authentication token".
-	 *
-	 * So a numbered alias NEVER gets the public upstream while the proxy is enabled — not even
-	 * before the listener exists. The published route is deterministic (the canonical port is
-	 * the ownership token for it), so pointing there keeps the alias registered and resolvable
-	 * from the moment the extension loads, and whoever ends up owning that port serves the
-	 * slot. If the port is never served the request fails to connect, which is loud and
-	 * harmless — unlike a credential that reaches a provider that cannot read it.
-	 *
-	 * With the proxy disabled AND no other root's placeholder published, Pi presents a real
-	 * credential and the public upstream is correct. A published placeholder always takes
-	 * the canonical loopback instead, even if this sibling disabled its own proxy.
-	 */
 	function numberedCodexBaseUrl(id: string): string {
 		const raw = readAuthFileRaw()[id];
 		if (raw?.type === "api_key" && !isChildFacingPlaceholderForSlot(raw, id)) return "https://chatgpt.com/backend-api";
@@ -10086,14 +9804,11 @@ ${note}` : basePrompt;
 		catch { logEvent("auth_publication_deferred", { operation: "shadow" }); }
 	}
 
-	/** The credential to send upstream, refreshed first when the stored one has expired. */
 	async function credentialForProxy(slotId: string): Promise<AuthEntry | undefined> {
 		let entry = readAuthFile()[slotId];
 		if (!entry) return undefined;
 		if (entry.type !== "oauth" || typeof entry.access !== "string") return entry;
 		const expiry = oauthExpiryMs(entry);
-		// A minute of slack: a token that expires mid-flight fails the child's whole request, and
-		// refreshing one turn early costs nothing.
 		if (expiry !== undefined && expiry - 60_000 <= Date.now()) {
 			try {
 				await forceRefreshProvider(slotProxyContext, slotId);
@@ -10117,10 +9832,7 @@ ${note}` : basePrompt;
 	}
 
 	async function handleProxyRequest(req: any, res: any): Promise<void> {
-		// Pi's Codex API tries a WebSocket first and falls back to SSE when it cannot connect
-		// (measured: one GET, then POSTs, on a real bare child). Refusing the upgrade here makes
-		// that fallback immediate instead of spending an upstream round trip on a request that
-		// could never have been a WebSocket.
+		// external: Pi Codex transport attempts WebSocket before falling back to SSE.
 		if (typeof req.headers?.upgrade === "string") {
 			logEvent("slot_proxy_upgrade_refused", { upgrade: req.headers.upgrade });
 			res.writeHead(501, { "content-type": "application/json" });
@@ -10163,15 +9875,11 @@ ${note}` : basePrompt;
 		let body: Buffer | undefined =
 			req.method === "GET" || req.method === "HEAD" ? undefined : await readRequestBody(req);
 		if (body && verdict.route.family === "anthropic" && credential?.type === "oauth") {
-			// The extension-owned billing shaping also applies to bare children. Their native
-			// host supplies OAuth identity/tool mapping through the token-shaped placeholder,
-			// but does not load this extension's billing-header maintenance.
 			try {
 				const parsed = JSON.parse(body.toString("utf8"));
 				const reshaped = shapeAnthropicOAuthPayload(parsed);
 				if (reshaped && reshaped !== parsed) body = Buffer.from(JSON.stringify(reshaped));
 			} catch {
-				// Not JSON, or not a messages payload — forward exactly as received.
 			}
 		}
 
@@ -10190,7 +9898,6 @@ ${note}` : basePrompt;
 			});
 			const outgoing: Record<string, string> = {};
 			upstream.headers.forEach((value, name) => {
-				// Length and encoding are recomputed for the connection we are answering on.
 				if (name === "content-length" || name === "content-encoding") return;
 				outgoing[name] = value;
 			});
@@ -10211,7 +9918,6 @@ ${note}` : basePrompt;
 				status: upstream.status,
 			});
 		} catch (error) {
-			// A caller cancellation is not an upstream/provider failure or a quota verdict.
 			if (upstreamAbort.signal.aborted || res.destroyed) return;
 			const reason = error instanceof Error ? error.message : String(error);
 			logEvent("slot_proxy_upstream_failed", { slot: verdict.route.slotId, reason });
@@ -10226,7 +9932,6 @@ ${note}` : basePrompt;
 		}
 	}
 
-	/** Start the loopback listener once, preferring a stable port so published routes survive. */
 	function startSlotProxy(): Promise<number | undefined> {
 		if (slotProxyPort !== undefined) return Promise.resolve(slotProxyPort);
 		const coordinator = slotProxyCoordinator;
@@ -10240,7 +9945,7 @@ ${note}` : basePrompt;
 					slotProxyPort = SLOT_PROXY_PORT;
 					return SLOT_PROXY_PORT;
 				}
-				return startSlotProxy(); // a foreign owner forced the first member onto a local port
+				return startSlotProxy();
 			});
 		}
 		if (slotProxyStarting) return slotProxyStarting;
@@ -10254,10 +9959,6 @@ ${note}` : basePrompt;
 				return member?.ready ? member.handleRequest : undefined;
 			};
 			const server = createServer(async (req, res) => {
-				// The socket outlives its first session. Dispatch only to a live, ready root,
-				// never to a closed root's refresh context. While the same process replaces its
-				// root, hold the request for the next one: failing it would send the caller to
-				// whatever account its registry still has.
 				let handler = readyHandler();
 				while (!handler && Date.now() < (coordinator?.handoffUntil ?? 0)) {
 					await new Promise((resolveWait) => setTimeout(resolveWait, 25));
@@ -10276,21 +9977,15 @@ ${note}` : basePrompt;
 						if (!res.headersSent) res.writeHead(500);
 						res.end();
 					} catch {
-						/* the socket is already gone */
 					}
 				});
 			});
-			// A WebSocket handshake that got past the request handler is closed at the socket, so
-			// nothing is left half-open waiting for an upgrade this proxy will never perform.
 			server.on("upgrade", (_req: any, socket: any) => {
 				try {
 					socket.destroy();
 				} catch {
-					/* already gone */
 				}
 			});
-			// A dead listener must never take Pi down with it — the same rule the Cursor bridge
-			// learned the hard way.
 			server.on("error", (error: NodeJS.ErrnoException) => {
 				if (
 					error.code === "EADDRINUSE" &&
@@ -10298,15 +9993,6 @@ ${note}` : basePrompt;
 					!slotProxyPort &&
 					!retriedOnEphemeralPort
 				) {
-					// Another live process owns this port, and with it every route published
-					// against it. We still take an ephemeral port — serving our own in-process
-					// callers costs nothing — but we are no longer the publisher: the shared
-					// files stay exactly as the owner left them. See slotProxyForeignOwner.
-					//
-					// Do not re-enter listen() from the error callback. With an independent
-					// process holding the port, Pi's compiled Bun runtime can leave the server
-					// in its failed-listen transition until the next event-loop turn, so the retry never
-					// reaches the original callback and session_start remains pending forever.
 					retriedOnEphemeralPort = true;
 					slotProxyForeignOwner = true;
 					logEvent("slot_proxy_foreign_owner", { port: SLOT_PROXY_PORT });
@@ -10325,9 +10011,6 @@ ${note}` : basePrompt;
 				logEvent("slot_proxy_listen_failed", { reason: error.message });
 				resolve(undefined);
 			});
-			// Register independently of either listen() attempt. A callback passed only to the
-			// canonical listen can be lost when that attempt emits EADDRINUSE before the server
-			// retries on an ephemeral port.
 			server.once("listening", () => {
 				const address = server.address();
 				const port = typeof address === "object" && address ? address.port : undefined;
@@ -10341,7 +10024,6 @@ ${note}` : basePrompt;
 					canonicalListener = true;
 					coordinator.publisher = [...coordinator.members.keys()].at(-1);
 				}
-				// An instance replaced mid-bind must not retain a private listener.
 				if (sessionClosed && port !== SLOT_PROXY_PORT) {
 					server.close();
 					resolve(undefined);
@@ -10349,7 +10031,7 @@ ${note}` : basePrompt;
 				}
 				slotProxyPort = port;
 				slotProxyServer = server;
-				server.unref(); // never hold Pi open on our account
+				server.unref();
 				logEvent("slot_proxy_listening", { port });
 				resolve(port);
 			});
@@ -10365,21 +10047,15 @@ ${note}` : basePrompt;
 		return slotProxyStarting;
 	}
 
-	/**
-	 * Final cleanup once a coordinator has no member: close the canonical listener and take the
-	 * shared routes out of auth.json/models.json, so no child is left pointing at a dead proxy.
-	 */
 	function releaseSharedProxy(coordinator: SharedProxyCoordinator, cleanupWithoutProxy: boolean): void {
 		if (coordinator.handoffTimer) clearTimeout(coordinator.handoffTimer);
 		coordinator.handoffTimer = undefined;
 		coordinator.handoffUntil = undefined;
 		if (coordinator.server) {
-			// Keep the canonical port claimed until shared files are restored; another
-			// process must not publish a new placeholder during our final cleanup.
 			coordinator.routes.clear();
 			restoreChildFacingAuth();
 			unprovisionOwnLoopbacks();
-			try { coordinator.server.close(); } catch { /* already closed */ }
+			try { coordinator.server.close(); } catch {  }
 			coordinator.server = undefined;
 		}
 		if (!coordinator.server && cleanupWithoutProxy) {
@@ -10392,13 +10068,7 @@ ${note}` : basePrompt;
 		coordinator.routes.clear();
 	}
 
-	/**
-	 * Pi's reload (and new/resume/fork) fires session_shutdown, rebuilds its model registry from
-	 * models.json, then fires session_start in the same process. Unpublishing on that shutdown
-	 * leaves the registry with only the base account of each family, so anything resolved in the
-	 * gap silently runs on another account. Hand the socket and files to the next root instead;
-	 * clean up only if none arrives before the deadline.
-	 */
+	// external: Pi reload rebuilds its model registry between session_shutdown and session_start.
 	function handOffSharedProxy(coordinator: SharedProxyCoordinator, cleanupWithoutProxy: boolean): void {
 		const handoffMs = Number(process.env.PI_MULTI_ACCOUNT_HANDOFF_MS) || 30_000;
 		coordinator.handlerOwner = undefined;
@@ -10429,11 +10099,8 @@ ${note}` : basePrompt;
 				if (coordinator.publisher === activationOwner) coordinator.publisher = readyProxyOwner(coordinator);
 				if (coordinator.handlerOwner === activationOwner) coordinator.handlerOwner = readyProxyOwner(coordinator);
 			}
-			// An ephemeral listener never owns shared files, even when another process
-			// owns the canonical port. A superseded root cannot close its old canonical
-			// listener: the coordinator still serves it for the replacement.
 			if (slotProxyServer && slotProxyServer !== coordinator.server) {
-				try { slotProxyServer.close(); } catch { /* already closed */ }
+				try { slotProxyServer.close(); } catch {  }
 			}
 			if (member && coordinator.members.size === 0) {
 				if (sameProcessRestarts && coordinator.server?.listening) handOffSharedProxy(coordinator, cleanupWithoutProxy);
@@ -10445,10 +10112,8 @@ ${note}` : basePrompt;
 			slotProxyRoutes.clear();
 			return;
 		}
-		// Passive children and non-coordinated (proxy-disabled) instances own only
-		// their process-local server. Preserve the pre-existing disabled-proxy cleanup.
 		const publishedSharedFiles = ownsSharedChildPublication();
-		try { slotProxyServer?.close(); } catch { /* already closed */ }
+		try { slotProxyServer?.close(); } catch {  }
 		slotProxyServer = undefined;
 		slotProxyPort = undefined;
 		slotProxyRoutes.clear();
@@ -10457,10 +10122,6 @@ ${note}` : basePrompt;
 		unprovisionOwnLoopbacks();
 	}
 
-	/**
-	 * Publish every proxied OAuth account against the running proxy, so a child resolves the
-	 * account AND can authenticate to it. Without the second half the first is a trap.
-	 */
 	async function publishProxiedSlots(ctx: any): Promise<void> {
 		if (!config.childProxy) return;
 		slotProxyContext = ctx ?? slotProxyContext;
@@ -10477,8 +10138,6 @@ ${note}` : basePrompt;
 		].filter((id) => proxyFamilyOf(id) !== undefined && isEntryUsable(parent[id]));
 		if (slots.length === 0) {
 			if (ownsSharedChildPublication()) {
-				// Keep OAuth in the parent-only sidecar while any root is active, even
-				// when every credential is unusable. Only final shutdown restores it.
 				coordinator?.routes.clear();
 				unprovisionOwnLoopbacks();
 			}
@@ -10498,8 +10157,6 @@ ${note}` : basePrompt;
 			}
 			return;
 		}
-		// Every process needs local routes for the providers it registered against its own socket.
-		// Only the canonical interactive owner may advertise those routes through shared files.
 		for (const id of slots) {
 			const family = proxyFamilyOf(id);
 			if (family) slotProxyRoutes.set(id, { slotId: id, family });
@@ -10514,8 +10171,6 @@ ${note}` : basePrompt;
 			const family = proxyFamilyOf(id);
 			if (family) coordinator?.routes.set(id, { slotId: id, family });
 		}
-		// A proxy-disabled root may have registered a public URL before this root
-		// started. Retire every such route synchronously BEFORE publishing a placeholder.
 		for (const [owner, member] of coordinator?.members ?? []) {
 			if (owner === activationOwner || member.proxyEnabled) continue;
 			if (!member.prepareRoutes(slots, port)) return;
@@ -10545,11 +10200,6 @@ ${note}` : basePrompt;
 				const models = (cached?.length ? cached : DEFAULT_CODEX_MODELS.map(codexModelDef)) as Array<
 					Record<string, unknown>
 				>;
-				// Published as Codex's own API on purpose: Pi then shapes the body the way that
-				// backend requires (`store: false`, the instructions field, its own headers), which
-				// a generic `openai-responses` slot would not. The cost is that Pi insists on
-				// reading an account id out of the key, which is why that family's placeholder is
-				// JWT-shaped.
 				await publishNativeSlot(id, {
 					api: "openai-codex-responses",
 					baseUrl,
@@ -10574,7 +10224,6 @@ ${note}` : basePrompt;
 		};
 	}
 
-	/** A route's readiness right now: found, authenticated, not invalidated, not cooling down. */
 	function routeReadiness(ctx: any, route: RouteModelRef) {
 		const model = findModelIncludingHidden(ctx, route.provider, route.id);
 		const now = Date.now();
@@ -10653,16 +10302,12 @@ ${note}` : basePrompt;
 				return;
 			case "cursor_stall":
 			case "transient":
-				// The operation lease may retry this exact route once, but other operations and
-				// the next foreground turn should not pile onto a route that just failed.
 				markExhausted(provider, config.transientCooldownMs);
 				return;
 			case "aborted":
 			case "context_overflow":
 			case "route_unavailable":
 			case "unhandled":
-				// Cancellation, host validation, prompt size, and consumer/schema failures are
-				// not provider-health evidence and therefore never poison shared state.
 				return;
 			default: {
 				const exhaustive: never = kind;
@@ -10671,10 +10316,6 @@ ${note}` : basePrompt;
 		}
 	}
 
-	// Subagent children are passive here (no failover of their own), so the parent decides their
-	// model at launch: pi-subagents asks before spawning a child on a configured or inherited model.
-	// A model whose account is spent moves to the same quality band on a ready account, the way this
-	// session itself just failed over; a ready model, an unknown one, or no ready peer stays as asked.
 	pi.events.on(MODEL_ROUTE_REQUEST_EVENT, (raw: unknown) => {
 		if (!raw || typeof raw !== "object") return;
 		const request = raw as ModelRouteRequest;
@@ -10688,8 +10329,6 @@ ${note}` : basePrompt;
 			request.result = { action: "keep" };
 			return;
 		}
-		// The parent's own account first: it is the one the operator is working on and just proved
-		// it can serve; another account of the family may be billed elsewhere or have no credit.
 		const picks = findFallbackModels(ctx, readiness.model, {
 			availableNowOnly: true,
 			preserveQualityBand: true,
@@ -10761,10 +10400,10 @@ ${note}` : basePrompt;
 		const has = (name: string) =>
 			typeof (pi as unknown as Record<string, unknown>)[name] === "function";
 		const caps = {
-			setModel: has("setModel"), // switch accounts at all
-			registerProvider: has("registerProvider"), // register extra account slots
-			sendUserMessage: has("sendUserMessage"), // fallback resume (inject prompt)
-			continueAgent: has("continueAgent"), // seamless in-place resume
+			setModel: has("setModel"),
+			registerProvider: has("registerProvider"),
+			sendUserMessage: has("sendUserMessage"),
+			continueAgent: has("continueAgent"),
 			on: has("on"),
 			registerCommand: has("registerCommand"),
 			registerCompletionRouter: has("registerCompletionRouter"),
@@ -10781,13 +10420,9 @@ ${note}` : basePrompt;
 			seamlessResume,
 			...(oauthUnavailable ? { oauthUnavailable } : {}),
 		});
-		// One notice per process — informative, never nagging on every session.
 		if (!preflightNotified) {
 			preflightNotified = true;
 			if (oauthUnavailable) {
-				// The extension is alive (api-key accounts keep rotating) but no
-				// subscription account can log in or refresh — say so plainly instead of
-				// letting the user hit it mid-failover.
 				ctx.ui?.notify?.(
 					`pi-multi-account v${VERSION}: subscription (OAuth) logins are unavailable — ${oauthUnavailable}`,
 					"warning",
@@ -10834,8 +10469,6 @@ ${note}` : basePrompt;
 			};
 		}
 		if (!subagentChild) joinSharedProxy(sessionId);
-		// Pi's branch and SDK launch model belong to THIS session. Shared account
-		// telemetry (or another pane's legacy preference) cannot override them.
 		startupModel = ctx?.model;
 		if (hostOwnsSessionModel && !subagentChild) {
 			const changes = ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "model_change");
@@ -10861,12 +10494,8 @@ ${note}` : basePrompt;
 			}
 		}
 		if (!subagentChild) preflightHostCapabilities(ctx);
-		// Looked at BEFORE discovery touches anything, so what is judged is the files as Pi
-		// published them rather than the version our own slot provisioning has just rewritten.
 		checkPiContract(ctx, "session_start");
 		slotProxyContext = ctx;
-		// Bind the loopback before discovery so numbered slots register against this process,
-		// not the real upstream, while a child-facing placeholder is in auth.json.
 		if (config.childProxy) {
 			await startSlotProxy();
 		} else if (slotProxyCoordinator) {
@@ -10876,21 +10505,12 @@ ${note}` : basePrompt;
 		}
 		if (sessionClosed || chainEpoch !== startEpoch) return;
 		refreshDiscovery(true, ctx);
-		// Publish the OAuth slots against a route this process serves, so anything spawned
-		// without this extension can actually run on the account the rotation chose.
 		await publishProxiedSlots(ctx);
 		if (!config.childProxy) activateSharedProxy();
 		await publishOwnedNativeAliases(ctx);
-		// Not installed → silent skip (refreshCursorSlots warns only on the explicit path).
 		if (config.includeCursor) await refreshCursorSlots(readAuthFile(), ctx);
 		applyOnlyActiveFilter(ctx);
 		pruneCooldowns();
-		// Tight session binding: every session starts as a clean slate. Auto-resume only ever
-		// runs *inside the live session that hit the limit* (its timer is armed by
-		// setPendingContinuation). A new session — or a reopened one after a crash — must NEVER
-		// inherit and silently restart a previous session's paused work, so we drop any leftover
-		// pending state and reset all in-memory guards here. A delegated child shares
-		// the state file with its parent process and must not erase the parent's wake.
 		if (
 			!subagentChild &&
 			((persistedState.pendingFrom && persistedState.pendingReason) ||
@@ -10927,20 +10547,11 @@ ${note}` : basePrompt;
 				"warning",
 			);
 		}
-		// Refresh every account BEFORE deciding the selected model is unavailable. Otherwise a
-		// plan upgrade can revive the current account milliseconds after startup preflight has
-		// already switched away from it using the old plan's stale 100% snapshot. The delegated
-		// runner owns fallback selection in a child, so multiplying that fleet-wide probe across
-		// every parallel child buys nothing.
 		await refreshAccountMetadata(ctx, { usage: !subagentChild, force: false });
 		if (sessionClosed || chainEpoch !== startEpoch) return;
-		// Pi restores the session model BEFORE extension catalogs finish registering
-		// unless the factory returned the Cursor setup promise. Re-apply anyway: a
-		// cold catalog, a compaction inner session, or a git-reset leftover can still
-		// leave getModel(cursor, grok-4.6) empty.
+		// external: Pi restores the selected session model before extension catalogs finish registering.
 		if (cursorReady) await cursorReady.catch(() => undefined);
 		if (sessionClosed || chainEpoch !== startEpoch) return;
-		// Cursor slot catalogs changed too — same stale-hidden-copy repair as the model syncs.
 		applyOnlyActiveFilter(ctx);
 		if (!subagentChild) {
 			await restoreRememberedModel(ctx);
@@ -10954,9 +10565,6 @@ ${note}` : basePrompt;
 		startUsageStatusTimer(ctx);
 	});
 
-	// CRITICAL: when the current session ends — for ANY reason (quit, reload, or replacement
-	// by a new/resumed/forked session) — the extension's background activity must end with it.
-	// Kill every timer and drop the pending continuation so nothing survives the session.
 	safeOn("session_shutdown", async (event, ctx) => {
 		chainEpoch++;
 		if (activations[activationKey]?.owner === activationOwner) delete activations[activationKey];
@@ -10975,10 +10583,7 @@ ${note}` : basePrompt;
 		contextGuardCompactionRetryAfter = 0;
 		settleContextGuardCompaction();
 		endResumeWatch();
-		// Let cancelled async writers release their file locks before synchronous route cleanup.
 		await Promise.all(pendingNativePublications);
-		// Release this root's membership; only the final root closes shared child routes,
-		// and not while the same process is about to start the next root.
 		stopSlotProxy(event?.reason);
 		watchdogAborting = false;
 		expectingInjectedContinuation = false;
@@ -10991,11 +10596,6 @@ ${note}` : basePrompt;
 		ctx?.ui?.setStatus?.("multi-account-quota", undefined);
 	});
 
-	// Make compaction survive account exhaustion. When the active account is rate-limited /
-	// invalidated and Pi needs to summarize (context overflow or threshold), Pi's default would
-	// run the summary on that dead account and hang ("Compacting context…" forever). We generate
-	// the summary on a healthy account instead. If that cannot finish, we CANCEL — never return
-	// undefined onto a spent account, because Pi's default has no timeout of its own.
 	safeOn("session_before_compact", async (event: any, ctx: any) => {
 		if (recoveryArbiter.policyRefusalStopped) {
 			if (event?.reason === "manual") return undefined;
@@ -11005,16 +10605,7 @@ ${note}` : basePrompt;
 		if (event?.reason === "overflow") lastContextOverflowAt = Date.now();
 		const result = await runHealthyCompaction(event, ctx);
 		if (result !== undefined) return result;
-		// The host runs its own default compaction on the ACTIVE account with no timeout.
-		// Only intercept when we are genuinely holding a cancellation message;
-		// otherwise leave the host alone (and its queue alone).
-		//
-		// "Holding a message" is only a reason to wait if the message is about to go out. When
-		// every account is hours away the queue cannot flush, and cancelling compaction to protect
-		// it is a deadlock with no exit: the context never shrinks, so every request overflows, so
-		// compaction fires again, and the held message is no closer to being sent. Let the
-		// compaction through in that case — a smaller context is what the queued message will need
-		// when an account finally frees up.
+		// external: Pi default compaction uses the active account without a timeout.
 		if (queuedUserInputs.length > 0) {
 			const flushDelay = nextModelAvailabilityDelayMs(ctx);
 			if (flushDelay !== undefined && flushDelay <= QUEUE_FLUSH_SOON_MS) {
@@ -11025,10 +10616,6 @@ ${note}` : basePrompt;
 				flushDelayMs: flushDelay ?? null,
 			});
 		}
-		// runHealthyCompaction returns undefined when routing is off, the current
-		// account is healthy and not Cursor, or there is nothing to prepare. A spent
-		// account must not reach Pi's untimed default. A healthy Cursor account must
-		// not either: that is the compaction hang.
 		if (
 			config.routeCompactionToHealthyAccount &&
 			(!isCurrentModelReady(ctx) ||
@@ -11044,10 +10631,7 @@ ${note}` : basePrompt;
 		return undefined;
 	});
 
-	// `session_compact` fires only when a summary lands. Pi >=0.84.3 exposes the matching
-	// public terminal failure event; the old internal `compaction_end` AgentSession event was
-	// never emitted to extensions, so subscribing to that name made unit tests green while live
-	// cancellations bypassed this recovery path entirely.
+	// external: Pi 0.84.3 and later exposes a compaction completion callback.
 	safeOn("session_compact_failed", (event: any, ctx: any) => {
 		if (contextGuardWantsCompaction || contextGuardCompactionInFlight) {
 			failContextGuardCompaction(
@@ -11056,17 +10640,12 @@ ${note}` : basePrompt;
 				ctx,
 			);
 		}
-		// If cooldown input was waiting behind compaction, a failure must not turn that queue into
-		// a dead end. On Pi <=0.84.2 context-guard-owned ctx.compact() still reaches its onError
-		// callback; native terminal-failure notification requires the 0.84.3+ public seam.
 		if (queuedUserInputs.length === 0) return;
 		runBackground("post-compaction queued flush", ctx, () =>
 			attemptQueuedInputResume(ctx),
 		);
 	});
 
-	// Forward-progress signals: any of these means the resumed turn is alive, so reset the
-	// stuck watchdog. Cheap no-ops when no resume is in flight.
 	for (const evt of [
 		"turn_start",
 		"message_start",
@@ -11077,11 +10656,7 @@ ${note}` : basePrompt;
 			noteResumeProgress();
 		});
 	}
-	// Async re-registrations (Cursor/Codex catalog discovery) restore full model lists
-	// behind the filter's back; re-narrow at the start of every turn.
 	safeOn("message_start", (_event, ctx) => applyOnlyActiveFilter(ctx));
-	// Tool lifecycle also adjusts the in-flight count so a long, silent build/test command is
-	// never mistaken for a wedge and aborted mid-run.
 	safeOn("tool_execution_start", () => {
 		toolInFlight++;
 		noteResumeProgress();
@@ -11099,21 +10674,13 @@ ${note}` : basePrompt;
 			return { action: "continue" as const };
 		const text =
 			typeof (event as any).text === "string" ? (event as any).text : "";
-		// Slash commands and shell shortcuts belong to Pi itself. Holding them in the cooldown queue
-		// makes /login, /model, /export, and even recovery commands appear completely broken.
 		if (/^\s*[/!]/.test(text)) return { action: "continue" as const };
 		claimUserControl("interactive input", true);
 		userPromptStartsTurn = true;
-		noteRecoveryProgress(); // a fresh user prompt → clean slate, re-enable auto-continue
-		// A manual choice is owed ONE message. This is the next one, so a reprieve that already
-		// carried a message retires here — before the readiness check consults it.
+		noteRecoveryProgress();
 		retireSpentManualPin();
 		retireSpentFailoverPin();
 
-		// A prompt can arrive while a broker wake or another automatic continuation is starting.
-		// The host's ordinary `prompt()` path has no streamingBehavior in that race and would throw
-		// "Agent is already processing" (or abort the active turn). Re-enter through the explicit
-		// follow-up queue so the user's newer intent is serialized rather than competing with it.
 		if (!ctx.isIdle()) {
 			if ((event as any).streamingBehavior === "steer" || (event as any).streamingBehavior === "followUp") {
 				return { action: "continue" as const };
@@ -11130,8 +10697,6 @@ ${note}` : basePrompt;
 		if (
 			await ensureReadyModel(ctx, "preflight: selected account unavailable")
 		) {
-			// Readiness preflight awaits auth/catalog work. The session may have become busy while it
-			// was awaiting; re-check before allowing the original prompt to enter the host run.
 			if (!ctx.isIdle()) {
 				if (typeof pi.sendUserMessage === "function") {
 					await pi.sendUserMessage(queuedInputContent({ text, images: (event as any).images }), {
@@ -11145,9 +10710,6 @@ ${note}` : basePrompt;
 
 		const delay = nextModelAvailabilityDelayMs(ctx);
 		if (delay !== undefined) {
-			// Never remove a fresh user message from Pi's transcript and hide it in extension-owned
-			// memory. Let the real request record its refusal; the normal failed-turn preservation +
-			// pending resume path can then carry the visible message when an account becomes ready.
 			logEvent("input_passthrough_while_cooling", {
 				session: sessionInstanceId,
 				delayMs: delay,
@@ -11172,13 +10734,6 @@ ${note}` : basePrompt;
 		];
 		const slotHint =
 			providers.length > 0 ? ` Select one of: ${providers.join(", ")}.` : "";
-		// Selection came up empty — but WHY it came up empty is the whole message. Reporting
-		// "no authenticated account exists" for every empty result told people with several
-		// logged-in accounts, quota still showing on them, that they had none. That reads as the
-		// extension failing to see accounts it can plainly list in `status`, and it buries the one
-		// action that fixes it. Say which accounts exist and what is actually wrong with them.
-		// Invalidated accounts are dropped from `rotation` by design, so the rotation list is the
-		// one place that cannot name them — read the accounts themselves.
 		const auth = readAuthFile();
 		const deadAuth = [...invalidatedByProvider.keys()].filter((provider) =>
 			isEntryUsable(auth[provider]),
@@ -11207,28 +10762,17 @@ ${note}` : basePrompt;
 		return { action: "continue" as const };
 	});
 
-	// Distinguish a genuine new user prompt from our own failover continuation. Only a
-	// genuine prompt resets the per-task auto-continue counter and cancels any pending
-	// resurrection — this is what stops maxAutoContinuesPerPrompt from resetting every
-	// iteration (the bug that let the failover loop run forever).
 	safeOn("before_agent_start", async (_event, ctx) => {
-		// The child shares the persisted recovery file with its parent. It must not only avoid
-		// switching models here; it must avoid clearing the parent's pending wake when its own
-		// explicitly selected turn starts.
 		if (subagentChild) return;
-		// Our own injected continuation (recovery fallback) must NOT be mistaken for a genuine
-		// new user prompt — otherwise it resets the auto-continue counter every iteration and the
-		// recovery loop becomes unbounded. Preserve the chain in that case.
 		if (expectingInjectedContinuation) {
 			expectingInjectedContinuation = false;
-			continuationDispatchedForAgentTurn = true; // this turn IS the continuation
+			continuationDispatchedForAgentTurn = true;
 			await ensureReadyModel(
 				ctx,
 				"last-moment preflight: selected account unavailable",
 			);
 			return;
 		}
-		// Genuine user input → fresh task: reset the chain and stop any auto-resume.
 		claimUserControl("before agent start");
 		await ensureReadyModel(
 			ctx,
@@ -11241,17 +10785,14 @@ ${note}` : basePrompt;
 		const userProbe = userPromptStartsTurn;
 		userPromptStartsTurn = false;
 		if (gateExhaustedTurn(ctx, userProbe)) return;
-		noteResumeProgress(); // a resumed turn actually started → it is making progress
+		noteResumeProgress();
 		currentPromptSwitch = undefined;
 		automaticModelTarget = undefined;
 		responseCooldownHints.clear();
 		handledAssistantErrors.clear();
-		captureDesiredThinking(ctx); // remember the level BEFORE any failover can clamp it
-		refreshDiscovery(false, ctx); // also refresh Pi's in-memory AuthStorage
+		captureDesiredThinking(ctx);
+		refreshDiscovery(false, ctx);
 		if (pendingSettingsCheck) {
-			// On legacy Pi a switch should have rewritten settings.json to name it. Newer Pi keeps
-			// the live choice session-scoped; broker/subagent children receive an explicit model and
-			// bare unpinned children intentionally inherit only the user's saved global default.
 			pendingSettingsCheck = false;
 			checkPiContract(ctx, "after_model_switch", true);
 		}
@@ -11284,9 +10825,7 @@ ${note}` : basePrompt;
 			lastObservedThinkingLevel = appliedLevel;
 			return;
 		}
-		// Pi changes ctx.model and applies its default/clamp before model_select. When this handler
-		// wins the fire-and-forget race, the old model and exact level transition identify that one
-		// native change. model_select handles the opposite order below.
+		// external: Pi applies model thinking defaults and clamps before model_select.
 		if (
 			lastObservedModelKey &&
 			modelKey !== "unknown" &&
@@ -11312,8 +10851,7 @@ ${note}` : basePrompt;
 	safeOn("model_select", (event, ctx) => {
 		const model = (event as any).model;
 		if (!model?.provider || !model?.id || subagentChild) return;
-		// Only legacy Pi <=0.84.2 auto-persists a user-driven switch. On newer hosts this is an
-		// intentionally session-scoped selection and must not be diagnosed as settings drift.
+		// external: Pi versions through 0.84.2 persist user model switches as the global default.
 		pendingSettingsCheck = piAutoPersistsSelectedModel(PI_HOST_VERSION);
 		updateUsageStatus(ctx, model.provider);
 		runBackground("model_select usage refresh", ctx, () =>
@@ -11362,9 +10900,6 @@ ${note}` : basePrompt;
 		modelPreferenceChanged = true;
 		pendingWarmupUpgrade = undefined;
 		rememberUserModel(model);
-		// A manual model change is user control, not a permanent "never fail over" pin.
-		// Cancel stale pending work; if the selected model then returns a real limit, normal
-		// failover still applies to that completed request.
 		claimUserControl("manual model selection", true);
 		if (queuedUserInputs.length > 0) {
 			runBackground("manual model selection queued input resume", ctx, () =>
@@ -11392,10 +10927,7 @@ ${note}` : basePrompt;
 			}
 			return;
 		}
-		noteResumeProgress(); // a provider response arrived → the resumed turn is alive
-		// The governor's ground truth. Deliberately ahead of every other check, `config.enabled`
-		// included: whether a request reached a provider is a fact about the session, not
-		// something this extension's own settings get an opinion about.
+		noteResumeProgress();
 		noteProviderRequestObserved();
 		if (ctx.model && usageFamily(ctx.model.provider) === "codex") {
 			const auth = readAuthFile();
@@ -11418,9 +10950,6 @@ ${note}` : basePrompt;
 			return;
 		}
 		if ((status === 429 || status === 402 || status === 403) && ctx.model) {
-			// Managed providers use these hints for every limit response. For unmanaged
-			// providers retain only 429 hints: they let a bodyless rate limit use the
-			// server's Retry-After instead of the six-hour quota cooldown.
 			if (
 				status !== 429 &&
 				!classifyProvider(ctx.model.provider, config.qwenProvider)
@@ -11446,9 +10975,6 @@ ${note}` : basePrompt;
 		const message = (event as any).message;
 		if (message?.role !== "assistant" || !automaticFailoverEnabled()) return;
 		if (message.stopReason !== "error") {
-			// A model reply that is not an error is a request that went out and came back — the
-			// second, independent witness for the governor, so a host that reports responses
-			// differently cannot make a healthy session look like a spinning one.
 			exhaustedGateNoticeKey = undefined;
 			noteProviderSuccessObserved();
 			noteRecoveryProgress();
@@ -11456,7 +10982,7 @@ ${note}` : basePrompt;
 			if (pendingWarmupUpgrade && !staleError()) await finishFailoverWarmup(ctx, message);
 			return;
 		}
-		if (userAbortedChain || ctx.signal?.aborted) return; // user is cancelling — don't fail over
+		if (userAbortedChain || ctx.signal?.aborted) return;
 		const errorText = assistantErrorText(message);
 		const provider =
 			typeof message.provider === "string"
@@ -11465,17 +10991,9 @@ ${note}` : basePrompt;
 		const modelId =
 			typeof message.model === "string" ? message.model : ctx.model?.id;
 		if (!provider || !modelId) return;
-		// Normally we only react to errors from providers this extension manages. But if the
-		// user's ACTIVE model is on an unmanaged provider (e.g. a plain `openai` API key that hit
-		// its billing quota — "You exceeded your current quota"), we still rescue the task by
-		// failing over to a managed account, which is exactly what the user expects. We only skip
-		// errors from unmanaged providers that are NOT the model the user is currently on (those
-		// are unrelated background errors we must not hijack).
 		const managed = !!classifyProvider(provider, config.qwenProvider);
 		const isCurrentModelProvider = provider === ctx.model?.provider;
 		if (!managed && !isCurrentModelProvider) return;
-		// A manual selection owns the route. Automatic preflight may also have moved ctx.model,
-		// in which case the original assistant still identifies the provider that actually failed.
 		if (manualRouteOwnsErrors && (!isCurrentModelProvider ||
 			(ctx.model?.id && !sameModelIdentity(modelId, ctx.model.id)))) return;
 		if (isPolicyRefusal(errorText)) {
@@ -11511,8 +11029,6 @@ ${note}` : basePrompt;
 			error: errorText,
 		});
 		if (!(["auth", "limit", "model", "transient", "cursor_stall"] as string[]).includes(failureKind)) return;
-		// The one attempt a pinned account was owed has been made and refused. A pin that outlived it
-		// let every later turn (a background report, not a typed prompt) probe the account again.
 		if (failureKind === "limit" || failureKind === "auth") {
 			if (hasFailoverPin(provider)) failoverPinnedProvider = undefined;
 			if (hasManualPin(provider)) manualPinnedProvider = undefined;
@@ -11546,12 +11062,7 @@ ${note}` : basePrompt;
 		const previousPromptSwitch = currentPromptSwitch;
 		recoveryLease.markRecovering(recoveryCategory, provider, modelId);
 		try {
-		// Unmanaged active provider (e.g. plain `openai` API quota): we cannot manage its
-		// cooldown/refresh lifecycle, but we rescue the task by switching to a managed account on
-		// any actionable error. scope:"model" + a short cooldown so we never poison a provider we
-		// don't own.
 		if (!managed) {
-			// Providers with their own retry policy were handled before recovery arbitration.
 			if (failureKind === "transient" || failureKind === "cursor_stall") {
 				const retryDelayMs =
 					responseCooldownHints.get(provider) ?? config.transientCooldownMs;
@@ -11559,13 +11070,6 @@ ${note}` : basePrompt;
 				retryTemporaryFailure(ctx, failedModel, errorText, retryDelayMs);
 				return;
 			}
-			// A quota or authorization refusal is about the ACCOUNT, not the model, and it does not
-			// clear in a minute: an unmanaged account out of credits refuses everything until it is
-			// topped up. Benching only the model for `transientCooldownMs` let the very next switch
-			// pick the same account, get the same refusal, and close the loop — which is precisely
-			// how a session ended up answering every user message with the same "out of credits"
-			// error while live accounts sat unused. Transient blips and model-specific errors keep
-			// the light touch, because those genuinely are momentary or model-scoped.
 			const accountLevel = failureKind === "limit" || failureKind === "auth";
 			if (accountLevel || failureKind === "model") {
 				await switchToFallback(
@@ -11621,13 +11125,6 @@ ${note}` : basePrompt;
 				killed = markAuthFailure(provider, errorText);
 			}
 			if (killed) {
-				// For a Claude login, "run /login" alone sends people round a loop they have often
-				// already been round: log in, work for a few hours, get kicked out, log in again.
-				// The reason is not in the error text and cannot be guessed from it — every CLI that
-				// signs into Claude Pro/Max uses the SAME client id, and Anthropic keeps one live
-				// refresh token per account for that client. So signing the same account into another
-				// tool, another machine, or a second slot here revokes this one, quietly, hours later.
-				// Naming that is the difference between a fix and a ritual.
 				const sharedClientHint =
 					classifyProvider(provider, config.qwenProvider) === "anthropic" &&
 					/invalid_grant|revoked/i.test(reason)
@@ -11638,9 +11135,6 @@ ${note}` : basePrompt;
 					"warning",
 				);
 			}
-			// A killed account is already in invalidatedByProvider (no cooldown entry needed —
-			// that was the v1.8.x "8696h cooldown" bug). A transient auth failure gets the brief
-			// TRANSIENT_AUTH_COOLDOWN_MS so selection skips it for a moment and Pi can refresh.
 			const cooldownMs = killed ? 0 : TRANSIENT_AUTH_COOLDOWN_MS;
 			await switchToFallback(
 				ctx,
@@ -11700,7 +11194,6 @@ ${note}` : basePrompt;
 		if (!isAccountChatModel(ctx.model)) return;
 		if (!automaticFailoverEnabled()) return;
 		if (exhaustedGateAborting) {
-			// Our own gate stopped this turn before any request left: the wait for recovery stays armed.
 			exhaustedGateAborting = false;
 			endResumeWatch();
 			currentPromptSwitch = undefined;
@@ -11708,9 +11201,6 @@ ${note}` : basePrompt;
 			return;
 		}
 		const stop = lastAssistantStopReason((event as any).messages ?? []);
-		// Our own watchdog aborted a wedged resumed turn — this is RECOVERY, not a user cancel.
-		// Arm auto-resume so the work continues by itself the moment any account is free again;
-		// the user should never have to re-type the prompt to get unstuck.
 		if (watchdogAborting) {
 			watchdogAborting = false;
 			endResumeWatch();
@@ -11727,10 +11217,7 @@ ${note}` : basePrompt;
 			}
 			return;
 		}
-		// Respect the user: if they pressed Esc, the last assistant message is "aborted".
 		if (stop === "aborted" || ctx.signal?.aborted) {
-			// Esc must reach the timers too, not only this turn: a wake already past its guards
-			// would otherwise switch account and re-arm the wait right after the cancel landed.
 			chainEpoch++;
 			userAbortedChain = true;
 			startFreshFailoverChain();
@@ -11740,13 +11227,7 @@ ${note}` : basePrompt;
 			endResumeWatch();
 			return;
 		}
-		// The resumed/continued turn has ended — stop watching it for stalls.
 		endResumeWatch();
-		// CRITICAL (fixes "Cannot continue from message role: assistant"): only resume when the
-		// turn actually ended in an ERROR we can continue from. A non-error end means the work
-		// already advanced on the (switched) account; there is nothing to resume. The old code
-		// kept currentPromptSwitch set across later agent_end cycles and re-dispatched a resume
-		// on a SUCCESSFUL assistant tail, which threw that cryptic error into the transcript.
 		if (stop !== "error") {
 			chainEpoch++;
 			clearPendingContinuation();
@@ -11756,15 +11237,11 @@ ${note}` : basePrompt;
 		}
 		if (continuationDispatchedForAgentTurn) {
 			continuationDispatchedForAgentTurn = false;
-			// The continuation itself may have hit quota and message_end may already have
-			// selected another account. Suppress only a duplicate end for the same attempt;
-			// never suppress the new switch that now needs its own continuation.
 			if (!currentPromptSwitch) return;
 		}
 		if (!config.enabled || !config.autoContinue || userAbortedChain) return;
 		await maybeDispatchContinuation(ctx, { recoveryLease });
 		} finally {
-			// After the branches above: most of them write the state themselves, which carries the reading.
 			flushUsageTelemetry();
 			if (continuationRecoveryLease?.token === recoveryLease?.token) {
 				continuationRecoveryLease = undefined;
@@ -11773,9 +11250,6 @@ ${note}` : basePrompt;
 		}
 	});
 
-	// Pi `await`s the factory. Returning the Cursor setup promise means
-	// createAgentSession's getModel(cursor, cursor-grok-4.6) runs AFTER fallback
-	// models are registered, so the host restore does not print
-	// "Could not restore model" and dump the session onto kimi/anthropic.
+	// external: Pi awaits the extension factory before restoring the session model.
 	return cursorReady;
 }

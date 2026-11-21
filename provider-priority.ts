@@ -1,59 +1,3 @@
-/**
- * Where work goes once the account it was on cannot take it.
- *
- * ## What was actually happening
- *
- * Rotation already gets the first step right: of 602 automatic failovers in this machine's black
- * box, 588 stayed inside the same provider family — the same subscription, the same model, just
- * another account. That is the behaviour to protect, and nothing here weakens it.
- *
- * The other 14 are the problem. Those are the hops taken once every account of the current family
- * was spent, and they went nowhere in particular:
- *
- *     kimi-coding → openai-codex   3      cursor       → openai-codex  1
- *     openai-codex → anthropic     3      anthropic    → cursor        1
- *     kimi-coding → anthropic      2      ollama       → kimi-coding   2
- *     kimi-coding → cursor         2
- *
- * There was no ladder being followed, because nothing expressed one. The comparator ordered
- * cross-family candidates by liveness telemetry — measured-free first, then predicted-free, then
- * whoever refused longest ago — and only fell through to the configured family order as a last
- * tiebreak, by which point it almost never spoke. So the answer to "the whole family is spent,
- * where now?" was whatever the telemetry happened to say that second.
- *
- * The second half of the same gap: `providerOrder` could only ever name the six specially-managed
- * families. Accounts outside them — openrouter, zai, minimax, opencode-go-api, openai — could not
- * be placed in the order at all, so they sat permanently last by construction. In 602 automatic
- * failovers not one ever reached them. That is right as a default (they bill per token, while the
- * managed families are flat-rate subscriptions), but it should be a stated policy the user can
- * change, not an accident of the type system.
- *
- * ## The ladder
- *
- * A flat, ordered list of provider GROUPS. A group is a managed family (`anthropic`,
- * `openai-codex`, `kimi-coding`, `cursor`, `qwen`, `ollama`) or the base id of anything else the
- * user is logged in to (`openrouter`, `zai`, `minimax`, …) — numbered rotation slots of the same
- * account (`openai-codex-account-3`) all collapse to one group, because preferring one slot over
- * its sibling is rotation's job, not the ladder's.
- *
- * Three rules, and they are deliberately narrow:
- *
- * 1. **The ladder never overrides same-family.** Staying on the family preserves the model the
- *    user picked, and it is the step that already works. The ladder only decides what happens
- *    after that step has run out.
- * 2. **The ladder never overrides availability.** An account on a real cooldown is not chosen
- *    while a free one exists, whatever the ladder says. The ladder reorders candidates that are
- *    all selectable right now; it does not resurrect spent ones.
- * 3. **A group nobody ranked sorts after every group somebody did**, keeping its existing order
- *    among its unranked peers. Silence is not a preference, so it must not act like one.
- *
- * Within those bounds the ladder sits BELOW the liveness heuristics (`confirmed`, `predictedBusy`).
- * Those answer "did the provider recently tell us this account is free?" — evidence about a specific
- * account — and a preference about its category must not pull work onto an account the provider has
- * already reported as spent while a live one waits. The ladder therefore decides only among the
- * candidates that liveness cannot separate, which is where the cross-family hops were arbitrary.
- * The comparator order is pinned by the seeded properties in test/completion-route-properties.test.ts.
- */
 
 /** Groups this extension manages directly: OAuth refresh, quota telemetry, live catalogue. */
 export const MANAGED_GROUPS = [
@@ -65,15 +9,7 @@ export const MANAGED_GROUPS = [
   "ollama",
 ] as const;
 
-/**
- * The ladder shipped by default.
- *
- * Flat-rate subscriptions with real quota telemetry first, strongest coding models earliest;
- * then the cheap/local tier; then — by omission — everything else, which is where per-token
- * billing lands. It is the same sequence rotation already used as its final tiebreak, promoted
- * to a stated policy so the cross-family hop stops being decided by whatever the telemetry
- * happened to say at that moment.
- */
+/** Default provider-group order for cross-family failover. */
 export const DEFAULT_PROVIDER_PRIORITY: string[] = [
   "anthropic",
   "openai-codex",
@@ -83,7 +19,6 @@ export const DEFAULT_PROVIDER_PRIORITY: string[] = [
   "ollama",
 ];
 
-/** What people actually type. Kept small and obvious rather than clever. */
 const ALIASES: Record<string, string> = {
   claude: "anthropic",
   opus: "anthropic",
@@ -103,14 +38,7 @@ const ALIASES: Record<string, string> = {
   router: "openrouter",
 };
 
-/**
- * Reduce anything the user or the runtime might say to one group name.
- *
- * Handles a bare family, a numbered rotation slot (`kimi-coding-account-2`), a provider/model
- * pair (`openai-codex/gpt-5.6-sol`), and the common nicknames above. Unknown names pass through
- * normalised rather than being rejected: a provider this build has never heard of is exactly the
- * case the old `ProviderFamily[]` type made unrankable, and it must be rankable now.
- */
+/** Normalize a family, account slot, provider/model pair or nickname to a provider group; unknown names pass through normalized. */
 export function normalizeGroup(raw: string): string {
   const first = String(raw ?? "")
     .trim()

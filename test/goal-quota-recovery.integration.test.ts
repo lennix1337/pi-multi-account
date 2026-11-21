@@ -4,9 +4,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
-// Optional companion integration. No personal paths, credentials or network.
-// PI_GOAL_TEST_ENTRY=/absolute/path/to/pi-goal/dist/index.ts node --test test/goal-quota-recovery.integration.test.ts
-// Repeat with PI_GOAL_EXHAUST_ALL=1, then also PI_GOAL_RECOVER_ALL=1.
 const entry = process.env.PI_GOAL_TEST_ENTRY;
 const exhaustAll = process.env.PI_GOAL_EXHAUST_ALL === "1";
 const recoverAll = process.env.PI_GOAL_RECOVER_ALL === "1";

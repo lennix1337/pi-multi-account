@@ -1,5 +1,3 @@
-// Supported Pi hosts bind public provider imports. Exercise native Anthropic auth
-// and the legacy Codex adapter with fake factories: no browser or provider calls.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

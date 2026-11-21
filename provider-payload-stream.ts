@@ -3,10 +3,7 @@ type Api = { streamSimple: (model: any, context: any, options: any) => any };
 let registry: Promise<typeof import("@earendil-works/pi-ai/compat")> | undefined;
 
 async function nativeApi(api: string): Promise<Api> {
-	// A bare import is essential: Pi binds it to the running host's module (including
-	// bundled/virtual hosts). createRequire/import.meta.resolve bypass that binding and
-	// can pair a new transcript with an old, extension-local transport (#65/#66).
-	// Lazy loading preserves account discovery when the optional transport is unavailable.
+	// external: Pi binds bare SDK imports to the running host, including bundled or virtual hosts.
 	registry ??= import("@earendil-works/pi-ai/compat").catch((error) => {
 		registry = undefined;
 		throw error;
@@ -33,9 +30,7 @@ export function createPayloadStream(shape: Shape, resolveApi: (api: string) => A
 		const api = resolveApi(model.api);
 		if (!(api instanceof Promise)) return start(api);
 		const stream = api.then(start);
-		// Stream functions must return synchronously. Both consumers await the SAME native
-		// stream; no reserialization, context conversion or second request is introduced.
-		// Observe setup rejection even if a caller discards the returned stream.
+		// external: Pi stream functions must return synchronously.
 		void stream.catch(() => {});
 		return {
 			async *[Symbol.asyncIterator]() { yield* await stream; },

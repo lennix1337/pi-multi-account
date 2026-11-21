@@ -58,8 +58,6 @@ test("parses Codex 5h and weekly usage response", () => {
 });
 
 test("Ollama /api/me surfaces plan tier, renewal date, and suspended status", () => {
-	// /api/me carries account metadata while /api/usage carries the quota windows. Keep this useful
-	// fallback when the best-effort quota request is unavailable.
 	const active = parseOllamaMeBody(
 		"ollama",
 		{
@@ -103,8 +101,6 @@ test("parses Ollama session and weekly quota fractions with forecast reset bound
 	assert.ok(snapshot);
 	assert.equal(snapshot.primary?.usedPercent, 4.6);
 	assert.equal(snapshot.primary?.windowSeconds, 18_000);
-	// Session epochs are exact 18,000-second multiples from Unix epoch, so their UTC wall-clock
-	// hour moves across days rather than always landing on 00/05/10/15/20.
 	assert.equal(snapshot.primary?.resetAt, Date.UTC(2026, 5, 13, 17, 0, 0));
 	assert.equal(snapshot.secondary?.usedPercent, 5.1);
 	assert.equal(snapshot.secondary?.resetAt, Date.UTC(2026, 5, 15, 0, 0, 0));
@@ -329,7 +325,6 @@ test("a usage reading repeats the last one only when nothing but the instant it 
 	const first = mergeUsageSnapshot(undefined, headers("25", NOW));
 	const repeated = mergeUsageSnapshot(first, headers("25", NOW + 5000));
 	assert.equal(sameUsageReading(first, repeated), true);
-	// What a process reads back from the state file: JSON drops the fields left undefined.
 	assert.equal(sameUsageReading(JSON.parse(JSON.stringify(first)), repeated), true);
 	assert.equal(sameUsageReading(undefined, first), false, "a first reading is always news");
 	for (const [what, changed] of [
@@ -386,11 +381,6 @@ test("Codex usage fetch sends the account id and never exposes the token in the 
 });
 
 test("the provider's own allowed/limit_reached verdict is carried, not just the percentages", () => {
-	// The Codex usage response answers the question directly — `rate_limit.allowed` /
-	// `limit_reached` — and that answer was being dropped on the floor in favour of deriving an
-	// opinion from `used_percent`. On a real machine two accounts answered `allowed: true` while
-	// reading 98%, and the extension kept them benched: the account said "yes", the percentage
-	// said "nearly out", and only the percentage was ever read.
 	const free = parseCodexUsageBody("openai-codex-account-2", {
 		plan_type: "free",
 		rate_limit: {
@@ -439,9 +429,6 @@ test("the provider's own allowed/limit_reached verdict is carried, not just the 
 });
 
 test("the account's identity travels with its usage, and shows in the footer", () => {
-	// With seven Codex slots called A2…A7, the footer named the SLOT and nothing else, so there
-	// was no way to tell which real account was in use — the one piece of information needed to
-	// know whose quota is burning. The usage response carries the email; it was thrown away.
 	const snapshot = parseCodexUsageBody("openai-codex-account-2", {
 		plan_type: "free",
 		email: "alice@example.com",
@@ -465,7 +452,6 @@ test("the account's identity travels with its usage, and shows in the footer", (
 });
 
 test("a footer for an account with no email is unchanged", () => {
-	// Nothing may become noisier for providers that expose no identity.
 	const snapshot = parseCodexUsageBody("openai-codex", {
 		plan_type: "plus",
 		rate_limit: {
@@ -512,11 +498,6 @@ test("Anthropic API-key metadata still rejects missing or malformed credentials"
 });
 
 test("a Kimi Coding slot reports itself instead of throwing", async () => {
-	// kimi-coding became a managed family, but nothing taught the usage layer about it — so every
-	// probe fell through to the OAuth branch and threw "has no OAuth access token" for a perfectly
-	// healthy API key. That turns the footer blank and fills the log with failures for an account
-	// that is working. Kimi exposes no quota endpoint at all (every documented path 404s), so the
-	// honest answer is the plan, not an invented number.
 	const snapshot = await fetchUsageSnapshot("kimi-coding", {
 		type: "api_key",
 		key: "sk-kimi-test",
@@ -536,11 +517,6 @@ test("a Kimi Coding slot reports itself instead of throwing", async () => {
 });
 
 test("a window is labelled by its real length, and the provider's verdict beats the percentage", () => {
-	// Two ways the footer misled at once. A Codex free plan meters a THIRTY-DAY window, and it was
-	// labelled "5h" because that is the slot the field sits in — so a number that resets next month
-	// read as one that resets this afternoon. And the account this was shown for was answering
-	// `allowed: true`: it could serve work while the footer said `0% left`, which is exactly the
-	// reading that convinces someone their working accounts are being ignored.
 	const now = Date.now();
 	const snapshot = parseCodexUsageBody(
 		"openai-codex-account-6",
@@ -596,10 +572,6 @@ test("a blocked account still reads as blocked", () => {
 });
 
 test("Cursor's three Pro+ pools arrive as three labelled windows and never leak the token", async () => {
-	// Verified live 2026-09-12: aiserver.v1.DashboardService answers both methods for the same
-	// OAuth session token the bridge already holds, and the numbers match Cursor's dashboard
-	// exactly (included models 97%, other models 35%, Grok Bot weekly 0%). Before this, the
-	// extension honestly reported "subscription" because no quota API was known.
 	const calls: Array<{ url: string; authorization: string | null; connect: string | null }> = [];
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
 		const headers = new Headers(init?.headers);
@@ -662,8 +634,6 @@ test("Cursor's three Pro+ pools arrive as three labelled windows and never leak 
 });
 
 test("Cursor keeps the honest subscription snapshot when the undocumented rpc fails", async () => {
-	// The quota numbers are an enrichment on top of the old plan-only snapshot. A refusal must
-	// not blank the footer or report a working account as "usage unavailable".
 	const fetchImpl = (async () => new Response("unavailable", { status: 503 })) as typeof fetch;
 	const snapshot = await fetchUsageSnapshot(
 		"cursor",

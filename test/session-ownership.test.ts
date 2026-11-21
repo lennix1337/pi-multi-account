@@ -4,15 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-// This file pins TERMINAL-Pi semantics: a second concurrent in-process session goes passive.
-// When the test runner itself is hosted by pi-web (PI_WEB_SESSION=1) the extension would
-// correctly treat every session as an independent root, breaking these expectations — so the
-// host markers are scrubbed here, exactly like the harness in failover.test.ts does per setup().
 delete process.env.PI_WEB_SESSION;
 delete process.env.PI_SUBAGENT_CHILD;
 delete process.env.PI_MULTI_ACCOUNT_INDEPENDENT_ROOTS;
 
-// A fresh node:test process, real Pi SDK and real event ordering; no personal auth/config.
 const dir = mkdtempSync(join(tmpdir(), "multi-account-session-sdk-"));
 process.env.PI_CODING_AGENT_DIR = dir;
 process.env.PI_OFFLINE = "1";
@@ -101,9 +96,6 @@ test("real Pi sessions keep launch models, per-model thinking and ownership thro
 });
 
 test("pi-web hosted sibling sessions are independent roots (real SDK)", async () => {
-  // pi-web's session daemon sets PI_WEB_SESSION=1 and hosts many root sessions in one
-  // process. Every one of them must activate: the terminal-Pi in-process lease must not
-  // demote siblings to subagent-child-passive.
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "auth.json"), JSON.stringify({ "session-fixture": { type: "api_key", key: "fixture-only" } }));
   writeFileSync(join(dir, "provider-failover.json"), JSON.stringify({

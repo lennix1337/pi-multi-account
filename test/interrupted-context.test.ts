@@ -1,16 +1,3 @@
-/**
- * Regression tests for interrupted-turn preservation (the `context` hook).
- *
- * The defect these lock down: on a quota failover the turn that TRIGGERED the switch is
- * exactly the turn pi-ai refuses to replay. `transform-messages` skips every assistant
- * message with stopReason "error"/"aborted", and degrades thinking blocks to plain text
- * whenever the next request runs on a different model. The account we switch TO therefore
- * received a continuation prompt saying "do not repeat completed work" with the record of
- * that work already deleted, plus tool results left with no originating call.
- *
- * The first test proves the loss against the REAL pi-ai transform rather than a mock,
- * because an in-process mock is exactly what would not have caught this.
- */
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -30,11 +17,6 @@ const { interruptedTurnNote, preserveInterruptedTurns, renderHandoffRecord } = (
 	) => string | undefined;
 };
 
-/**
- * pi-ai does not re-export `transformMessages` from its package entry, so this loads the
- * module by path. Missing or moved ⇒ the integration assertion is skipped rather than
- * failing CI on an unrelated pi-ai layout change; the unit tests below still hold.
- */
 async function loadPiAiTransform(): Promise<
 	((messages: any[], model: any, normalize?: any) => any[]) | undefined
 > {
@@ -56,7 +38,6 @@ async function loadPiAiTransform(): Promise<
 			if (typeof mod.transformMessages === "function")
 				return mod.transformMessages;
 		} catch {
-			// fall through to the next candidate root
 		}
 	}
 	return undefined;
@@ -68,7 +49,6 @@ const DEAD_MODEL = {
 	id: "gpt-5.6-terra",
 	input: ["text"],
 };
-/** The account failover moves us to: a DIFFERENT provider and model family. */
 const LIVE_MODEL = {
 	provider: "ollama",
 	api: "openai-completions",
@@ -81,7 +61,6 @@ const SECRET_REASONING =
 const SECRET_OUTPUT =
 	"Applied migration 0042_add_orders_table; seeding is the remaining step.";
 
-/** A transcript whose last assistant turn died on a quota error mid-tool-batch. */
 function interruptedTranscript() {
 	return [
 		{
@@ -132,7 +111,6 @@ test("REAL pi-ai transform erases the interrupted turn; preservation carries it 
 		return;
 	}
 
-	// 1. Baseline — what the next account sees today, without preservation.
 	const bare = transformMessages(interruptedTranscript(), LIVE_MODEL, undefined);
 	const bareText = JSON.stringify(bare);
 	assert.equal(
@@ -156,7 +134,6 @@ test("REAL pi-ai transform erases the interrupted turn; preservation carries it 
 		"baseline: the tool call that never returned is lost",
 	);
 
-	// 2. With preservation, the same transform on the SWITCHED-TO model keeps everything.
 	const preserved = transformMessages(
 		preserveInterruptedTurns(interruptedTranscript()),
 		LIVE_MODEL,
@@ -203,8 +180,6 @@ test("the handoff record marks which tool calls never returned", () => {
 });
 
 test("preservation is byte-identical on replay so it never invalidates the prompt cache", () => {
-	// The hook runs before EVERY request. A record that re-renders differently each time
-	// would move the cache breakpoint and force a full re-read of the transcript.
 	const first = JSON.stringify(preserveInterruptedTurns(interruptedTranscript()));
 	const second = JSON.stringify(preserveInterruptedTurns(interruptedTranscript()));
 	assert.equal(first, second);
@@ -228,8 +203,6 @@ test("a transcript with no interrupted turn is returned untouched", () => {
 });
 
 test("an interrupted turn with nothing to preserve is left to pi's normal drop path", () => {
-	// User pressed Esc before the model emitted anything: there is no work to describe,
-	// and injecting an empty record would only add noise to every later request.
 	const empty = [
 		{ role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 },
 		{ role: "assistant", stopReason: "aborted", content: [], timestamp: 2 },
@@ -238,8 +211,6 @@ test("an interrupted turn with nothing to preserve is left to pi's normal drop p
 });
 
 test("redacted thinking is not resurrected as plain text", () => {
-	// Redacted blocks are opaque provider-encrypted payloads with no readable content;
-	// emitting them would leak an unusable blob into every subsequent request.
 	const record = renderHandoffRecord(
 		{
 			role: "assistant",
@@ -316,7 +287,6 @@ test("every interrupted turn in a long session is preserved, not just the last o
 const asBranch = (messages: any[]) => messages.map((message) => ({ type: "message", message }));
 
 test("an empty quota-rejected turn has no record, and the note says so instead of pointing at one", () => {
-	// Real shape from a persisted session: stopReason "error", content: [] (rejected at request start).
 	const branch = asBranch([
 		{ role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 },
 		{ role: "assistant", provider: "openai-codex", model: "gpt-6.1-sol", stopReason: "error", errorMessage: "You have hit your ChatGPT usage limit", content: [], timestamp: 2 },

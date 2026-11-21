@@ -1,19 +1,9 @@
-/**
- * Shape check for `/multi-account` input, run before any subcommand touches discovery, config,
- * auth or routing state. Unknown subcommands and surplus arguments used to fall through to the
- * status path (which refreshes discovery) or be silently ignored, so a typo such as
- * `/multi-account reset now` or `/multi-account log banana` looked like it had worked.
- */
-
 const LOG_MAX_EVENTS = 200;
 
 interface CommandShape {
-	/** Subcommand names that route to the same handler. */
 	names: readonly string[];
 	usage: string;
-	/** Tokens after the subcommand; `undefined` means any number. */
 	maxArguments?: number;
-	/** Extra check on the first argument, for subcommands whose argument has a closed form. */
 	acceptsArgument?: (argument: string) => boolean;
 }
 

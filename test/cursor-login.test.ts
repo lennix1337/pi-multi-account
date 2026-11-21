@@ -1,18 +1,3 @@
-/**
- * Contract of the Cursor OAuth `login` that `registerCursorProvider` hands to Pi for every
- * numbered account slot: show the sign-in URL, wait for the tokens, refuse a duplicate account
- * BEFORE the catalog is read, and never fail a login because the catalog could not be read.
- *
- * Hermetic, and each scenario runs in its own child process because the generated protobuf
- * needs the TypeScript loader (like the other Cursor tests) and `getCursorModels` caches a
- * successful catalog for the life of the process. Inside the child:
- *   - `fetch` is a fail-closed stub: it answers only the Cursor poll URL, and every other
- *     request, plus any socket connect, is recorded and rejected. The child fails if it saw one.
- *   - the catalog goes through the proxy's bridge factory, replaced by an in-memory fake, so no
- *     helper process or Cursor endpoint is involved.
- *   - waits of up to 10s (the poll back-off) run immediately; the catalog RPC's own 20s timeout is untouched.
- * No browser, credential file or real account is touched.
- */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -92,11 +77,9 @@ const PRELUDE = `
 	}
 `;
 
-/** Runs one scenario body in a child that has the hermetic prelude; throws with the child's output on failure. */
 function runScenario(body: string): void {
 	execFileSync(process.execPath, ["--import", LOADER, "--input-type=module", "-e", `${PRELUDE}\n${body}\nfinish();`], {
 		cwd: REPO_ROOT,
-		// A scrubbed environment: the login code has no business reading anything from the caller's.
 		env: { PATH: process.env.PATH ?? "", SystemRoot: process.env.SystemRoot ?? "" },
 		stdio: ["ignore", "pipe", "pipe"],
 		timeout: 60_000,

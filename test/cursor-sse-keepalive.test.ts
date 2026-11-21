@@ -3,9 +3,6 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import test from "node:test";
 import { startSSEResponse } from "../cursor/sse-keepalive.ts";
 
-// Every server below opens the stream and then writes nothing on its own: upstream is silent,
-// as it is during a long think. The proxy's transport contract is that the client still sees
-// headers immediately and a steady trickle of bytes until the turn ends.
 
 const INTERVAL_MS = 40;
 
@@ -38,7 +35,6 @@ async function withSilentServer(
   }
 }
 
-/** POST and resolve on response headers; reject if they never arrive. */
 function post(port: number): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
     const req = httpRequest({ host: "127.0.0.1", port, method: "POST", path: "/v1/chat/completions" }, (res) => {

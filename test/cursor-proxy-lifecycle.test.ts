@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
 
-// cursor/proxy.ts imports generated protobuf code that Node's type stripping cannot load in-process,
-// so the listener lifecycle runs in a child that uses the repository TypeScript loader.
+// external: Node type stripping cannot load generated protobuf code in-process.
 function runInProxyChild(body: string): string {
 	return execFileSync(
 		process.execPath,
@@ -65,8 +64,6 @@ test("a failed shared proxy start is not remembered for the rest of the process"
 	assert.match(output, /ok/);
 });
 
-// An embedded session (an OptChat worker, a subagent) ends with `quit` while the process lives on.
-// Its listener is a GC root: left bound, it keeps that session's whole runtime in memory.
 test("the last session to quit releases the proxy; one still using it keeps it", () => {
 	const output = runInProxyChild(`
 		const { registerSessionLifecycleCleanup } = await import("./cursor/index.ts");

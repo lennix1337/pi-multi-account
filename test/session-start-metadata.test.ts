@@ -4,9 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-// Session start reads account usage and both live model catalogs. Those reads are independent, so
-// they must overlap instead of waiting for each other. A fake fetch with a fixed latency counts how
-// many of them are in flight at once; the network is closed to everything else.
 delete process.env.PI_WEB_SESSION;
 delete process.env.PI_SUBAGENT_CHILD;
 delete process.env.PI_MULTI_ACCOUNT_INDEPENDENT_ROOTS;
@@ -97,6 +94,5 @@ test("session start overlaps usage and both catalog reads instead of queuing the
     globalThis.fetch = realFetch;
   }
   assert.equal(seen.length, 4, `every startup read was attempted: ${seen.join(", ")}`);
-  // Usage reads already overlap each other; the catalogs must join them instead of waiting for usage to finish.
   assert.ok(peak >= 3, `startup reads overlapped (peak ${peak} in flight; order ${seen.join(" → ")})`);
 });

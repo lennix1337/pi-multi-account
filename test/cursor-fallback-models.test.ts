@@ -1,9 +1,3 @@
-/**
- * Pi restores the session model by getModel(provider, id) before catalogs load.
- * If the baked-in Cursor fallback list does not contain the user's default
- * (cursor-grok-4.6), every restart prints "Could not restore model" and dumps
- * the session onto kimi/anthropic.
- */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

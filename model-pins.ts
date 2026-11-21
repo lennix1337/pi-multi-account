@@ -1,4 +1,3 @@
-/** Explicit routing preferences; never foreground selections or authorization for a cheaper tier. */
 import { mutateConfigFile } from "./config-file-transaction.ts";
 
 export function validModelPinScope(scope: string): boolean {

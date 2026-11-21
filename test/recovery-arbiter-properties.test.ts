@@ -1,11 +1,3 @@
-/**
- * Seeded model-based check for the automatic recovery arbiter (recovery-safety.ts).
- *
- * Random sequences of admissions, nested admissions from live or stale leases, recovery marks,
- * releases, policy refusals and user control are run against a small model of the rules: one
- * owner per session, children only under the live owner, policy refusal terminal until explicit
- * user control, and well-formed phases per incident. A failing case prints its seed.
- */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -82,7 +74,6 @@ test("recovery arbiter follows its rules under random operation sequences: one o
 					assert.equal(lease, undefined, `${label}: a lease was granted after a policy refusal`);
 					assert.equal(minted, before, label);
 				} else if (active) {
-					// Under a live incident only that incident's leases nest; a stale parent is refused.
 					if (parent.incidentId === active.id) {
 						assert.ok(lease, `${label}: the live owner's lease did not nest`);
 						assert.equal(lease.incidentId, active.id, label);
@@ -91,7 +82,6 @@ test("recovery arbiter follows its rules under random operation sequences: one o
 						assert.equal(lease, undefined, `${label}: a lease was granted under a stale or foreign parent`);
 					}
 				} else {
-					// No live incident: the call admits a fresh root owner, whatever the parent was.
 					assert.ok(lease, `${label}: a free arbiter refused a root admission`);
 					assert.equal(lease.incidentId, `incident-${before + 1}`, label);
 					active = { id: lease.incidentId, owner: lease, stopped: false };
@@ -147,7 +137,6 @@ test("recovery arbiter follows its rules under random operation sequences: one o
 				} else {
 					assert.equal(id, `incident-${before + 1}`, label);
 				}
-				// The terminal phase is emitted once per incident; a repeat on a stopped incident is silent.
 				assert.deepEqual(
 					emitted().map((event) => [event.incidentId, event.phase]),
 					alreadyStopped ? [] : [[id, "stopped"]],

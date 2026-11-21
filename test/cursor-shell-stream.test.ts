@@ -2,9 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
 
-// A shell's exit EVENT is not the end of its exec RPC response stream. Cursor
-// drains that stream until ExecClientStreamClose, even while Run heartbeats flow.
-// The 2026-09-16 field incident paused forever after a successful native shell.
+// external: Cursor drains the shell RPC stream until ExecClientStreamClose, even after the shell exits.
 test("native shell success, failure and rejection close the exec stream so Cursor can continue", () => {
 	const output = execFileSync(process.execPath, ["--import", new URL("./fixtures/typescript-loader.mjs", import.meta.url).href, "--input-type=module", "-e", `
 		import assert from "node:assert/strict";

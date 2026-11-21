@@ -41,8 +41,6 @@ test("outside tests an illegal transition is ignored and reported once", () => {
 	assert.deepEqual(reports, ["cancelled->finished"]);
 });
 
-// A paused Run keeps its bridge in the registry so Pi's tool results can resume it. If that bridge
-// dies while Pi is still running the tools, nothing can ever resume it.
 test("a bridge that dies while the stream is paused for tools leaves no registry entry behind", () => {
 	const output = execFileSync(
 		process.execPath,

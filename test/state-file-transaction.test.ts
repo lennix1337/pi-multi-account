@@ -62,8 +62,7 @@ test("busy state lock fails boundedly without mutation and permits a later retry
 });
 
 test("a transient EPERM on the lock directory is contention, not a failed write", () => {
-  // Windows answers mkdir with EPERM while another process's rmdir of the same
-  // lock directory is still pending (seen in `npm run verify`, 04/11).
+  // external: Windows may return EPERM from mkdir while another process removes the lock directory.
   const dir = mkdtempSync(join(tmpdir(), "multi-state-eperm-")), path = join(dir, "state.json");
   const lockfile = createRequire(import.meta.url)("proper-lockfile");
   const real = lockfile.lockSync;
@@ -115,7 +114,7 @@ test("four real processes retain every independent state update without torn JSO
       child.on("error", reject); child.on("close", code => code === 0 ? resolve() : reject(new Error(error)));
     })));
     assert.equal(Object.keys(JSON.parse(readFileSync(path, "utf8")).exhaustedUntilByProvider).length, 120);
-    // Windows has no POSIX mode bits: every file stats as 0o666.
+    // external: Windows lacks POSIX mode bits and reports 0o666.
     if (process.platform !== "win32") assert.equal(statSync(path).mode & 0o777, 0o600);
     assert.deepEqual(readdirSync(dir), ["state.json"]);
     assert.throws(() => mutateStateFile(path, () => { throw new Error("interrupted"); }), /interrupted/);

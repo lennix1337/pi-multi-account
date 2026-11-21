@@ -25,12 +25,6 @@ export type CodexCatalogSnapshot = {
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const DEFAULT_CONTEXT_WINDOW = 272_000;
 const DEFAULT_MAX_TOKENS = 128_000;
-// Levels Pi itself understands, weakest → strongest. This is a FILTER, not a grant: a model's
-// own advertised efforts are intersected with this list (see thinkingLevelMap), so a level named
-// here only ever reaches a model that asked for it. Provider gradations differ wildly and do not
-// nest — Claude Opus 4.6 advertises `max` alone, glm-5.2 has `max` but no `xhigh`, gpt-5.6 has
-// `max`/`xhigh`/`minimal` but no `medium` — which is exactly why the per-model intersection, not
-// this list, decides what a given model gets.
 const KNOWN_PI_THINKING_LEVELS = [
 	"minimal",
 	"low",
@@ -68,7 +62,7 @@ function thinkingLevelMap(efforts: string[]): Record<string, string | null> | un
 	for (const level of KNOWN_PI_THINKING_LEVELS) {
 		if (supported.has(level)) result[level] = level;
 	}
-	// Pi has a `minimal` setting while some Codex catalogs begin at `low`.
+	// external: Pi has a minimal thinking level while some Codex catalogs start at low.
 	if (!("minimal" in result) && supported.has("low")) result.minimal = "low";
 	return Object.keys(result).length > 0 ? result : undefined;
 }
@@ -112,15 +106,13 @@ export function compareCodexModelStrength(
 	return variant || a.id.localeCompare(b.id);
 }
 
-/** Anthropic ships dated aliases (`claude-opus-4-5-20251101`) beside the rolling id. */
+// external: Anthropic publishes dated aliases beside rolling model IDs.
 function isDatedAnthropicAlias(id: string): boolean {
 	return /-\d{8}$/.test(id);
 }
 
 function anthropicTierRank(id: string): number {
 	const lower = id.toLowerCase();
-	// Fable is Anthropic's exceptional/apex line. Keep this separate from generation parsing:
-	// claude-fable-5-1 must outrank every Opus 5 variant, not merely sort as another Claude 5.
 	if (lower.includes("fable")) return 4;
 	if (lower.includes("opus")) return 3;
 	if (lower.includes("sonnet")) return 2;
@@ -128,7 +120,6 @@ function anthropicTierRank(id: string): number {
 	return 0;
 }
 
-/** Numeric generation parts after the tier: `claude-opus-4-8` -> [4,8], `claude-opus-5` -> [5]. */
 function anthropicVersionParts(id: string): number[] {
 	const tail = id.toLowerCase().replace(/^.*?(opus|sonnet|haiku)/, "");
 	return (tail.match(/\d+/g) ?? [])
@@ -136,14 +127,7 @@ function anthropicVersionParts(id: string): number[] {
 		.filter((n) => Number.isFinite(n) && n < 100_000);
 }
 
-/**
- * Strongest-first ordering for Anthropic model ids, so a newly released flagship (e.g.
- * `claude-opus-5` arriving in Pi's registry) outranks the newest id this extension happened to
- * be released with — the same release-per-model treadmill that was removed for Codex.
- *
- * Tier dominates version: Anthropic's flagship line is Opus, and the project's hard rule is to
- * stay on a provider's top model. Within a tier, the higher generation wins.
- */
+/** Compare Anthropic model IDs strongest first, prioritizing tier over generation. */
 export function compareAnthropicModelStrength(a: string, b: string): number {
 	const tier = anthropicTierRank(b) - anthropicTierRank(a);
 	if (tier !== 0) return tier;
@@ -152,7 +136,6 @@ export function compareAnthropicModelStrength(a: string, b: string): number {
 	for (let i = 0; i < Math.max(av.length, bv.length); i++) {
 		if ((av[i] ?? 0) !== (bv[i] ?? 0)) return (bv[i] ?? 0) - (av[i] ?? 0);
 	}
-	// Prefer the rolling id over its dated alias so the list is not doubled up.
 	const dated = Number(isDatedAnthropicAlias(a)) - Number(isDatedAnthropicAlias(b));
 	return dated || a.localeCompare(b);
 }
@@ -180,7 +163,7 @@ export function parseCodexModelCatalog(body: unknown): CodexCatalogModel[] {
 		const model = record(raw);
 		const id = model.slug ?? model.id ?? model.model;
 		if (typeof id !== "string" || !id.trim()) continue;
-		// The backend may retain migration-only entries but marks picker-ready models as `list`.
+		// external: Backend entries marked list are picker-ready; migration-only entries may remain.
 		if (typeof model.visibility === "string" && model.visibility.toLowerCase() !== "list") continue;
 		const efforts = reasoningEfforts(model);
 		const modalities = Array.isArray(model.input_modalities)
@@ -242,14 +225,7 @@ export class OllamaCatalogFetchError extends Error {
 	}
 }
 
-/**
- * Pull the live Ollama Cloud model catalog (`GET https://ollama.com/v1/models`).
- * Unlike Codex, Ollama Cloud publishes a single account-agnostic catalog keyed by an
- * API key, so one fetch covers the base provider and every cloned `ollama-account-N` slot.
- * Returns the canonical model ids Ollama Cloud expects in chat requests (e.g. `kimi-k3`,
- * `glm-5.2`) — no `:cloud` suffix. The extension registers them verbatim; Ollama Cloud
- * accepts both the bare and the `:cloud`-suffixed form, so legacy configured ids keep working.
- */
+/** Fetch canonical Ollama Cloud model IDs, without the :cloud suffix, for all accounts. */
 export async function fetchOllamaCloudCatalog(
 	apiKey: string,
 	options: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},

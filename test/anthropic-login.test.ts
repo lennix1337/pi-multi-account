@@ -43,7 +43,6 @@ for (const initial of [oauth, apiKey]) {
 			for (const id of ["anthropic", "anthropic-account-2"]) {
 				assert.ok((await runtime.getAvailable(id)).length > 0, `${id} must remain selectable`);
 			}
-			// Same-type re-login remains supported.
 			await runtime.login("anthropic-account-2", type, interaction);
 			assert.deepEqual(read().anthropic, initial);
 		} finally {
@@ -80,7 +79,6 @@ test("the type guard is necessary: the native store otherwise replaces OAuth wit
 		writeFileSync(authPath, JSON.stringify({ anthropic: oauth }));
 		const runtime = await ModelRuntime.create({ authPath, modelsPath: null, refreshOnCreate: false });
 		const base = builtinProviders().find((provider) => provider.id === "anthropic")!;
-		// Disable only the guard's read. All native login and persistence code stays identical.
 		runtime.registerNativeProvider(anthropicLoginProvider(base, "anthropic", () => undefined));
 		await runtime.login("anthropic", "api_key", {
 			signal: new AbortController().signal, prompt: async () => apiKey.key, notify: () => {},

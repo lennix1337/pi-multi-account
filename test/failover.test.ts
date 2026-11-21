@@ -1,9 +1,3 @@
-/**
- * State-machine tests for pi-multi-account.
- *
- * The harness drives the real extension in Pi's actual event order:
- * provider responses (possibly retried) -> final assistant message -> agent_end.
- */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -35,17 +29,6 @@ function usesModernAgentContext(version: string): boolean {
 
 const AGENT_DIR = mkdtempSync(join(tmpdir(), "pmacct-test-"));
 process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
-// The Cursor provider lives in a separate, optional repo. Point the bridge at a directory we
-// control so a test can toggle "installed" / "not installed" — the default is NOT installed,
-// which is what the overwhelming majority of users run.
-// The canonical slot-proxy port decides which extension instance publishes the shared files.
-// Tests routinely leave an instance listening, so every setup() gets its own port: otherwise
-// the first instance would own the port for the whole file and every later publication test
-// would silently exercise the non-owner path instead. `reuseSlotProxyPort` is how a test asks
-// for the opposite — a second instance contending for a port the first one still holds.
-// The ports come from the OS and stay bound by this process until a test takes one: a fixed
-// sequence collided with a second run of this file (parallel worktrees) and with a live Pi on
-// 41977, which turned the publication tests into non-owner runs and hung the blocker test.
 const SLOT_PROXY_PORT_POOL = await Promise.all(
 	Array.from({ length: 1024 }, async () => {
 		const server = createServer();
@@ -83,9 +66,6 @@ export function registerCursorProvider(pi, id, _port, models) {
 }
 `;
 
-// Cursor's OAuth refresh, as the vendored provider exposes it (`auth.ts` next to
-// `cursor-shared.ts`). It rotates the refresh token — like Anthropic and Cursor really do —
-// and records every call, so a test can prove a token was NOT burned.
 const CURSOR_REFRESH_LOG = join(AGENT_DIR, "cursor-refresh-calls.json");
 const CURSOR_AUTH_STUB = `import { appendFileSync } from "node:fs";
 export async function refreshCursorToken(token) {
@@ -105,9 +85,6 @@ function cursorRefreshCalls(): string[] {
 function installCursorProvider() {
 	mkdirSync(CURSOR_ROOT, { recursive: true });
 	writeFileSync(join(CURSOR_ROOT, "cursor-shared.ts"), CURSOR_PROVIDER_STUB);
-	// The forced-refresh path imports this from the SAME root — it used to import it from
-	// ~/.pi/agent/git/github.com/ndraiman/pi-cursor-provider/auth.ts, a path that no longer
-	// exists for anyone since the provider was vendored (issue #20).
 	writeFileSync(join(CURSOR_ROOT, "auth.ts"), CURSOR_AUTH_STUB);
 	rmSync(CURSOR_REFRESH_LOG, { force: true });
 }
@@ -116,9 +93,6 @@ function uninstallCursorProvider() {
 	rmSync(CURSOR_ROOT, { recursive: true, force: true });
 }
 
-// A Cursor provider that is present but UNLOADABLE is covered in test/cursor-optional.test.ts:
-// that case needs a fresh process, because the cursor bridge caches the loaded module and an
-// earlier test in this file loads a working stub.
 
 const {
 	default: piMultiAccount,
@@ -323,7 +297,6 @@ const ONE_ACCOUNT: Account = {
 
 let messageTimestamp = 1;
 
-/** Shuts down each fixture a test left running; a leftover's real-time wake would otherwise fire inside a later fake-clock test. */
 const liveFixtures = new Set<() => Promise<unknown>>();
 const fixtureInfo = new WeakMap<() => Promise<unknown>, { id: number; line: number | null; active: () => boolean }>();
 let nextFixtureId = 0;
@@ -344,7 +317,7 @@ function setup(opts: {
 	seedCooldownsMsFromNow?: Record<string, number>;
 	seedState?: Record<string, unknown>;
 	setModelFailures?: string[];
-	/** Pi 1.1 rejects proxy api_key auth when a later registration drops apiKey. */
+	// external: Pi 1.1 rejects proxy api_key auth if a later registration omits apiKey.
 	checkProxyAuth?: boolean;
 	setModelBlocks?: () => Promise<void>;
 	forceRefreshResults?: Record<
@@ -360,13 +333,7 @@ function setup(opts: {
 		headers?: Record<string, string>;
 	};
 	compactFn?: (...args: any[]) => Promise<any>;
-	/**
-	 * A host whose `ctx.compact()` answers through NEITHER callback.
-	 *
-	 * Not hypothetical: Pi >=0.84.3 reports cancellation through `session_compact_failed`, and
-	 * the guard's own `onComplete`/`onError` may never be called. If that leaves the guard's
-	 * in-flight flag set, it never asks for another summary for the rest of the session.
-	 */
+	// external: Pi 0.84.3 and later can report cancellation without calling compact callbacks.
 	compactSilent?: boolean;
 	contextUsage?: {
 		tokens: number | null;
@@ -377,50 +344,24 @@ function setup(opts: {
 	continueBlocks?: () => Promise<void>;
 	omitContinueAgent?: boolean;
 	omitSendUserMessage?: boolean;
-	/** Reject this many prompt-injection attempts before accepting one. */
 	sendUserMessageRejects?: number;
-	/** Host dispatch may resolve only after the resumed run ends. */
 	sendUserMessageBlocks?: () => Promise<void>;
-	/** Models the HOST (Pi) itself publishes for the base Codex provider. */
 	hostCodexModels?: string[];
-	/** Optional exact host catalog by provider, used for cross-family/apex routing tests. */
 	hostModelsByProvider?: Record<string, string[]>;
-	/** Accounts Pi does NOT know any model for — logged in, but unusable until configured. */
 	unknownProviders?: string[];
-	/** The level the SESSION runs at (what `--thinking` / `/thinking` produced). */
 	thinkingLevel?: string;
-	/** Thinking level Pi applies while changing models, before model_select is emitted. */
 	modelSetThinkingLevel?: string;
-	/** Deliver a model-induced thinking event before or after model_select. */
 	modelThinkingLevelSelectDelivery?: "before" | "after";
-	/** Emit setThinkingLevel's fire-and-forget host event, optionally after a prior-handler yield. */
 	thinkingLevelSelectDelivery?: "sync" | "delayed";
-	/** Highest thinking level a provider's models support — Pi clamps anything above it. */
 	thinkingCaps?: Record<string, string>;
-	/** Pi settings.json defaultProvider/defaultModel, used after catalog load. */
 	settings?: { defaultProvider: string; defaultModel: string };
-	/** Simulate a child process launched by pi-subagents. */
 	subagentChild?: boolean;
-	/** Simulate pi-web's session daemon, which hosts many independent root sessions in one process. */
 	piWebHost?: boolean;
-	/** Simulate any other multi-session SDK host opting in via the host-neutral switch. */
 	independentRoots?: boolean;
-	/** Simulate Pi CLI arguments before the extension is loaded. */
 	cliArgs?: string[];
-	/**
-	 * Shape of the host's AuthStorage.
-	 *
-	 * "pi-0.84" is the REAL surface of pi 0.84.x: `read`/`modify`/`delete`/`list`/`reload`,
-	 * and neither the `set()` this extension used to persist with nor a host-side
-	 * `forceRefreshProvider`. Every other test uses the convenience stub that provides
-	 * `forceRefreshProvider`, which short-circuits the extension's own refresh path.
-	 */
 	hostAuthStorage?: "pi-0.84";
-	/** Keep actual persisted config when constructing a fresh instance for restart regressions. */
 	preserveConfig?: boolean;
-	/** Contend for the port the previous instance is still listening on, instead of a fresh one. */
 	reuseSlotProxyPort?: boolean;
-	/** Use an independently allocated port for tests that must own shared publication. */
 	slotProxyPort?: number;
 }) {
 	if (opts.slotProxyPort !== undefined) {
@@ -501,9 +442,7 @@ function setup(opts: {
 		aborts: 0,
 		authReloads: 0,
 	};
-	// Pi's real thinking-level semantics: a single mutable session level, clamped to what the
-	// CURRENT model supports, and re-clamped on every model switch (see AgentSession.setModel).
-	// That re-clamp is exactly how the level used to drift downward across failovers.
+	// external: Pi clamps its mutable session thinking level to the selected model.
 	const THINKING_ORDER = [
 		"off",
 		"minimal",
@@ -522,10 +461,7 @@ function setup(opts: {
 			: level;
 	};
 	let idle = opts.idle ?? true;
-	// Pi runs EVERY handler registered for an event, threading the result through for `context`
-	// and `message_end`. Keeping only the last one registered (which this fixture used to do) made
-	// the harness silently disagree with the host the moment a second handler was added for an
-	// event — the interrupted-turn hook stopped being exercised at all. Chain them, like Pi does.
+	// external: Pi runs all registered handlers and threads context results through them.
 	const events: Record<string, Array<(event: any, ctx?: any) => any>> = {};
 	const busEvents = new Map<string, Array<(payload: any) => void>>();
 	const commands: Record<string, (args: string, ctx: any) => any> = {};
@@ -541,8 +477,7 @@ function setup(opts: {
 			? mkModel(opts.current.provider, opts.current.id)
 			: undefined,
 		isIdle: () => idle,
-		// The host's ctx.compact(): fire-and-forget, resolves through the callbacks. The guard calls
-		// this only at a settled boundary, because the real one begins with an abort().
+		// external: Pi ctx.compact resolves through callbacks rather than its return value.
 		compact: (options?: { onComplete?: (r: unknown) => void; onError?: (e: Error) => void }) => {
 			rec.compacts.push(options ?? {});
 			if (opts.compactSilent) return;
@@ -710,7 +645,6 @@ function setup(opts: {
 				baseUrl: providerConfig?.baseUrl,
 			});
 			if (providerConfig?.models) {
-				// Native catalogs already own provider identity, as in ModelRuntime.
 				registeredModels.set(
 					name,
 					providerConfig.models.map((model) => ({ provider: name, ...model })),
@@ -745,7 +679,7 @@ function setup(opts: {
 			if (opts.checkProxyAuth && config?.baseUrl?.startsWith("http://127.0.0.1:") && !config.apiKey) return false;
 			if (opts.setModelBlocks) await opts.setModelBlocks();
 			ctx.model = mkModel(model.provider, model.id);
-			// Pi applies a model default/clamp before emitting model_select.
+			// external: Pi clamps thinking level before model_select.
 			const previousThinkingLevel = sessionThinkingLevel;
 			sessionThinkingLevel = opts.modelSetThinkingLevel ?? clampThinking(sessionThinkingLevel);
 			if (sessionThinkingLevel !== previousThinkingLevel) {
@@ -784,9 +718,9 @@ function setup(opts: {
 		appendEntry: () => {},
 		getThinkingLevel: () => sessionThinkingLevel,
 		setThinkingLevel: (level: string) => {
-			rec.thinkingLevels.push(level); // what the extension ASKED for
+			rec.thinkingLevels.push(level);
 			const previousLevel = sessionThinkingLevel;
-			sessionThinkingLevel = clampThinking(level); // what the host actually applied
+			sessionThinkingLevel = clampThinking(level);
 			if (
 				opts.thinkingLevelSelectDelivery &&
 				sessionThinkingLevel !== previousLevel
@@ -799,13 +733,8 @@ function setup(opts: {
 		},
 	};
 
-	// Simulate a host Pi build that predates pi.continueAgent() (seamless in-place resume). The
-	// extension must degrade to injecting the continuation prompt, never dead-end with a red error.
 	if (opts.omitContinueAgent) delete pi.continueAgent;
-	// Simulate a host with no prompt-injection fallback either — the worst case, where the extension
-	// can still switch accounts but cannot auto-continue at all.
 	if (opts.omitSendUserMessage) delete pi.sendUserMessage;
-	// Tests always take this hook so they never import the real compact() (network).
 	(pi as any).__testCompactFn = opts.compactFn;
 
 	const previousSubagentChild = process.env.PI_SUBAGENT_CHILD;
@@ -814,8 +743,6 @@ function setup(opts: {
 	const previousArgv = process.argv;
 	if (opts.subagentChild) process.env.PI_SUBAGENT_CHILD = "1";
 	else delete process.env.PI_SUBAGENT_CHILD;
-	// Tests run inside whatever process launched the test runner — which may itself be a
-	// pi-web session — so the host markers must be scrubbed unless the test opts in.
 	if (opts.piWebHost) process.env.PI_WEB_SESSION = "1";
 	else delete process.env.PI_WEB_SESSION;
 	if (opts.independentRoots) process.env.PI_MULTI_ACCOUNT_INDEPENDENT_ROOTS = "1";
@@ -839,7 +766,7 @@ function setup(opts: {
 		const handlers = events[event];
 		if (!handlers || handlers.length === 0) return undefined;
 		if (event === "context") {
-			// Like Pi's emitContext: `context` handlers, then `context_with_system` ones on the result.
+			// external: Pi calls context handlers before context_with_system handlers.
 			let messages = payload?.messages;
 			let changed = false;
 			for (const handler of [...handlers, ...(events.context_with_system ?? [])]) {
@@ -889,8 +816,6 @@ function setup(opts: {
 			return {};
 		}
 	};
-	// Stays synchronous on purpose: the host shapes the payload inline, and the tests read the
-	// shaped result straight back rather than awaiting it.
 	const beforeReq = (payload: unknown) => {
 		let result: any;
 		for (const handler of events.before_provider_request ?? []) {
@@ -901,12 +826,10 @@ function setup(opts: {
 	};
 	const command = async (args: string) =>
 		commands["multi-account"]?.(args, ctx);
-	// What the editor offers while the user types `/multi-account <prefix>`.
 	const complete = (prefix: string) => completions["multi-account"]?.(prefix);
 	const input = async (text: string, images?: any[]) =>
 		fire("input", { type: "input", text, images, source: "interactive" });
 
-	// The level the session is actually running at, and the user changing it via `/thinking`.
 	const thinkingLevel = () => sessionThinkingLevel;
 	const userSetsThinking = (level: string) => {
 		sessionThinkingLevel = clampThinking(level);
@@ -921,7 +844,6 @@ function setup(opts: {
 
 	const shutdown = () => fire("session_shutdown", {});
 	const fixtureId = ++nextFixtureId;
-	// Keep only the caller's line number, never a stack or fixture contents.
 	const caller = new Error().stack?.split("\n").slice(2)
 		.map((line) => line.match(/failover\.test\.ts:(\d+):\d+/)?.[1])
 		.find(Boolean);
@@ -946,10 +868,8 @@ function setup(opts: {
 		providerConfigs,
 		providerDefinitions,
 		completionRouter: () => rec.completionRouters.at(-1),
-		/** Emit on the shared extension bus, as another extension (pi-subagents) would. */
 		emitBus: (name: string, payload: any) => pi.events.emit(name, payload),
 		hasHandler: (event: string) => (events[event]?.length ?? 0) > 0,
-		/** Register a handler AHEAD of ours, as an extension loaded earlier (e.g. OptChat) would be. */
 		prependHandler: (event: string, handler: any) => (events[event] ??= []).unshift(handler),
 	};
 }
@@ -1169,20 +1089,17 @@ test("a failed pin write preserves the previous runtime preference", async () =>
 	assert.deepEqual(t.rec.setModels, []);
 });
 
-/** Inside onFakeClock, waiting advances the fake clock instead of the wall clock. */
 let fakeTick: ((ms: number) => Promise<void>) | undefined;
 
 function wait(ms: number): Promise<unknown> {
 	return fakeTick ? fakeTick(ms) : new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Fixtures share this file's agent directory, so one a test left running would still write to it. */
 async function shutDownLiveFixtures() {
 	for (const shutdown of liveFixtures) await shutdown().catch(() => undefined);
 	liveFixtures.clear();
 }
 
-/** A test whose recovery timers run on the fake clock: its waits cost no wall time, and every timer still fires in order. */
 function fakeClockTest(name: string, body: () => Promise<void>) {
 	test(name, async () => {
 		await shutDownLiveFixtures();
@@ -1421,7 +1338,6 @@ test("non-provider background failures stop without poisoning route health", asy
 	assert.deepEqual(t.ctx.model, current);
 });
 
-/** One Claude account and one Codex slot, Claude first in priority. */
 function claudeAndCodexSetup(input: {
 	current: { provider: string; id: string };
 	hostCodexModels: string[];
@@ -1473,9 +1389,6 @@ test("a subagent model on a spent account is routed to the same tier on a ready 
 	await t.fire("session_shutdown");
 });
 
-// Live 2026-11-01: parent on anthropic-account-2/claude-opus-5-5 (also the saved default), the
-// Codex subagent default spent; children were routed to anthropic/claude-opus-5-5, another
-// account (no credit there) and the saved default's Opus tier instead of the asked one.
 test("a routed subagent stays on the parent's account and keeps the asked tier, not the saved default", async () => {
 	const t = setup({
 		accounts: {
@@ -1564,9 +1477,6 @@ test("Cursor background payloads use the host side-channel session identity", as
 	assert.deepEqual(t.rec.setModels, []);
 });
 
-// ---------------------------------------------------------------------------
-// Usage footer
-// ---------------------------------------------------------------------------
 
 test("startup and next can activate a ready Codex slot after catalog sync without rediscover", async () => {
 	const t = setup({
@@ -1661,9 +1571,6 @@ test("usage footer countdown refreshes while the session is idle", async () => {
 	const first = readCountdown();
 	const updatesAfterStart = t.rec.statuses.length;
 
-	// The countdown is minute-granular, so which minute it lands on depends on how long the
-	// harness took to boot (that made this assertion flaky). What must hold is that the idle
-	// timer keeps repainting the footer and the countdown only ever runs down.
 	await wait(1_100);
 	assert.ok(
 		t.rec.statuses.length > updatesAfterStart,
@@ -1950,9 +1857,6 @@ test(
 	},
 );
 
-// ---------------------------------------------------------------------------
-// One final error -> one decision
-// ---------------------------------------------------------------------------
 
 test("HTTP retry responses never switch early; one final 429 switches exactly once", async () => {
 	const t = setup({
@@ -2028,7 +1932,6 @@ test("Cursor resource_exhausted (gRPC quota) is a limit, so failover moves off t
 		"cursor-grok-4.6",
 		"Connect error resource_exhausted: Error",
 	);
-	// Must have switched away from the spent Cursor account — not died in place.
 	assert.ok(
 		t.rec.setModels.length > 0 && t.rec.setModels[0] !== "cursor/cursor-grok-4.6",
 		`resource_exhausted must trigger failover, got ${JSON.stringify(t.rec.setModels)}`,
@@ -2125,9 +2028,6 @@ test("the same final assistant error is handled only once", async () => {
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Cooldowns, ordering, and duplicate accounts
-// ---------------------------------------------------------------------------
 
 test("picks a fresh account and skips one that is still on cooldown", async () => {
 	const accounts: Account = {
@@ -2459,9 +2359,6 @@ test("re-login clears a persisted invalidation when the slot credential changes"
 	assert.ok(!state.exhaustedUntilByProvider?.[provider]);
 });
 
-// ---------------------------------------------------------------------------
-// Auth failures are counted per final assistant message
-// ---------------------------------------------------------------------------
 
 test("one final 401 is counted once, does not invalidate OAuth, and fails over", async () => {
 	const t = setup({
@@ -2616,10 +2513,6 @@ test("a temporary forced-refresh failure cools the slot without permanently inva
 });
 
 test("usage footer survives an OAuth token rotation instead of blanking", async () => {
-	// Real report: the quota footer showed nothing for the current Codex account even though fresh
-	// usage was stored. One cause: the OAuth access token rotates, so the snapshot's credentialHash
-	// no longer matches and cachedUsage() rejected it — leaving the footer blank. For DISPLAY we now
-	// fall back to the last stored snapshot: a slightly stale "% left" beats an empty footer.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -2644,7 +2537,6 @@ test("usage footer survives an OAuth token rotation instead of blanking", async 
 					provider: "openai-codex-account-2",
 					family: "codex",
 					fetchedAt: now,
-					// Hash from the PREVIOUS token — no longer matches the rotated one above.
 					credentialHash: "stale-hash-from-old-token",
 					primary: { usedPercent: 98, resetAt: now + 3_600_000 },
 					secondary: { usedPercent: 32, resetAt: now + 7 * 86_400_000 },
@@ -2666,8 +2558,7 @@ test("usage footer survives an OAuth token rotation instead of blanking", async 
 });
 
 test("Qwen shows live availability / rate-limit status (it has no quota API)", async () => {
-	// Alibaba publishes no usage/quota endpoint, so instead of a useless "no usage endpoint" the
-	// status must show the account's real live state: available now, or rate-limited until recovery.
+	// external: Alibaba does not publish a usage or quota endpoint.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "ar" },
@@ -2682,7 +2573,6 @@ test("Qwen shows live availability / rate-limit status (it has no quota API)", a
 		`available before any limit; notifies=${t.rec.notifies.join(" | ")}`,
 	);
 
-	// A caught 429 cools alibaba → its status must now read rate-limited, not "available".
 	await finishError(t, "alibaba", "qwen3.7-max", "usage limit reached");
 	t.setCurrent("alibaba", "qwen3.7-max");
 	t.rec.notifies.length = 0;
@@ -2694,9 +2584,7 @@ test("Qwen shows live availability / rate-limit status (it has no quota API)", a
 });
 
 test("Qwen requests rewrite the OpenAI-only 'developer' role to 'system'", async () => {
-	// Real report: with a WORKING alibaba key, turns routed to Qwen failed with
-	// `400 invalid_parameter_error: developer is not one of ['system',...]`. Pi sends the system
-	// instructions as the OpenAI-only `developer` role; Qwen's compatible-mode API rejects it.
+	// external: Qwen rejects the OpenAI developer role.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "ar" },
@@ -2725,7 +2613,7 @@ test("Qwen requests rewrite the OpenAI-only 'developer' role to 'system'", async
 		"Qwen must never receive the `developer` role",
 	);
 
-	// Codex/OpenAI DOES support `developer` — it must be left untouched there.
+	// external: Codex supports the developer role.
 	t.setCurrent("openai-codex-account-2", "gpt-5.5");
 	const codexPayload = {
 		messages: [
@@ -2742,11 +2630,6 @@ test("Qwen requests rewrite the OpenAI-only 'developer' role to 'system'", async
 });
 
 test("manual switch revives a stuck invalidation and selects the account", async () => {
-	// Real report: `/multi-account switch alibaba` answered "no usable model, make sure it is logged
-	// in" for a freshly-keyed account. Cause: the slot was invalidated earlier (e.g. by the wrong
-	// Qwen endpoint, since fixed). markInvalid stored the CURRENT key's hash, so the hash-based
-	// auto-revive never fires while the key is unchanged — the invalidation is permanent even though
-	// its cause is gone. An explicit switch is the user overriding that: it must revive and select.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "ar" },
@@ -2755,8 +2638,6 @@ test("manual switch revives a stuck invalidation and selects the account", async
 		current: { provider: "alibaba", id: "qwen3.7-max" },
 	});
 	await t.fire("session_start");
-	// Terminally invalidate alibaba WITHOUT changing its key → the invalidation sticks across
-	// discovery (currentHash === record.tokenHash), reproducing the stuck state.
 	await finishError(t, "alibaba", "qwen3.7-max", "invalid api key");
 	assert.ok(
 		t.readState().invalidatedByProvider?.alibaba,
@@ -2863,9 +2744,6 @@ test("rotated (refreshed) tokens 401ing past the threshold invalidate a refresha
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		config: { autoContinue: false },
 	});
-	// MAX_CONSECUTIVE_AUTH_FAILURES is 8 in v1.9.0+. Each attempt rotates the access token
-	// (simulating Pi refreshing and the NEW token still failing) — distinct refreshed tokens
-	// advance the kill counter. Below the threshold the account must stay alive.
 	for (let attempt = 0; attempt < 7; attempt++) {
 		writeFileSync(
 			AUTH,
@@ -2891,7 +2769,6 @@ test("rotated (refreshed) tokens 401ing past the threshold invalidate a refresha
 		!t.readState().invalidatedByProvider?.anthropic,
 		"seven rotated-token 401s must NOT invalidate (threshold is 8)",
 	);
-	// One more rotated-token failure crosses the threshold → invalidate.
 	writeFileSync(
 		AUTH,
 		JSON.stringify({
@@ -2915,8 +2792,6 @@ test("rotated (refreshed) tokens 401ing past the threshold invalidate a refresha
 });
 
 test("repeated 401s on the SAME unrefreshed token never permanently invalidate", async () => {
-	// Reproduces the alias-refresh bug class: the access token never changes between 401s because the
-	// refresh isn't reaching the wire. The account must stay recoverable, not be killed-until-relogin.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		config: { autoContinue: false },
@@ -3113,9 +2988,6 @@ test("a user prompt arriving during an automatic turn is queued as a follow-up i
 	]);
 });
 
-// ---------------------------------------------------------------------------
-// User control and session-bound automatic resume
-// ---------------------------------------------------------------------------
 
 test("Esc abort stops the chain and clears pending resume", async () => {
 	const t = setup({
@@ -3290,7 +3162,6 @@ test("a cooled account stays skipped after its OAuth access token refreshes", as
 	});
 	await t.fire("session_start");
 	t.rec.setModels.length = 0;
-	// Pi rotates the OAuth access token in place — same workspace membership, new token.
 	writeFileSync(
 		AUTH,
 		JSON.stringify({
@@ -3378,7 +3249,6 @@ test("manual next cycles through the available accounts and skips cooling ones",
 	const t = setup({
 		accounts,
 		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
-		// Only anthropic-account-2 and openai-codex-account-4 can work now; next must never visit the others.
 		seedCooldownsMsFromNow: {
 			anthropic: 4 * 60 * 60 * 1000,
 			"openai-codex-account-2": 4 * 60 * 60 * 1000,
@@ -3436,9 +3306,6 @@ test("high reasoning is the baseline and is restored across every provider rotat
 	);
 });
 
-// ---------------------------------------------------------------------------
-// v1.14.2: the session owns the thinking level; the extension only preserves it
-// ---------------------------------------------------------------------------
 
 const THINKING_ACCOUNTS: Account = {
 	anthropic: {
@@ -3458,7 +3325,7 @@ test("a per-agent thinking level (--thinking low) is never clobbered to the glob
 	const t = setup({
 		accounts: THINKING_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		thinkingLevel: "low", // this delegated agent is configured for low thinking
+		thinkingLevel: "low",
 	});
 
 	await t.fire("session_start");
@@ -3474,7 +3341,6 @@ test("a per-agent thinking level (--thinking low) is never clobbered to the glob
 		`the global default must never be forced onto the session: ${JSON.stringify(t.rec.thinkingLevels)}`,
 	);
 
-	// ...and it stays low across a failover switch too.
 	await t.command("next");
 	assert.equal(t.thinkingLevel(), "low");
 	assert.ok(t.rec.thinkingLevels.every((level) => level === "low"));
@@ -3485,7 +3351,6 @@ test("a weaker fallback model's clamp never ratchets the thinking level down", a
 		accounts: THINKING_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		thinkingLevel: "high",
-		// The codex account's models top out at medium — Pi clamps high down to medium there.
 		thinkingCaps: { "openai-codex-account-2": "medium" },
 	});
 
@@ -3493,13 +3358,11 @@ test("a weaker fallback model's clamp never ratchets the thinking level down", a
 	await t.fire("agent_start");
 	assert.equal(t.thinkingLevel(), "high");
 
-	await t.command("next"); // → codex, where high is clamped to medium
+	await t.command("next");
 	assert.equal(t.thinkingLevel(), "medium", "the host clamp is expected here");
 
-	// The next turn starts on the clamped account. The clamp is the MODEL's cap, not the user's
-	// choice: it must not become the new intent.
 	await t.fire("agent_start");
-	await t.command("next"); // → back to a provider that supports high
+	await t.command("next");
 	assert.equal(
 		t.thinkingLevel(),
 		"high",
@@ -3522,7 +3385,7 @@ test("a mid-session /thinking change is honoured on the next turn and across fai
 	await t.fire("agent_start");
 	assert.equal(t.thinkingLevel(), "high");
 
-	t.userSetsThinking("low"); // user runs /thinking low between turns
+	t.userSetsThinking("low");
 	await t.fire("agent_start");
 	assert.equal(
 		t.thinkingLevel(),
@@ -3543,7 +3406,7 @@ test("an explicit reasoningLevel in config still forces that level on every turn
 		accounts: THINKING_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		thinkingLevel: "low",
-		config: { reasoningLevel: "high" }, // opt-in override
+		config: { reasoningLevel: "high" },
 	});
 
 	await t.fire("session_start");
@@ -3601,14 +3464,11 @@ test("manual next reaches an account blocked only by stale usage while free prov
 });
 
 test("manual next lands on a ready account before one believed spent", async () => {
-	// Real report: next kept landing on a Codex account at 100% while another Codex account sat at
-	// 0%. A spent account stays reachable (it is the fallback when nothing else is ready), not first.
 	const accounts: Account = {
 		anthropic: { type: "oauth", access: "a", refresh: "ar" },
 		"openai-codex-account-2": { type: "oauth", access: "b", refresh: "br", accountId: "b" },
 		"openai-codex-account-4": { type: "oauth", access: "d", refresh: "dr", accountId: "d" },
 	};
-	// Cool each in turn, so one run has the spent account first in the ring.
 	for (const [spent, ready] of [
 		["openai-codex-account-2", "openai-codex-account-4"],
 		["openai-codex-account-4", "openai-codex-account-2"],
@@ -3646,14 +3506,11 @@ test("/multi-account use autocompletes accounts as they are typed, ready ones fi
 	assert.deepEqual(t.complete("use codex-account-4")?.map((item: any) => item.value), [
 		"use openai-codex-account-4",
 	]);
-	// The completed line runs as typed: it lands on the account the list offered.
 	await t.command(all[0].value);
 	assert.equal(t.ctx.model.provider, "openai-codex-account-4");
 });
 
 test("manual next does not land on an account whose last usage reading says it is spent and refusing", async () => {
-	// Real report: `next` alternated between an account refusing with a weekly 429 and Anthropic.
-	// The stale reading (serviceable:false, weekly window at 100%) must still count as spent.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -3690,9 +3547,6 @@ test("manual next does not land on an account whose last usage reading says it i
 });
 
 test("manual next stays put when every other account is cooling", async () => {
-	// Real report: `next` moved from a working account into an OpenAI account at 100% and
-	// refusing, because manual rotation ignored cooldowns. `next` now means the next account that
-	// can work right now; when none can, the current account stays and the user is told so.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -3743,10 +3597,6 @@ test("manual next skips a cooling account and lands on the next ready one", asyn
 });
 
 test("manual next never downgrades to a weaker model of the same account (no mini flap)", async () => {
-	// Real report: on gpt-5.4 with gpt-5.5 momentarily unavailable, repeated /multi-account next
-	// flapped gpt-5.4 ↔ gpt-5.4-mini. HARD RULE: failover switches the ACCOUNT, never demotes the
-	// model. With only one account whose flagship is unavailable, next must NOT drop to a weaker
-	// model — it holds the current model and reports that there is nothing better to move to.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -3761,8 +3611,6 @@ test("manual next never downgrades to a weaker model of the same account (no min
 		seedState: {
 			stateVersion: 5,
 			exhaustedUntilByProvider: {},
-			// The flagship gpt-5.5 is individually unavailable for a while; only weaker models
-			// (gpt-5.4-mini, spark) are "free" — exactly the trap that produced the flap.
 			exhaustedUntilByModel: {
 				"openai-codex-account-2/gpt-5.5": now + 2 * 60 * 60 * 1000,
 			},
@@ -3785,10 +3633,6 @@ test("manual next never downgrades to a weaker model of the same account (no min
 });
 
 test("manual next keeps every account selectable and always at its flagship model", async () => {
-	// Real report: after pressing /multi-account next enough times, only openai stayed in the
-	// queue. Cause: manual next cooled the account it left for 5 min, so after one lap every
-	// account was "cooling" and the rotation collapsed. Manual rotation is a user override, not a
-	// rate-limit event, so it must NOT record a cooldown — every account stays selectable.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "ar" },
@@ -3836,7 +3680,6 @@ fakeClockTest("resume fires on whichever account recovers first, not rotation or
 			accountId: "b",
 		},
 	};
-	// codex-2 (rotation slot 1) recovers FIRST; anthropic is the failed model, cooled long.
 	const t = setup({
 		accounts,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -3874,7 +3717,6 @@ test("a long over-estimated cooldown is corrected by fresh usage and resumes", a
 			exhaustedUntilByModel: {},
 			lastProbeAtByProvider: {},
 			invalidatedByProvider: {},
-			// Fresh usage says the 5h window is empty — the account is actually free again.
 			usageByProvider: {
 				anthropic: {
 					provider: "anthropic",
@@ -3887,7 +3729,6 @@ test("a long over-estimated cooldown is corrected by fresh usage and resumes", a
 		},
 	});
 	await t.fire("session_start");
-	// 429 with no reset hint → recorded cooldown defaults to a long (6h) estimate.
 	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate limit");
 	assert.equal(
 		t.rec.continueCalls.length,
@@ -3895,7 +3736,6 @@ test("a long over-estimated cooldown is corrected by fresh usage and resumes", a
 		"usage reconciliation should resume immediately on the same account",
 	);
 	assert.equal(t.rec.sent.length, 0);
-	// Without reconciliation this would sleep ~6h; usage shows recovery, so the next poll resumes.
 	await wait(450);
 	assert.equal(
 		t.rec.continueCalls.length,
@@ -3905,11 +3745,6 @@ test("a long over-estimated cooldown is corrected by fresh usage and resumes", a
 });
 
 test("a session limit the usage window can't see is not hot-retried every second", async () => {
-	// Real report: an account 429'd "usage limit has been reached", but its usage-% window still
-	// showed headroom (session/rate limits aren't in that window). The code trusted usage, reported
-	// the account "free now", scheduled a ~1s retry, got 429 again, and looped — while the displayed
-	// cooldown said hours. After the SECOND limit error the usage reading must be distrusted so the
-	// account is benched (a real future recovery), not hot-retried.
 	const now = Date.now();
 	const t = setup({
 		accounts: ONE_ACCOUNT,
@@ -3921,8 +3756,6 @@ test("a session limit the usage window can't see is not hot-retried every second
 			exhaustedUntilByModel: {},
 			lastProbeAtByProvider: {},
 			invalidatedByProvider: {},
-			// Usage claims the account is free (primary window at 50%, reset far away) even though the
-			// API keeps rejecting it — the exact "usage lies about a session limit" shape.
 			usageByProvider: {
 				anthropic: {
 					provider: "anthropic",
@@ -3937,16 +3770,12 @@ test("a session limit the usage window can't see is not hot-retried every second
 	await t.fire("session_start");
 	await finishError(t, "anthropic", "claude-opus-4-8", "usage limit has been reached");
 	await finishError(t, "anthropic", "claude-opus-4-8", "usage limit has been reached");
-	// Let several poll cycles elapse. The lying "usage says free" must no longer wipe the recorded
-	// cooldown, so the account stays benched with a real FUTURE recovery instead of being cleared and
-	// hot-retried. (Old code deleted the cooldown via applyUsageToCooldown → state was empty.)
 	await wait(260);
 	const until = t.readState().exhaustedUntilByProvider?.anthropic;
 	assert.ok(
 		typeof until === "number" && until > Date.now() + 60_000,
 		`a repeatedly session-limited account must stay benched with a real cooldown, got ${JSON.stringify(until)}`,
 	);
-	// And the paused session must wait for that real recovery, never announce a ~seconds retry.
 	assert.ok(
 		t.rec.notifies.some((m) => /retry automatically in ~\d+[hm]\b/.test(m)) &&
 			!t.rec.notifies.some((m) => /retry automatically in ~\d+s\b/.test(m)),
@@ -3954,12 +3783,6 @@ test("a session limit the usage window can't see is not hot-retried every second
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Bogus far-future cooldowns must never evict a live account for weeks (v1.13.7)
-// Regression: a maxed long/rolling limit window (or a mis-parsed reset) recorded a
-// weeks-away cooldown; the account was skipped forever because cooling-down accounts
-// are never re-probed. openai-codex-account-2 was locked until Aug 3 in the wild.
-// ---------------------------------------------------------------------------
 
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 
@@ -3970,7 +3793,6 @@ test("a persisted far-future cooldown is clamped to the live ceiling on load", a
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		seedState: {
 			stateVersion: 5,
-			// 30 days away — the exact class of value seen in the wild (until 2026-08-03).
 			exhaustedUntilByProvider: { [provider]: now + 30 * 24 * 60 * 60 * 1000 },
 			exhaustedUntilByModel: {},
 			lastProbeAtByProvider: {},
@@ -3979,7 +3801,6 @@ test("a persisted far-future cooldown is clamped to the live ceiling on load", a
 		},
 	});
 	await t.fire("session_start");
-	// Force a persist of the clamped map via a normal failover cycle.
 	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate limit");
 	const until = t.readState().exhaustedUntilByProvider?.[provider];
 	assert.ok(until, "the cooldown is clamped, not deleted");
@@ -3996,7 +3817,6 @@ test("a 429 whose error body carries a weeks-away resets_at is capped at the cei
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
 	await t.fire("session_start");
-	// resets_at is unix SECONDS; 30 days out. Taken literally this evicts the account for a month.
 	const resetsAt = Math.floor(now / 1000) + 30 * 24 * 60 * 60;
 	await finishError(
 		t,
@@ -4012,9 +3832,6 @@ test("a 429 whose error body carries a weeks-away resets_at is capped at the cei
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Anthropic OAuth request shaping
-// ---------------------------------------------------------------------------
 
 test("OAuth-marked Anthropic payload gets one billing header", () => {
 	const t = setup({
@@ -4033,8 +3850,6 @@ test("OAuth-marked Anthropic payload gets one billing header", () => {
 	};
 	const once = t.beforeReq(payload) as any;
 	assert.match(once.system[0].text, /^x-anthropic-billing-header:/);
-	// Pinned to the constant in index.ts, never a literal: the weekly version-check workflow bumps
-	// that constant, and a hardcoded copy here would turn every automated bump into a red CI run.
 	const expectedCcVersion = readFileSync(
 		new URL("../index.ts", import.meta.url),
 		"utf8",
@@ -4087,7 +3902,6 @@ test("public Anthropic and Qwen provider streams shape native requests without s
 			assert.ok(body.messages.some((m: any) => m.role === "system"));
 			assert.ok(body.messages.every((m: any) => m.role !== "developer"));
 		}
-		// Rejection is intentional; this is a payload canary, with no live provider call.
 		assert.equal((await stream.result()).stopReason, "error");
 	}
 });
@@ -4105,10 +3919,6 @@ test("non-OAuth Anthropic payload is unchanged", () => {
 	assert.deepEqual(t.beforeReq(payload), payload);
 });
 
-// ---------------------------------------------------------------------------
-// OAuth refresh merge — the base provider and aliases must share this logic so a
-// refreshed access token is never silently dropped (which 401s an account to death).
-// ---------------------------------------------------------------------------
 
 test("a refresh replaces the stale access token (not just the refresh token)", () => {
 	const merged = mergeRefreshedCredentials(
@@ -4137,15 +3947,6 @@ test("a refresh keeps the old refresh token when the provider mints no new one",
 	);
 });
 
-// ---------------------------------------------------------------------------
-// v1.9.0 regressions:
-//  - invalidated accounts no longer carry a 365-day cooldown entry
-//  - /multi-account revive restores an account to rotation
-//  - api_key providers (Ollama, Alibaba) survive a transient 401 without being
-//    killed for a year (only terminal auth patterns invalidate immediately)
-//  - Ollama/Alibaba alias slots (ollama-account-2, alibaba-account-2) are
-//    discovered and join the rotation just like OAuth alias slots.
-// ---------------------------------------------------------------------------
 
 test("invalidation no longer writes a 365-day cooldown entry", async () => {
 	const t = setup({
@@ -4155,10 +3956,8 @@ test("invalidation no longer writes a 365-day cooldown entry", async () => {
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		config: { autoContinue: false },
 	});
-	// Force a terminal invalidation: "invalid api key" matches TERMINAL_AUTH_ERROR_PATTERNS.
 	await finishError(t, "anthropic", "claude-opus-4-8", "invalid api key");
 	assert.ok(t.readState().invalidatedByProvider?.anthropic);
-	// The cooldown map must NOT contain an ~365-day entry for the invalidated account.
 	const until = t.readState().exhaustedUntilByProvider?.anthropic;
 	assert.ok(
 		until === undefined,
@@ -4185,10 +3984,8 @@ test("/multi-account revive restores an invalidated account to rotation", async 
 			fallbacks: ["anthropic", "openai-codex-account-2"],
 		},
 	});
-	// Kill anthropic with a terminal pattern.
 	await finishError(t, "anthropic", "claude-opus-4-8", "invalid api key");
 	assert.ok(t.readState().invalidatedByProvider?.anthropic);
-	// Revive it.
 	await t.command("revive anthropic");
 	assert.ok(
 		!t.readState().invalidatedByProvider?.anthropic,
@@ -4210,14 +4007,11 @@ test("an api_key provider's bare 401 is transient, not a year-long kill", async 
 			fallbacks: ["ollama", "anthropic"],
 		},
 	});
-	// A transient 401 (not "invalid api key", just "401 unauthorized") must NOT
-	// immediately invalidate an api_key slot.
 	await finishError(t, "ollama", "glm-5.2:cloud", "401 unauthorized");
 	assert.ok(
 		!t.readState().invalidatedByProvider?.ollama,
 		"a bare 401 on an api_key provider must not kill it for a year",
 	);
-	// It SHOULD be on a short transient cooldown so selection skips it briefly.
 	const until = t.readState().exhaustedUntilByProvider?.ollama ?? 0;
 	assert.ok(
 		until > Date.now() && until - Date.now() <= 120_000,
@@ -4240,8 +4034,6 @@ test("Ollama alias slots (ollama-account-2) join the rotation", async () => {
 		},
 	});
 	await t.fire("session_start", { reason: "startup" });
-	// The startup notify reports "<N> account(s) in rotation" — with ollama +
-	// ollama-account-2 + anthropic all authed, N must be 3.
 	const startup = t.rec.notifies.find((m) =>
 		m.includes("account(s) in rotation"),
 	);
@@ -4250,7 +4042,6 @@ test("Ollama alias slots (ollama-account-2) join the rotation", async () => {
 		/3 account\(s\) in rotation/.test(startup),
 		`expected 3 accounts in rotation, got: ${startup}`,
 	);
-	// And a real failover lands on an ollama-family provider.
 	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
 	const switchedToOllama = t.rec.setModels.some(
 		(m) => m.startsWith("ollama") || m.startsWith("ollama-account-"),
@@ -4326,8 +4117,6 @@ test("Kimi alias slots (kimi-coding-account-2) join the rotation", async () => {
 });
 
 test("a Kimi subscription slot is registered so /login can offer it", async () => {
-	// The whole point of `add kimi`: the NEXT free slot must exist as a real provider
-	// before the user runs /login, or the picker has nothing to select.
 	const t = setup({
 		accounts: {
 			"kimi-coding": { type: "oauth", access: "k1", refresh: "kr1" },
@@ -4359,7 +4148,6 @@ test("a Kimi subscription slot is registered so /login can offer it", async () =
 		"tok",
 		"requests must authenticate with THIS slot's access token",
 	);
-	// The base provider is Pi's own; the extension must not shadow it.
 	assert.equal(
 		t.providerConfigs.has("kimi-coding"),
 		false,
@@ -4411,9 +4199,6 @@ test("in-process child activations are passive and root reload reacquires owners
 });
 
 test("pi-web hosted sibling sessions each activate: the in-process lease does not demote them", async () => {
-	// pi-web's session daemon (PI_WEB_SESSION=1) hosts many independent root sessions in one
-	// process. The terminal-Pi lease heuristic would demote every session but the first to
-	// subagent-child-passive, silently disabling failover in all of them.
 	const first = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" }, piWebHost: true });
 	first.ctx.sessionManager = { getBranch: () => [] };
 	await first.fire("session_start");
@@ -4430,8 +4215,6 @@ test("pi-web hosted sibling sessions each activate: the in-process lease does no
 });
 
 test("PI_MULTI_ACCOUNT_INDEPENDENT_ROOTS lets any multi-session host opt in", async () => {
-	// Enso and other in-process SDK hosts are not pi-web: they opt in with the host-neutral
-	// switch instead of borrowing pi-web's marker (which other extensions also read).
 	const first = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" }, independentRoots: true });
 	first.ctx.sessionManager = { getBranch: () => [] };
 	await first.fire("session_start");
@@ -4743,8 +4526,6 @@ test("unusable slots never restore hidden OAuth before the last root exits", asy
 });
 
 test("a pi-subagents child process stays passive even under pi-web", async () => {
-	// The runner process inherits PI_WEB_SESSION=1 from the daemon AND sets PI_SUBAGENT_CHILD=1;
-	// the child marker must win over the pi-web lease exemption.
 	const child = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" },
 		subagentChild: true, piWebHost: true,
 		seedState: { lastUserModel: { provider: "anthropic", id: "claude-opus-4-8" } } });
@@ -5024,7 +4805,6 @@ test("internal thinking restores do not become explicit CLI intent", async (suit
 				"the extension's own restore must not persist the one-shot CLI level",
 			);
 
-			// For delayed delivery, make the genuine identical low -> high transition arrive first.
 			t.userSetsThinking("low");
 			await t.fire("thinking_level_select", {
 				level: "low",
@@ -5088,7 +4868,6 @@ test("native model thinking resets do not become explicit CLI intent", async (su
 				"the model's native reset must not become remembered user intent",
 			);
 
-			// Recreate the same high -> low key after its one-shot evidence was consumed.
 			t.userSetsThinking("high");
 			await t.fire("thinking_level_select", {
 				level: "high",
@@ -5548,7 +5327,6 @@ test("a keyed Kimi slot is published for bare children without publishing its OA
 	);
 	assert.ok(slot.models.some((model: { id: string }) => model.id === "k3"));
 	assert.equal(modelsJson.providers?.["kimi-coding-account-3"], undefined);
-	// settings.json untouched — Pi owns defaults; we only provision resolution data.
 	assert.equal(existsSync(SETTINGS), false);
 });
 
@@ -5662,7 +5440,6 @@ test("a preference that cannot be saved says so instead of failing silently", as
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
 	await t.fire("session_start");
-	// A directory where config.json should be makes every write fail.
 	rmSync(CONFIG, { force: true });
 	mkdirSync(CONFIG);
 	try {
@@ -5697,8 +5474,6 @@ test("failover under only-active preserves all registered routes", async () => {
 		(codex?.models ?? 0) > 0,
 		"the new active account must be visible in /model again",
 	);
-	// The spent account here is Pi's OWN `anthropic` provider, not a slot this extension
-	// invented, so the filter must leave it alone — see the only-active invariant below.
 	assert.ok(
 		![...t.rec.registrations].some(
 			(r) => r.provider === "anthropic" && r.models === 0,
@@ -5719,9 +5494,9 @@ test("only-active off restores every hidden provider", async () => {
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
 	await t.fire("session_start");
-	await t.command("only-active"); // toggle on
+	await t.command("only-active");
 	assert.ok(t.rec.notifies.at(-1)?.includes("only-active ON"));
-	await t.command("only-active"); // toggle back off
+	await t.command("only-active");
 	assert.ok(t.rec.notifies.at(-1)?.includes("only-active OFF"));
 	const codex = [...t.rec.registrations]
 		.reverse()
@@ -5843,9 +5618,6 @@ test("add cursor guides the user through subscription login, not API-key setup",
 	}
 });
 
-// ---------------------------------------------------------------------------
-// Cursor is optional: nothing about it may leak into a session that never asked
-// ---------------------------------------------------------------------------
 
 test(
 	"includeCursor default-on never registers a phantom cursor slot nor warns while the Cursor provider is not installed",
@@ -5861,10 +5633,8 @@ test(
 		const status = t.rec.notifies.find((message) =>
 			message.includes("Registered login slots"),
 		);
-		// A cursor slot backed by nothing would be offered by /login and could never work.
 		assert.ok(status, "status output should be produced");
 		assert.doesNotMatch(status, /cursor-account-\d/);
-		// And no unsolicited `git clone` instructions for a provider the user never asked for.
 		assert.equal(
 			t.rec.notifies.some((message) =>
 				message.includes("Cursor subscription support not found"),
@@ -5958,8 +5728,6 @@ test("credential deletion uses the host lock and preserves a concurrent unrelate
 	writeFileSync(AUTH, JSON.stringify(initial));
 	const storage = {
 		delete: async (provider: string) => {
-			// Model the host's locked operation observing the latest file, after another process added
-			// a credential. A whole-file read/overwrite in the extension would erase this entry.
 			const latest = JSON.parse(readFileSync(AUTH, "utf8"));
 			latest.concurrentLogin = { type: "oauth", access: "new", refresh: "new-refresh" };
 			delete latest[provider];
@@ -6095,8 +5863,6 @@ fakeClockTest("a successful Pi-native retry cancels the extension's same-route w
 	await t.fire("message_end", { message: error });
 	assert.equal(t.readState().pendingFrom, "kimi-coding/k3");
 
-	// Pi retries inside the same session run. A successful response makes the extension-owned
-	// wake obsolete immediately; otherwise it fires after the successful turn and duplicates work.
 	await t.fire("after_provider_response", { status: 200, headers: {} });
 	assert.equal(t.readState().pendingFrom, undefined, "success must retire pending recovery");
 	await wait(1100);
@@ -6105,8 +5871,6 @@ fakeClockTest("a successful Pi-native retry cancels the extension's same-route w
 });
 
 fakeClockTest("a second consecutive transient error keeps the route and a native success cancels its wake", async () => {
-	// Owner correction 2026-09-16: even repeated 500s are not quota evidence.
-	// Native retries count toward the bound, but must never authorize route switching.
 	const t = setup({
 		accounts: {
 			"kimi-coding": { type: "oauth", access: "k1", refresh: "kr1" },
@@ -6124,7 +5888,6 @@ fakeClockTest("a second consecutive transient error keeps the route and a native
 	assert.equal(t.rec.setModels.length, 0, "one same-route retry is allowed");
 	assert.equal(t.readState().pendingFrom, "kimi-coding/k3");
 
-	// This is the failed Pi-native retry in the same chain: no new before_agent_start/agent_start.
 	const second = assistantError("kimi-coding", "k3", "500 server_error");
 	await t.fire("message_end", { message: second });
 
@@ -6132,7 +5895,6 @@ fakeClockTest("a second consecutive transient error keeps the route and a native
 	assert.equal(t.readState().pendingFrom, "kimi-coding/k3");
 	assert.equal(t.readState().exhaustedUntilByProvider?.["kimi-coding"], undefined);
 
-	// Success must win the race against our same-route wake without a duplicate prompt.
 	await t.fire("after_provider_response", { status: 200, headers: {} });
 	assert.equal(t.readState().pendingFrom, undefined);
 	await wait(1100);
@@ -6205,7 +5967,6 @@ test("a Cursor transport stall retries the exact route even with healthy alterna
 			"the healthy sibling is neither selected nor cooled",
 		);
 
-		// HTTP 200 retires a duplicate wake but is not a completed response.
 		await t.fire("after_provider_response", { status: 200, headers: {} });
 		assert.equal(t.readState().pendingFrom, undefined);
 
@@ -6346,7 +6107,6 @@ test("Cursor stall evidence survives tool-use progress until the task actually f
 			},
 		});
 
-		// Tool progress cannot erase the task's bounded stall history.
 		for (let attempt = 2; attempt <= 4; attempt++) {
 			await t.fire("message_end", { message: stall("cursor") });
 		}
@@ -6451,9 +6211,6 @@ test("pending resume after auth failure does not rotate back to the same provide
 	);
 });
 
-// ---------------------------------------------------------------------------
-// v1.12.0 robustness: no spurious resume, account-aware compaction, watchdog
-// ---------------------------------------------------------------------------
 
 function okAssistant(provider: string, model: string) {
 	return {
@@ -6472,15 +6229,12 @@ test("does not re-resume from a successful assistant turn (the 'Cannot continue 
 		idle: false,
 	});
 	await t.fire("before_agent_start", {});
-	// A real 429 switches to codex and resumes the interrupted work exactly once.
 	const err = assistantError("anthropic", "claude-opus-4-8", "429 rate limit");
 	await t.fire("message_end", { message: err });
 	t.setIdle(true);
 	await t.fire("agent_end", { messages: [err] });
 	assert.equal(t.rec.continueCalls.length, 1, "the error turn resumes once");
 
-	// The switched-to account then completes a SUCCESSFUL turn. This agent_end consumes the
-	// internal dispatch flag.
 	const ok = okAssistant("openai-codex-account-2", "gpt-5.5");
 	await t.fire("agent_end", { messages: [ok] });
 	assert.equal(
@@ -6489,9 +6243,6 @@ test("does not re-resume from a successful assistant turn (the 'Cannot continue 
 		"a successful turn is never resumed",
 	);
 
-	// A LATER agent_end (e.g. the agent ran another tool loop) with a successful tail. The old
-	// bug re-dispatched a resume here because currentPromptSwitch was still set, and
-	// pi.continueAgent() then threw "Cannot continue from message role: assistant".
 	await t.fire("agent_end", { messages: [ok] });
 	assert.equal(
 		t.rec.continueCalls.length,
@@ -6757,24 +6508,18 @@ test("host build WITHOUT pi.continueAgent still auto-resumes the failover (injec
 		omitContinueAgent: true,
 	});
 	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate_limit_error");
-	// The account switch itself still happens.
 	assert.deepEqual(t.rec.setModels, ["openai-codex-account-2/gpt-5.5"]);
-	// There is no pi.continueAgent to call on this host build...
 	assert.equal(
 		t.rec.continueCalls.length,
 		0,
 		"there is no continueAgent on this host build",
 	);
-	// ...so the extension MUST degrade to injecting the continuation prompt so the work resumes by
-	// itself on the new account — the exact scenario the user hit (repeated reloads that never continued).
 	assert.equal(
 		t.rec.sent.length,
 		1,
 		"it injects the continuation prompt so the session keeps moving without a manual reload",
 	);
-	// The injection MUST carry deliverAs:"followUp" — without it the host throws "Agent is already
-	// processing. Specify streamingBehavior..." when the previous turn is still streaming, which is
-	// exactly the race that fires right after a failover switch, and the continuation is silently lost.
+	// external: Pi rejects injected messages during a run unless delivered as followUp.
 	assert.equal(
 		t.rec.sent[0].options?.deliverAs,
 		"followUp",
@@ -6791,8 +6536,6 @@ test("the injected continuation never points at a [handoff:interrupted-turn] rec
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		omitContinueAgent: true,
 	});
-	// The real failure shape: the quota rejection arrives at request start, so the assistant
-	// message is `content: []` and renderHandoffRecord() has nothing to render.
 	const failed = assistantError("anthropic", "claude-opus-4-8", "429 rate_limit_error");
 	t.ctx.sessionManager.getBranch = () => [
 		{ type: "message", message: failed },
@@ -6871,10 +6614,6 @@ test("a genuinely maxed monthly Codex account is benched for its REAL reset, so 
 		},
 		alibaba: { type: "api_key", key: "qwen-key" },
 	};
-	// Both Codex accounts report their PRIMARY (monthly, 30-day) window at 100% with a far-out reset —
-	// authoritative "spent" straight from the account's own usage endpoint. The 6h re-probe cap used
-	// to keep un-benching them every 6h, so auto-failover ping-ponged account-2 ↔ account-3 forever
-	// and NEVER advanced to the healthy Qwen account. It must now bench them for the real reset.
 	const monthly = {
 		usedPercent: 100,
 		resetAt: now + 30 * 24 * 60 * 60 * 1000,
@@ -6943,16 +6682,12 @@ test("a spent account known ONLY from a STALE usage snapshot is still tried when
 		},
 		alibaba: { type: "api_key", key: "qwen-key" },
 	};
-	// account-3 is genuinely maxed (primary 100%, reset 14 days out) but its usage snapshot is an
-	// HOUR OLD and it has NO recorded cooldown — exactly the state that made real failover land on a
-	// dead account: at the instant account-2 errored, account-3 looked "available". A maxed 30-day
-	// window cannot have recovered in an hour, so the snapshot is authoritative regardless of age.
 	const t = setup({
 		accounts,
 		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
 		seedState: {
 			stateVersion: 5,
-			exhaustedUntilByProvider: {}, // <- account-3 has NO cooldown recorded
+			exhaustedUntilByProvider: {},
 			exhaustedUntilByModel: {},
 			lastProbeAtByProvider: {},
 			invalidatedByProvider: {},
@@ -6960,7 +6695,7 @@ test("a spent account known ONLY from a STALE usage snapshot is still tried when
 				"openai-codex-account-3": {
 					provider: "openai-codex-account-3",
 					family: "codex",
-					fetchedAt: now - 60 * 60 * 1000, // STALE (an hour old)
+					fetchedAt: now - 60 * 60 * 1000,
 					primary: {
 						usedPercent: 100,
 						resetAt: now + 14 * 24 * 60 * 60 * 1000,
@@ -7123,8 +6858,6 @@ test("session_before_compact: a routed provider gets the full watchdog budget, n
 		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
 		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
 		compactionAuth: { ok: true, apiKey: "test-key" },
-		// 55 ms is longer than the old 30 ms (90 / 3), but still within the
-		// configured 90 ms allowance for this provider.
 		config: { compactionWatchdogMs: 90 },
 		compactFn: async (_preparation, model) => {
 			asked.push(model.provider);
@@ -7170,10 +6903,7 @@ test("session_before_compact: a healthy current account is never sent through th
 test("session_before_compact: routes the summary to a healthy account when the active account is cooling", async () => {
 	const t = setup({
 		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
-		// The active codex account is itself spent — Pi's default would try to summarize on it.
 		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
-		// ok:false stops the handler before the real compact() call (no network in unit tests),
-		// while still proving WHICH account it chose to summarize on.
 		compactionAuth: { ok: false },
 	});
 	const result = await t.fire("session_before_compact", {
@@ -7494,8 +7224,6 @@ test("the wait-for-idle before a resume is bounded — never an infinite busy-lo
 	});
 	const err = assistantError("anthropic", "claude-opus-4-8", "429 rate limit");
 	await t.fire("message_end", { message: err });
-	// Deliberately keep the session non-idle so the resume's wait MUST time out instead of
-	// spinning forever, then return without ever calling continueAgent.
 	await t.fire("agent_end", { messages: [err] });
 	assert.equal(
 		t.rec.continueCalls.length,
@@ -7509,10 +7237,6 @@ test("the wait-for-idle before a resume is bounded — never an infinite busy-lo
 });
 
 test("a 'still busy' auto-retry resumes the SAME model — it never downgrades gpt-5.5 to gpt-5.4 on the same account", async () => {
-	// Reproduces the reported log: "openai-codex-account-4/gpt-5.5 → openai-codex-account-4/gpt-5.4
-	// (previous turn was still busy; auto-retry)". A busy-retry is a TIMING issue, not a model
-	// failure — the same account's quota is shared, so dropping to gpt-5.4 escapes nothing and
-	// only downgrades. The resume must keep gpt-5.5.
 	const t = setup({
 		accounts: TWO_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -7524,8 +7248,6 @@ test("a 'still busy' auto-retry resumes the SAME model — it never downgrades g
 			autoContinue: true,
 		},
 	});
-	// anthropic hits a limit and we switch to the codex account on gpt-5.5. The prior turn never
-	// goes idle in time, so a "still busy" auto-retry is armed for openai-codex-account-2/gpt-5.5.
 	const err = assistantError("anthropic", "claude-opus-4-8", "429 rate limit");
 	await t.fire("message_end", { message: err });
 	assert.deepEqual(
@@ -7533,13 +7255,11 @@ test("a 'still busy' auto-retry resumes the SAME model — it never downgrades g
 		["openai-codex-account-2/gpt-5.5"],
 		"the switch lands on the newest model",
 	);
-	// Keep the session non-idle so the resume's bounded wait times out and arms a busy auto-retry.
 	await t.fire("agent_end", { messages: [err] });
 	assert.ok(
 		/still busy/i.test(t.readState().pendingReason ?? ""),
 		"a busy auto-retry must be armed (not a model failure)",
 	);
-	// The turn frees up; let the auto-resume wake fire.
 	t.setIdle(true);
 	await wait(250);
 	assert.ok(
@@ -7572,9 +7292,8 @@ test("a silent resumed turn is AUTO-cancelled and auto-resume armed — no manua
 	const err = assistantError("anthropic", "claude-opus-4-8", "429 rate limit");
 	await t.fire("message_end", { message: err });
 	t.setIdle(true);
-	// continueAgent blocks (simulating a wedged provider/compaction). Do not await agent_end yet.
 	const pending = t.fire("agent_end", { messages: [err] });
-	await wait(120); // let the 40ms watchdog fire with no progress events
+	await wait(120);
 	assert.ok(
 		t.rec.aborts >= 1,
 		"the watchdog ACTIVELY cancels the wedged turn — it does not just warn and wait",
@@ -7585,7 +7304,6 @@ test("a silent resumed turn is AUTO-cancelled and auto-resume armed — no manua
 	);
 	release();
 	await pending;
-	// The watchdog abort surfaces as an aborted agent_end; that must ARM auto-resume, not stop.
 	await t.fire("agent_end", {
 		messages: [{ role: "assistant", stopReason: "aborted" }],
 	});
@@ -7598,9 +7316,6 @@ test("a silent resumed turn is AUTO-cancelled and auto-resume armed — no manua
 });
 
 test("a watchdog abort the host never reports does not turn a later user Esc into a recovery", async () => {
-	// The watchdog flags its own abort so agent_end can tell it from a user cancel. If the host
-	// never answers that abort with an agent_end, the flag must not stay set: it would make the
-	// user's next Esc look like our own recovery and re-arm the very work they just cancelled.
 	let release: () => void = () => {};
 	const blocked = new Promise<void>((res) => {
 		release = res;
@@ -7615,9 +7330,9 @@ test("a watchdog abort the host never reports does not turn a later user Esc int
 	await t.fire("message_end", { message: err });
 	t.setIdle(true);
 	const pending = t.fire("agent_end", { messages: [err] });
-	await wait(120); // the watchdog fires and aborts once
+	await wait(120);
 	assert.ok(t.rec.aborts >= 1, "the watchdog cancelled the wedged turn");
-	await wait(200); // the host stays silent: no agent_end for that abort
+	await wait(200);
 	assert.ok(
 		readDebugLog().some((entry) => entry.kind === "resume_abort_unanswered"),
 		"an abort the host never reported is written off instead of staying armed",
@@ -7651,9 +7366,8 @@ test("the watchdog never aborts a resumed turn while a tool (build/test) is runn
 	await t.fire("message_end", { message: err });
 	t.setIdle(true);
 	const pending = t.fire("agent_end", { messages: [err] });
-	// A long, silent tool (e.g. an xcodebuild) is executing — silence is expected, not a wedge.
 	await t.fire("tool_execution_start", {});
-	await wait(120); // the watchdog window elapses, but a tool is in flight
+	await wait(120);
 	assert.equal(
 		t.rec.aborts,
 		0,
@@ -7665,9 +7379,6 @@ test("the watchdog never aborts a resumed turn while a tool (build/test) is runn
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// v1.13.0 circuit breaker: repeated recovery failures drop to safe advisory mode
-// ---------------------------------------------------------------------------
 
 test("after repeated resume failures the breaker opens, pauses auto-continue and keeps a wake for later", async () => {
 	const accounts: Account = {
@@ -7679,8 +7390,6 @@ test("after repeated resume failures the breaker opens, pauses auto-continue and
 			accountId: "b",
 		},
 	};
-	// Every continueAgent attempt throws a hard (non-continuable, non-abort) error → each is a
-	// recovery failure. After 3 in a row the breaker must trip and stop auto-continuing.
 	const t = setup({
 		accounts,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -7694,7 +7403,6 @@ test("after repeated resume failures the breaker opens, pauses auto-continue and
 		"the breaker announces it has dropped to advisory mode",
 	);
 	const continueCallsAtTrip = t.rec.continueCalls.length;
-	// A further limit error must NOT trigger another auto-resume while the breaker is open.
 	await finishError(t, "anthropic", "claude-opus-4-8", "429 rate limit");
 	assert.equal(
 		t.rec.continueCalls.length,
@@ -7715,7 +7423,6 @@ test("the breaker resets on a genuine new user prompt so auto-continue is restor
 	for (let i = 0; i < 3; i++) {
 		await finishError(t, "anthropic", "claude-opus-4-8", "429 rate limit");
 	}
-	// A real user message is a clean slate — it must clear the failure streak.
 	await t.input("ok continue please");
 	const status = await t.command("status");
 	void status;
@@ -7725,16 +7432,11 @@ test("the breaker resets on a genuine new user prompt so auto-continue is restor
 	);
 });
 
-// ---------------------------------------------------------------------------
-// v1.12.0 crash isolation: no handler/timer fault can crash Pi or freeze a turn
-// ---------------------------------------------------------------------------
 
 function faultyAssistantMessage() {
 	return {
 		role: "assistant",
 		stopReason: "error",
-		// Any property access throws — a stand-in for ANY unexpected internal fault
-		// (a host payload shape change, a formatter edge case, a null deref, …).
 		get errorMessage(): string {
 			throw new Error("synthetic internal fault");
 		},
@@ -7745,7 +7447,6 @@ test("an unexpected internal fault in an event handler is contained, not propaga
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
-	// Must resolve cleanly — the extension must never throw out into Pi.
 	await t.fire("message_end", { message: faultyAssistantMessage() });
 	assert.ok(
 		t.rec.notifies.some((n) => /recovered from an internal error/i.test(n)),
@@ -7799,7 +7500,6 @@ test("structured API throttling does not hide insufficient credits", async () =>
 
 test("a quota error on the ACTIVE unmanaged provider (e.g. plain openai API) still fails over to a managed account", async () => {
 	const t = setup({
-		// The user is actively working on a plain `openai` API model (not managed by the extension).
 		current: { provider: "openai", id: "gpt-5.5" },
 	});
 	await finishError(
@@ -7881,8 +7581,6 @@ test("a bodyless unmanaged 429 honors Retry-After on the same-route retry", asyn
 
 test("neverFailoverProviders leaves an unmanaged provider's own retry logic alone", async () => {
 	const t = setup({
-		// Same situation as the test above — an actionable error on the ACTIVE unmanaged
-		// provider — except the user has told us this provider owns its retries.
 		current: { provider: "self-retrying", id: "some-model" },
 		config: { neverFailoverProviders: ["self-retrying"] },
 	});
@@ -7908,7 +7606,6 @@ test("neverFailoverProviders leaves an unmanaged provider's own retry logic alon
 	);
 });
 
-// Exercise every preflight independently: startup must not accidentally mask input's bug.
 for (const boundary of ["session_start", "input", "before_agent_start"]) {
 	for (const health of ["provider cooldown", "model cooldown", "invalidated", "auth unknown"]) {
 		test(`neverFailoverProviders preserves an exempt route at ${boundary} with ${health}`, async () => {
@@ -8025,7 +7722,6 @@ test("a limit error on an unmanaged provider that is NOT the active model is ign
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
-	// Background error from some unrelated provider the user is NOT on → must be ignored.
 	await finishError(t, "deepseek", "deepseek-chat", "429 quota exceeded");
 	assert.equal(
 		t.rec.setModels.length,
@@ -8049,8 +7745,6 @@ test("failover prefers the latest model: a turn stuck on gpt-5.4 is upgraded bac
 			accountId: "c",
 		},
 	};
-	// The active codex turn is on the OLD model gpt-5.4. A same-family failover must NOT carry
-	// 5.4 forward — it must select the newest preferred model (gpt-5.5).
 	const t = setup({
 		accounts,
 		current: { provider: "openai-codex-account-2", id: "gpt-5.4" },
@@ -8072,9 +7766,6 @@ test("failover prefers the latest model: a turn stuck on gpt-5.4 is upgraded bac
 });
 
 test("exhausted account fails over to a sibling with the same model before any other family", async () => {
-	// Live log 2026-08-19: kimi-coding-account-2/k3 exhausted → anthropic-account-2/claude-opus-5
-	// because confirmation and preferLatestModel ranked across families. Anthropic is FIRST in
-	// the ring so only same-identity ranking can save this.
 	const t = setup({
 		accounts: {
 			"kimi-coding": { type: "oauth", access: "k1", refresh: "kr1" },
@@ -8145,9 +7836,6 @@ test("a sibling that already refused yields to another family", async () => {
 });
 
 test("a fresh provider verdict of 100% skips the dead Codex sibling", async () => {
-	// Live 2026-09-03: Sol failed, then automation selected two Codex accounts whose fresh usage
-	// snapshots already said 100% / blocked. The user paid for those redundant refusals with two
-	// broken turns. Only a manual next may override this evidence; automatic routing must not.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -8280,9 +7968,6 @@ test("cursor-grok-4.6-high on one account matches folded grok on a sibling", asy
 	uninstallCursorProvider();
 });
 
-// ---------------------------------------------------------------------------
-// A new OpenAI generation must not require a release of this extension (issue #2)
-// ---------------------------------------------------------------------------
 
 test("a Codex generation only the HOST knows about (gpt-5.6) wins without a release: no silent fallback to gpt-5.5", async () => {
 	const accounts: Account = {
@@ -8294,9 +7979,6 @@ test("a Codex generation only the HOST knows about (gpt-5.6) wins without a rele
 			accountId: "codex-2",
 		},
 	};
-	// Pi already ships gpt-5.6; this extension's static list stops at gpt-5.5. Before the fix
-	// the static list was consulted first, so failover landed on gpt-5.5 — a silent downgrade
-	// that needed a new release for every OpenAI generation.
 	const t = setup({
 		accounts,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -8382,7 +8064,6 @@ test("failover warm-up is opt-in and yields to a manual model choice", async () 
 
 test("failover warm-up is skipped when the account has no such model", async () => {
 	const t = warmupSetup({ failoverWarmupModels: { anthropic: "claude-haiku-9" } });
-	// Pi's registry, unlike the fixture's permissive default, has no unknown model ids.
 	const find = t.ctx.modelRegistry.find;
 	t.ctx.modelRegistry.find = (provider: string, id: string) =>
 		id === "claude-haiku-9" ? undefined : find(provider, id);
@@ -8451,8 +8132,6 @@ test("numbered Anthropic slots inherit native Fable metadata from the host catal
 });
 
 test("a published Anthropic slot lists the host's newer Claude models for readers outside this process", async () => {
-	// Live 2026-10-29: Pi offered anthropic-account-2/claude-opus-5-5, but models.json carried only the
-	// static list, so the personal assistant (a separate process reading models.json) never saw it.
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		accounts: {
@@ -8487,7 +8166,6 @@ test("account failover honors the saved Codex default instead of promoting to As
 		hostModelsByProvider: { anthropic: ["claude-fable-5-1"] },
 	});
 	await t.fire("session_start");
-	// A temporary foreground selection does not replace the saved per-family default.
 	t.ctx.model = { provider: "anthropic", id: "claude-fable-5-1" };
 	await finishError(t, "anthropic", "claude-fable-5-1", "429 rate limit");
 	assert.equal(t.rec.setModels.at(-1), "openai-codex/gpt-6.1-sol");
@@ -8608,8 +8286,6 @@ test("an unreleased Codex generation is also selectable on a numbered account al
 			accountId: "codex-3",
 		},
 	};
-	// Alias slots are registered from the extension's static model list, so a host-only model
-	// would not be *findable* on them even once it was ranked first.
 	const t = setup({
 		accounts,
 		current: { provider: "openai-codex-account-2", id: "gpt-5.6" },
@@ -8624,10 +8300,6 @@ test("an unreleased Codex generation is also selectable on a numbered account al
 });
 
 test("failover never downgrades across accounts: gpt-5.5 on a healthy account beats gpt-5.4 on a nearer account", async () => {
-	// Reproduces the reported bug: on rotation the model silently dropped from gpt-5.5 to gpt-5.4.
-	// Root cause: fallback candidates were ranked ONLY by account rotation index + cooldown, so an
-	// older model on a nearer (lower-index) account beat the newest model on a healthy farther
-	// account. Model recency must be the PRIMARY tiebreak when preferLatestModel is on.
 	const now = Date.now();
 	const accounts: Account = {
 		anthropic: { type: "oauth", access: "a", refresh: "ar" },
@@ -8655,9 +8327,6 @@ test("failover never downgrades across accounts: gpt-5.5 on a healthy account be
 				"openai-codex-account-3",
 			],
 		},
-		// gpt-5.5 is model-cooled on the NEARER account (account-2) only; that account is otherwise
-		// healthy, so account-2/gpt-5.4 is available RIGHT NOW. account-3/gpt-5.5 is fully healthy.
-		// The old rotIndex-only ranking would grab account-2/gpt-5.4 (nearer) and downgrade.
 		seedState: {
 			stateVersion: 5,
 			exhaustedUntilByProvider: {},
@@ -9179,9 +8848,6 @@ test(
 	},
 );
 
-// ---------------------------------------------------------------------------
-// v1.13.0 black box: every decision is recorded so real bugs become reproducible
-// ---------------------------------------------------------------------------
 
 test("a real failover writes a structured switch + assistant_error to the debug log", async () => {
 	rmSync(DEBUG_LOG, { force: true });
@@ -9210,7 +8876,6 @@ test("the debug log never contains token-like material (defensive redaction)", a
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
-	// An error string that embeds a JWT/token-shaped blob must be redacted in the log.
 	await finishError(
 		t,
 		"anthropic",
@@ -9288,8 +8953,6 @@ test("/multi-account rejects surplus arguments before any mutation, and keeps al
 		assert.deepEqual(t.rec.setModels, [], `${input}: no account switch`);
 		assert.equal(t.rec.aborts, abortsBefore, `${input}: no abort`);
 	}
-	// "usage" and "quota" reach quota fetching, so they are covered by the pure validator test instead.
-	// fetch is stubbed fail-closed so nothing here can reach a provider.
 	const originalFetch = globalThis.fetch;
 	let blockedFetches = 0;
 	globalThis.fetch = (async () => {
@@ -9339,14 +9002,6 @@ test("/multi-account models states explicitly when no account is in the rotation
 	assert.doesNotMatch(populated.rec.notifies.join("\n"), /no accounts in rotation/);
 });
 
-// ---------------------------------------------------------------------------
-// v1.13.6 regression tests:
-//  - API-key providers: repeated same-key 401s eventually invalidate (was an
-//    infinite 1-minute cooldown loop because same-hash failures never advanced
-//    toward the kill threshold).
-//  - Re-login (credential change) clears stale authFailures tracking for accounts
-//    on transient cooldown (not just invalidated ones).
-// ---------------------------------------------------------------------------
 
 test("api_key provider: repeated same-key 401s eventually invalidate (no infinite loop)", async () => {
 	const accounts = {
@@ -9362,7 +9017,6 @@ test("api_key provider: repeated same-key 401s eventually invalidate (no infinit
 			fallbacks: ["ollama", "anthropic"],
 		},
 	});
-	// First 401: transient cooldown, not invalidated.
 	t.setCurrent("ollama", "glm-5.2:cloud");
 	await t.fire("agent_start");
 	await finishError(t, "ollama", "glm-5.2:cloud", "401 Unauthorized");
@@ -9370,7 +9024,6 @@ test("api_key provider: repeated same-key 401s eventually invalidate (no infinit
 		!t.readState().invalidatedByProvider?.ollama,
 		"first 401 must not invalidate an api_key provider",
 	);
-	// Second 401: still transient, but the same-key counter advances.
 	t.setCurrent("ollama", "glm-5.2:cloud");
 	await t.fire("agent_start");
 	await finishError(t, "ollama", "glm-5.2:cloud", "401 Unauthorized");
@@ -9378,7 +9031,6 @@ test("api_key provider: repeated same-key 401s eventually invalidate (no infinit
 		!t.readState().invalidatedByProvider?.ollama,
 		"second 401 must not invalidate yet",
 	);
-	// Third 401: same key has failed MAX_SAME_KEY_AUTH_FAILURES times → invalidate.
 	t.setCurrent("ollama", "glm-5.2:cloud");
 	await t.fire("agent_start");
 	await finishError(t, "ollama", "glm-5.2:cloud", "401 Unauthorized");
@@ -9406,7 +9058,6 @@ test("oauth provider: repeated same-token 401s do NOT invalidate (refresh-fault 
 			fallbacks: ["anthropic", "openai-codex-account-2"],
 		},
 	});
-	// 10 repeated 401s on the SAME token (same hash) — must NEVER invalidate.
 	for (let i = 0; i < 10; i++) {
 		t.setCurrent("anthropic", "claude-opus-4-8");
 		await t.fire("agent_start");
@@ -9432,14 +9083,12 @@ test("re-login with new credentials clears stale authFailures for transient-cool
 			fallbacks: ["ollama", "anthropic"],
 		},
 	});
-	// Trigger two 401s to build up a same-key failure streak.
 	for (let i = 0; i < 2; i++) {
 		t.setCurrent("ollama", "glm-5.2:cloud");
 		await t.fire("agent_start");
 		await finishError(t, "ollama", "glm-5.2:cloud", "401 Unauthorized");
 	}
 	assert.ok(!t.readState().invalidatedByProvider?.ollama);
-	// Simulate re-login: write new credentials to auth.json.
 	writeFileSync(
 		AUTH,
 		JSON.stringify({
@@ -9447,10 +9096,7 @@ test("re-login with new credentials clears stale authFailures for transient-cool
 			anthropic: { type: "oauth", access: "a", refresh: "ar" },
 		}),
 	);
-	// Trigger refreshDiscovery via session_start (detects auth.json mtime change).
 	await t.fire("session_start", { reason: "startup" });
-	// After re-login, the stale authFailures entry must be cleared. A single new 401
-	// should NOT immediately invalidate (the counter starts fresh).
 	t.setCurrent("ollama", "glm-5.2:cloud");
 	await t.fire("agent_start");
 	await finishError(t, "ollama", "glm-5.2:cloud", "401 Unauthorized");
@@ -9460,9 +9106,6 @@ test("re-login with new credentials clears stale authFailures for transient-cool
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Interrupted-turn preservation across a real failover
-// ---------------------------------------------------------------------------
 
 test("the turn that triggered the failover survives into the account that takes over", async () => {
 	const t = setup({
@@ -9470,7 +9113,6 @@ test("the turn that triggered the failover survives into the account that takes 
 		config: { autoDiscover: true, fallbacks: ["ollama"] },
 	});
 	await t.fire("agent_start");
-	// A turn that got real work done before the quota wall hit mid tool-batch.
 	const interrupted = {
 		role: "assistant",
 		provider: "openai-codex",
@@ -9494,7 +9136,6 @@ test("the turn that triggered the failover survives into the account that takes 
 	await t.fire("agent_end", { messages: [interrupted] });
 	assert.ok(t.rec.setModels.length > 0, "the account must actually have switched");
 
-	// The next request on the account we switched TO goes through the context hook.
 	const result = await t.fire("context", {
 		messages: [
 			{ role: "user", content: [{ type: "text", text: "migrate + seed" }], timestamp: 1 },
@@ -9537,9 +9178,6 @@ test("preserveInterruptedContext: false restores the old drop-everything behavio
 	assert.equal(result, undefined, "opted out: the transcript must pass through untouched");
 });
 
-// ---------------------------------------------------------------------------
-// Auto-continue on hosts without pi.continueAgent (0.80.3+)
-// ---------------------------------------------------------------------------
 
 test("pending same-account resume shares its recovery lease with nested provider failures", async () => {
 	let markContinueStarted!: () => void;
@@ -9605,11 +9243,6 @@ test("pending same-account resume shares its recovery lease with nested provider
 });
 
 fakeClockTest("a same-account pending resume auto-continues on a host without pi.continueAgent", async () => {
-	// The regression: `currentPromptSwitch` is set only when we ROTATE accounts. A transient
-	// overload deliberately retries the SAME account, so there is no switch record — and the
-	// injection fallback used to require one. On every build since pi-coding-agent 0.80.3
-	// (where continueAgent was removed) that combination silently refused to continue and told
-	// the user "this Pi build cannot auto-resume", leaving them to re-send the prompt by hand.
 	const accounts: Account = {
 		"openai-codex-account-2": {
 			type: "oauth",
@@ -9697,8 +9330,6 @@ fakeClockTest("one Pi window never resumes another window's pending task", async
 });
 
 test("repeated 500s on an automatic same-model retry slow down at the breaker and then resume by themselves", async () => {
-	// The user's rule: work resumes on its own once a provider answers again, like Claude Code.
-	// The breaker may slow recovery down; it must never leave the session waiting for a message.
 	const provider = "openai-codex-account-2";
 	const error = "500 server error";
 	const t = setup({
@@ -9821,7 +9452,6 @@ test("a permanent model-access denial is not a temporary verification failure", 
 
 for (const errorText of ["Connection error.", "terminated"]) {
 	fakeClockTest(`"${errorText}" is a temporary failure retried on the same route`, async () => {
-		// Both were logged live as "unhandled" and left the session idle until the user typed.
 		const provider = "openai-codex-account-2";
 		const t = setup({
 			accounts: { [provider]: { type: "oauth", access: "b", refresh: "br", accountId: "codex-2" } },
@@ -9866,9 +9496,6 @@ test("a long outage keeps retrying past the auto-continue budget instead of canc
 });
 
 fakeClockTest("a blocked continuation records why, instead of failing silently", async () => {
-	// Every refusal used to be silent, so a session that stopped continuing by itself left
-	// nothing in the debug log to explain it — the visible warning blamed the Pi build even
-	// when the real cause was a spent auto-continue budget or a disabled autoContinue.
 	const accounts: Account = {
 		"openai-codex-account-2": {
 			type: "oauth",
@@ -9904,17 +9531,8 @@ fakeClockTest("a blocked continuation records why, instead of failing silently",
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Verify, don't predict: a provider's forecast never parks an account
-// ---------------------------------------------------------------------------
 
 fakeClockTest("a month-long quota forecast cannot park an account past the recheck ceiling", async () => {
-	// Providers reset quota windows early and unannounced, and resize the windows themselves, so
-	// "used 100%, resets in 29 days" is a forecast about the future — not evidence. Before the
-	// ceiling it was treated as authoritative ground truth REGARDLESS of snapshot age, so a single
-	// stale reading could park an account for weeks and the work simply waited. Now the forecast
-	// only orders the queue; the account is asked again within maxRecheckIntervalMs and answers
-	// for itself. (A refused request costs no tokens, so asking is close to free.)
 	const now = Date.now();
 	const accounts: Account = {
 		"openai-codex-account-2": {
@@ -9933,7 +9551,6 @@ fakeClockTest("a month-long quota forecast cannot park an account past the reche
 	const t = setup({
 		accounts,
 		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
-		// Ceiling squeezed to sub-second so the test asserts the mechanism, not the clock.
 		config: { maxRecheckIntervalMs: 700, pendingPollMs: 150 },
 		seedState: {
 			stateVersion: 5,
@@ -9962,8 +9579,6 @@ fakeClockTest("a month-long quota forecast cannot park an account past the reche
 		"gpt-5.5",
 		"You have hit your ChatGPT usage limit (free plan). Try again in ~41762 min.",
 	);
-	// account-6 is the only other account and its forecast says "29 days". The work must still
-	// reach it once the ceiling elapses, instead of waiting out a prediction.
 	await wait(1500);
 	assert.ok(
 		t.rec.setModels.some((target: string) =>
@@ -9974,10 +9589,6 @@ fakeClockTest("a month-long quota forecast cannot park an account past the reche
 });
 
 fakeClockTest("once the recheck ceiling elapses, an untried account still outranks one that refused", async () => {
-	// The ceiling deliberately puts a refused account BACK in the candidate pool. Ordering is then
-	// the only thing keeping us off it: rotation position alone would send us straight back to the
-	// account that just said "usage limit reached", get the same refusal, and loop between spent
-	// accounts while a never-tried one sat further down the ring.
 	const accounts: Account = {
 		"openai-codex-account-2": {
 			type: "oauth",
@@ -10001,18 +9612,15 @@ fakeClockTest("once the recheck ceiling elapses, an untried account still outran
 	const t = setup({
 		accounts,
 		current: { provider: "openai-codex-account-7", id: "gpt-5.5" },
-		// Squeezed so the ceiling elapses inside the test rather than in ten minutes.
 		config: { autoDiscover: true, maxRecheckIntervalMs: 300 },
 	});
 	await t.fire("session_start");
-	// account-2 refuses. It is not the account we are on, so it earns no anti-ping-pong credit.
 	await finishError(
 		t,
 		"openai-codex-account-2",
 		"gpt-5.5",
 		"You have hit your ChatGPT usage limit (free plan). Try again in ~41762 min.",
 	);
-	// Let its (ceiling-capped) cooldown lapse: account-2 is selectable again on paper.
 	await wait(600);
 	const before = t.rec.setModels.length;
 	t.setCurrent("openai-codex-account-7", "gpt-5.5");
@@ -10031,14 +9639,11 @@ fakeClockTest("once the recheck ceiling elapses, an untried account still outran
 });
 
 test("reasoningLevel: max is honoured instead of being silently dropped to auto", async () => {
-	// Issue #15, second half: adding `max` to the catalog is not enough. The config parser
-	// enumerated the accepted levels and stopped at `xhigh`, so `reasoningLevel: "max"` fell
-	// through to "auto" — the level was never forced, and nothing said why.
 	const t = setup({
 		accounts: THINKING_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		thinkingLevel: "low",
-		config: { reasoningLevel: "max" }, // opt-in override, same as any other explicit level
+		config: { reasoningLevel: "max" },
 	});
 
 	await t.fire("session_start");
@@ -10052,13 +9657,10 @@ test("reasoningLevel: max is honoured instead of being silently dropped to auto"
 });
 
 test("max survives a switch through a weaker model, exactly like every other level", async () => {
-	// Guarantee #22 ("your thinking level is yours") must hold for the newly-accepted level too:
-	// a weaker fallback model's clamp is restored, never adopted as the new intent.
 	const t = setup({
 		accounts: THINKING_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		thinkingLevel: "max",
-		// The codex account tops out at high — Pi clamps max down to high there.
 		thinkingCaps: { "openai-codex-account-2": "high" },
 	});
 
@@ -10066,11 +9668,11 @@ test("max survives a switch through a weaker model, exactly like every other lev
 	await t.fire("agent_start");
 	assert.equal(t.thinkingLevel(), "max");
 
-	await t.command("next"); // → codex, where max is clamped to high
+	await t.command("next");
 	assert.equal(t.thinkingLevel(), "high", "the host clamp is expected here");
 
 	await t.fire("agent_start");
-	await t.command("next"); // → back to a model that supports max
+	await t.command("next");
 	assert.equal(
 		t.thinkingLevel(),
 		"max",
@@ -10083,15 +9685,9 @@ test("max survives a switch through a weaker model, exactly like every other lev
 });
 
 test("a startup model switch must not adopt the host's clamped level as the user's intent", async () => {
-	// Real incident, 2026-09-11: the session came up on a provider whose map hides levels, the
-	// host applied its own default shortly after the switch, and the session was left at `low`
-	// while the state file still recorded that the user had chosen `max`. The extension adopted
-	// the host value as the new intent on the FIRST turn (where there was no intent yet to
-	// compare against) and never restored `max` — the user found it 58 minutes later.
 	const t = setup({
 		accounts: THINKING_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		// By the time the first turn starts, the host has already clamped the level.
 		thinkingLevel: "low",
 		seedState: {
 			stateVersion: 5,
@@ -10115,20 +9711,8 @@ test("a startup model switch must not adopt the host's clamped level as the user
 });
 
 
-// ---------------------------------------------------------------------------
-// A refusal outranks the quota meter (issue: bounced back onto a spent account)
-// ---------------------------------------------------------------------------
 
 test("the FIRST refusal already benches an account whose usage meter claims headroom", async () => {
-	// Real report: seven Codex accounts, six at 100% and one reading 98%. The 98% account was
-	// picked, greeted the user, then refused the first real request with "You have hit your
-	// ChatGPT usage limit (free plan)". It was benched — and the very next usage refresh saw
-	// 98% (< 100%), decided the account was free, wiped the cooldown, and rotation walked
-	// straight back onto it. The loop only broke on the SECOND refusal.
-	//
-	// One refusal is already proof. A used-percentage is a forecast about a quota window that
-	// cannot see this account's real (session/plan) limit; a refusal is an observation that just
-	// happened. The observation must win the first time, not the second.
 	const now = Date.now();
 	const t = setup({
 		accounts: ONE_ACCOUNT,
@@ -10145,7 +9729,6 @@ test("the FIRST refusal already benches an account whose usage meter claims head
 					provider: "anthropic",
 					family: "anthropic",
 					fetchedAt: now,
-					// The exact shape that caused it: just short of the cap, so the meter says "free".
 					primary: { usedPercent: 98, resetAt: now + 5 * 60 * 60 * 1000 },
 				},
 			},
@@ -10160,7 +9743,6 @@ test("the FIRST refusal already benches an account whose usage meter claims head
 		"claude-opus-4-8",
 		"You have hit your ChatGPT usage limit (free plan). Try again in ~41615 min.",
 	);
-	// Let the usage reconciliation run: this is where the 98% reading used to clear the bench.
 	await wait(260);
 
 	const until = t.readState().exhaustedUntilByProvider?.anthropic;
@@ -10171,9 +9753,6 @@ test("the FIRST refusal already benches an account whose usage meter claims head
 });
 
 test("a distrusted usage meter survives a restart instead of re-opening the loop", async () => {
-	// The distrust flag lived only in memory. Every new Pi session started believing the meter
-	// again, so a spent account was re-selected once per session — which is why this kept
-	// recurring all day rather than settling after the first two refusals.
 	const now = Date.now();
 	const seedState = {
 		stateVersion: 5,
@@ -10213,7 +9792,6 @@ test("a distrusted usage meter survives a restart instead of re-opening the loop
 		"the proof that this account's meter lies must be written down, not held in memory",
 	);
 
-	// A brand-new session reads that state back.
 	const second = setup({
 		accounts: ONE_ACCOUNT,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -10231,8 +9809,6 @@ test("a distrusted usage meter survives a restart instead of re-opening the loop
 });
 
 test("a real success re-trusts the meter and clears the bench", async () => {
-	// The distrust must not be permanent: the account genuinely recovering has to be able to
-	// undo it, otherwise a spent account would never come back.
 	const now = Date.now();
 	const t = setup({
 		accounts: ONE_ACCOUNT,
@@ -10282,9 +9858,6 @@ test("a real success re-trusts the meter and clears the bench", async () => {
 });
 
 test("a bare throttle with no stated horizon still defers to the usage meter", async () => {
-	// The narrow half of the same rule. When the provider says only "429 rate limit" it has made
-	// no claim about when the account returns, so the meter remains the better evidence and an
-	// account whose window is genuinely empty must not be benched.
 	const now = Date.now();
 	const t = setup({
 		accounts: ONE_ACCOUNT,
@@ -10317,16 +9890,8 @@ test("a bare throttle with no stated horizon still defers to the usage meter", a
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Manual selection: it must hold, and it must say where it put you
-// ---------------------------------------------------------------------------
 
 test("a manually chosen account survives the preflight for one attempt", async () => {
-	// `switch` deliberately ignores cooldowns, because the quota bookkeeping is a guess and trying
-	// the account is the only way to prove the guess wrong. But the preflight that runs on the
-	// user's very next message re-applied that same bookkeeping and moved them off — so the
-	// override held only until it was used, which is exactly when it mattered. One attempt must
-	// go where the user asked; ordinary failover takes over from there.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
@@ -10345,8 +9910,6 @@ test("a manually chosen account survives the preflight for one attempt", async (
 });
 
 test("the manual reprieve is spent after one attempt", async () => {
-	// It is one attempt, not a permanent pin: once the chosen account has had its chance and
-	// refused, normal routing resumes, otherwise a user could strand themselves on a dead account.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
@@ -10363,9 +9926,6 @@ test("the manual reprieve is spent after one attempt", async () => {
 });
 
 test("next says where it landed and whether that account is believed spent", async () => {
-	// It used to switch silently onto a cooled account and then be silently moved off it, so the
-	// user saw two switches and ended up somewhere they never chose. Saying it plainly costs
-	// nothing and removes the whole confusion.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
@@ -10382,9 +9942,6 @@ test("next says where it landed and whether that account is believed spent", asy
 });
 
 test("status shows how to switch to a specific account, not just next", async () => {
-	// The direct switch existed all along but was buried mid-way through one dense pipe-separated
-	// line of eighteen commands, so the only discoverable way to reach a chosen account was
-	// pressing `next` repeatedly until it came round.
 	const t = setup({ current: { provider: "anthropic", id: "claude-opus-4-8" } });
 	await t.command("status");
 
@@ -10454,9 +10011,6 @@ test("accounts lists provider identity, quota and routing state without credenti
 });
 
 test("accounts shows when a spent account's window resets, not only the short recheck timer", async () => {
-	// Reported: the table read "cooldown 8m" for a Codex account whose 5h window sat at 0% for
-	// another 3h35m, so the account looked minutes away from usable. The cooldown is only the
-	// recheck ceiling; the provider's own reset forecast is what says when it really returns.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -10593,9 +10147,6 @@ test("accounts refresh explicitly loads every supported account while the footer
 	}
 });
 
-// ---------------------------------------------------------------------------
-// Providers outside the five specially-managed families
-// ---------------------------------------------------------------------------
 
 const MIXED_ACCOUNTS: Account = {
 	anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
@@ -10604,10 +10155,6 @@ const MIXED_ACCOUNTS: Account = {
 };
 
 test("a provider outside the known families still joins the rotation", async () => {
-	// Rotation membership required a provider to be recognised as one of five families by name,
-	// and everything else was dropped by a single `continue` — silently, with no mention in
-	// status. On a real machine that meant six of fourteen logged-in accounts, and roughly four
-	// hundred models, sat unused while the managed accounts burned out one by one.
 	const t = setup({
 		accounts: MIXED_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -10641,8 +10188,6 @@ test("an unmanaged provider can be selected by name", async () => {
 });
 
 test("status names the unmanaged providers instead of hiding them", async () => {
-	// The silent drop was the worst part: nothing anywhere said these accounts existed but were
-	// not being used, so there was no way to notice from inside the tool.
 	const t = setup({
 		accounts: MIXED_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -10660,8 +10205,6 @@ test("status names the unmanaged providers instead of hiding them", async () => 
 });
 
 test("unmanaged providers can be switched off", async () => {
-	// Someone paying per token on a plain API key may deliberately not want background failover
-	// spending it, so the new behaviour has an off switch.
 	const t = setup({
 		accounts: MIXED_ACCOUNTS,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -10675,8 +10218,6 @@ test("unmanaged providers can be switched off", async () => {
 		"You have hit your usage limit. Try again in ~600 min.",
 	);
 
-	// kimi-coding is a specially-managed family now, so it is NOT what this switch governs —
-	// only the accounts we cannot measure are.
 	assert.ok(
 		!t.rec.setModels.some((target: string) => target.startsWith("zai/")),
 		`opting out must keep unmanaged accounts unused; switches were ${JSON.stringify(t.rec.setModels)}`,
@@ -10684,8 +10225,6 @@ test("unmanaged providers can be switched off", async () => {
 });
 
 test("a specially-managed family is still preferred over an unmanaged provider", async () => {
-	// Managed accounts have quota telemetry, OAuth refresh and live catalogs; unmanaged ones are
-	// a blind spend. They belong at the end of the ring, not ahead of an account we can measure.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
@@ -10714,12 +10253,6 @@ test("a specially-managed family is still preferred over an unmanaged provider",
 });
 
 test("registering the Ollama base provider must not narrow the user's own model list", async () => {
-	// The base registration exists because a placeholder apiKey in models.json can stop Pi
-	// exposing the provider at all. But it called registerProvider with only the one built-in tag,
-	// which REPLACED a models.json that configured six — so a user running six Ollama cloud models
-	// could reach exactly the one written into this extension. Ollama and Qwen are the only two
-	// families whose model list still comes from an array in this file; Anthropic and Codex were
-	// taught to learn from the host precisely so a new generation needs no release.
 	writeFileSync(
 		join(AGENT_DIR, "models.json"),
 		JSON.stringify({
@@ -10775,10 +10308,6 @@ test("registering the Ollama base provider must not narrow the user's own model 
 });
 
 test("a catalog sync remains public with only-active enabled, so an immediate switch shows fresh models", async () => {
-	// Real-world miss (2026-08-21): Ollama was hidden by only-active holding the pre-sync list;
-	// the catalog sync then replaced the live registration with kimi-k3 et al, but a manual
-	// switch BEFORE the next message_start re-hidden the provider from the STALE stored copy —
-	// /model showed the old six. The registry now stays public throughout sync and switch.
 	writeFileSync(
 		join(AGENT_DIR, "models.json"),
 		JSON.stringify({
@@ -10819,7 +10348,6 @@ test("a catalog sync remains public with only-active enabled, so an immediate sw
 			config: { includeOllama: true, autoDiscoverModels: true, onlyActive: true },
 		});
 		await t.fire("session_start");
-		// Switch immediately, without message_start. The public list must contain the synced kimi-k3.
 		await t.command("switch ollama");
 		const ids = t.ctx.modelRegistry
 			.getAll()
@@ -10844,10 +10372,6 @@ test("a catalog sync remains public with only-active enabled, so an immediate sw
 });
 
 test("a provider Pi has no models for is marked unconfigured instead of looking healthy", async () => {
-	// Joining the rotation is not the same as being usable. An account whose models Pi does not
-	// know contributes no candidate at selection time, so it can never be chosen — but it was
-	// listed in `Rotation` exactly like a working one, which reads as an account in service and
-	// is really dead weight. It has to be named as needing configuration.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "r" },
@@ -10867,9 +10391,6 @@ test("a provider Pi has no models for is marked unconfigured instead of looking 
 	assert.match(said, /zai/, "and name it");
 });
 
-// ---------------------------------------------------------------------------
-// A provider that cannot serve the request at all
-// ---------------------------------------------------------------------------
 
 const OPENROUTER_402 =
 	'402: {"message":"Prompt tokens limit exceeded: 38075 > 16958. To increase, visit ' +
@@ -10879,10 +10400,6 @@ const OPENROUTER_402 =
 	'remaining balance.","provider_name":null}}';
 
 test("a 402 'out of credits' refusal is actionable, not unhandled", async () => {
-	// The real-world dead end: an account whose free allowance no longer covers the request
-	// refuses with 402. Nothing in the vocabulary matched it, so it classified as `unhandled` —
-	// no cooldown, no failover, no message. The session sat on that provider and every single
-	// user prompt produced the same 402 forever, while live accounts waited in the rotation.
 	rmSync(DEBUG_LOG, { force: true });
 	const t = setup({
 		current: { provider: "openrouter", id: "ai21/jamba-large-1.7" },
@@ -10908,9 +10425,6 @@ test("a 402 'out of credits' refusal is actionable, not unhandled", async () => 
 });
 
 test("a provider that is out of credits is benched, so failover cannot land back on it", async () => {
-	// Failing over once is not enough: openrouter was also the configured fallback target, so the
-	// next switch chose it again, it refused again, and the loop closed. It has to carry a
-	// cooldown like any other refusing account.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
@@ -10939,11 +10453,6 @@ test("a provider that is out of credits is benched, so failover cannot land back
 });
 
 test("a manually chosen account survives BOTH preflights of the same message", async () => {
-	// Pi runs the readiness preflight twice for one user message: once on `input`, then again in
-	// `before_agent_start`. The one-attempt reprieve was consumed by the first, so the second saw
-	// no reprieve and moved the user off the account they had just picked by hand — the switch
-	// notice read `last-moment preflight: selected account unavailable`. The reprieve covers the
-	// attempt, not the first function call that happens to ask about it.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		seedCooldownsMsFromNow: { "openai-codex-account-2": 60 * 60 * 1000 },
@@ -10968,8 +10477,6 @@ test("a manually chosen account survives BOTH preflights of the same message", a
 });
 
 test("the reprieve is still spent after that one attempt", async () => {
-	// The double-preflight fix must not turn the reprieve into a permanent pin: once the attempt
-	// has been refused, normal routing resumes so nobody is stranded on a dead account.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
@@ -10987,16 +10494,10 @@ test("the reprieve is still spent after that one attempt", async () => {
 });
 
 test("'no account' is only said when there is no account — otherwise it says what is wrong", async () => {
-	// The message claimed nothing was logged in whenever selection came up empty, which is a
-	// different fact from the one that was true: accounts existed, had credentials, and even had
-	// quota left — their authorization had expired. Being told "no authenticated account exists"
-	// while `status` lists two accounts with quota is what makes the extension look broken rather
-	// than the accounts, and it hides the one action that actually fixes it.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
 	await t.fire("session_start");
-	// Both accounts lose their authorization for real, exactly as an expired refresh token does.
 	await finishError(t, "anthropic", "claude-opus-4-8", "invalid_grant");
 	await finishError(t, "openai-codex-account-2", "gpt-5.5", "invalid_grant");
 	assert.ok(
@@ -11032,10 +10533,6 @@ test("'no account' is only said when there is no account — otherwise it says w
 });
 
 test("a month-long 'believed spent' notice admits it is a forecast, not a month-long lockout", async () => {
-	// The notice quoted the RAW forecast — "cooling down, ~678h 28m left" — while the extension's
-	// own rule is to re-ask any account at least every `maxRecheckIntervalMs`. Reading that an
-	// account is locked for 28 days, when it is really re-probed within hours, is what convinced
-	// a user that freed-up accounts were never being picked up again.
 	const now = Date.now();
 	const provider = "openai-codex-account-2";
 	const t = setup({
@@ -11095,13 +10592,6 @@ test("header quota refresh preserves identity without reviving an old availabili
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// Codex usage headers: what reaches the shared state file, and when
-// ---------------------------------------------------------------------------
-// Every Codex response carries the account's quota windows. Other processes act on the copy in the
-// shared state file: their own account selection, OptChat's wake routes and 90% warning, the bench's
-// stop lines at 60% (5-hour window) and 50% (weekly). A reading that differs from the last one must
-// therefore reach the file at once; one the provider merely repeats waits for the next boundary.
 
 const CODEX_ACTIVE = "openai-codex-account-2";
 const CODEX_SIBLING = "openai-codex-account-3";
@@ -11119,11 +10609,6 @@ function codexUsageHeaders(reading: CodexReading) {
 	};
 }
 
-/**
- * Two Codex accounts with different readings, the first one selected, on a clock the test moves by hand.
- * `respond` delivers one provider response carrying that account's usage headers: the selected account
- * through a foreground turn, its sibling through a background request.
- */
 async function codexUsageFixture(
 	context: TestContext,
 	opts: (start: number) => Parameters<typeof setup>[0] = () => ({}),
@@ -11153,12 +10638,10 @@ async function codexUsageFixture(
 			headers: codexUsageHeaders(readings[provider]),
 		});
 	};
-	/** Moves the clock to `seconds` after the start and returns that instant. */
 	const at = (seconds: number) => {
 		context.mock.timers.setTime(start + seconds * 1000);
 		return start + seconds * 1000;
 	};
-	/** What the shared state file holds for an account: when the reading was taken, and both windows. */
 	const saved = (provider: string) => {
 		const usage = t.readState().usageByProvider?.[provider];
 		return { fetchedAt: usage?.fetchedAt, primary: usage?.primary?.usedPercent, secondary: usage?.secondary?.usedPercent };
@@ -11166,7 +10649,6 @@ async function codexUsageFixture(
 	return { t, start, respond, at, saved };
 }
 
-/** Runs `body` with outbound requests refused, and fails if it attempted one. */
 async function withoutNetwork(body: () => Promise<void>) {
 	const originalFetch = globalThis.fetch;
 	const attempted: string[] = [];
@@ -11182,7 +10664,6 @@ async function withoutNetwork(body: () => Promise<void>) {
 	assert.deepEqual(attempted, [], "the test attempted an outbound request");
 }
 
-/** Counts writes of the shared state file and reads of the credential files made while `run` executes. */
 async function countAccountFileIo(run: () => Promise<unknown>) {
 	const realRename = fs.renameSync;
 	const realRead = fs.readFileSync;
@@ -11210,7 +10691,6 @@ async function countAccountFileIo(run: () => Promise<unknown>) {
 test("Codex usage headers that repeat the previous reading do not rewrite the shared state file", async (context) => {
 	const { t, start, respond, at, saved } = await codexUsageFixture(context, () => ({ config: { showUsage: true } }));
 	await withoutNetwork(async () => {
-		// The first reading of an account is news: it is written at once.
 		await respond(CODEX_ACTIVE);
 		await respond(CODEX_SIBLING);
 		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start, primary: 25, secondary: 40 });
@@ -11228,7 +10708,6 @@ test("Codex usage headers that repeat the previous reading do not rewrite the sh
 			{ stateWrites: 0, authReads: 24, sidecarReads: 24 },
 			"24 responses repeating a reading: no state write, and the credential files read once per response",
 		);
-		// Readers in this process (the footer, pi:usage:snapshot:v1) still receive every reading as it arrives.
 		assert.deepEqual(t.rec.usageSnapshots.at(-1), {
 			provider: CODEX_ACTIVE,
 			family: "codex",
@@ -11238,7 +10717,6 @@ test("Codex usage headers that repeat the previous reading do not rewrite the sh
 		});
 		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start, primary: 25, secondary: 40 });
 
-		// The end of the run puts both accounts' latest readings on disk in a single write.
 		t.setIdle(true);
 		const end = await countAccountFileIo(() => t.fire("agent_end", { messages: [okAssistant(CODEX_ACTIVE, "gpt-5.5")] }));
 		assert.equal(end.stateWrites, 1);
@@ -11253,7 +10731,6 @@ test("a Codex usage reading that changes what another reader decides is written 
 	await withoutNetwork(async () => {
 		await respond(CODEX_ACTIVE);
 		await respond(CODEX_SIBLING);
-		// The lines other readers act on: 60% and 50% stop the bench, 90% raises OptChat's warning.
 		await respond(CODEX_ACTIVE, { primary: 61 });
 		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start, primary: 61, secondary: 40 });
 		at(1);
@@ -11263,12 +10740,10 @@ test("a Codex usage reading that changes what another reader decides is written 
 		await respond(CODEX_ACTIVE, { primary: 90 });
 		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start + 2000, primary: 90, secondary: 50 });
 
-		// A spent window benches the account for every process the moment it is refused...
 		const refusedAt = at(3);
 		await respond(CODEX_ACTIVE, { primary: 100 }, 429);
 		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: refusedAt, primary: 100, secondary: 50 });
 		assert.ok(t.readState().exhaustedUntilByProvider?.[CODEX_ACTIVE] > refusedAt, "the cooldown is on disk");
-		// ...and a window that reset frees it just as promptly.
 		const freedAt = at(4);
 		await respond(CODEX_ACTIVE, { primary: 3, primaryResetAt: start + 18_000_000 });
 		assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: freedAt, primary: 3, secondary: 50 });
@@ -11286,7 +10761,6 @@ test("a Codex usage reading that retires the provider's own availability verdict
 		seedState: {
 			stateVersion: 5,
 			usageByProvider: {
-				// The usage endpoint's answer, a minute old: the same windows, plus "usable right now".
 				[CODEX_ACTIVE]: {
 					provider: CODEX_ACTIVE, family: "codex", fetchedAt: start - 60_000, credentialHash,
 					plan: "pro", account: "fixture@example.com", serviceable: true,
@@ -11318,7 +10792,6 @@ test("a subagent child's latest Codex reading is on disk for other processes whe
 		t.setIdle(true);
 		await t.fire("agent_end", { messages: [okAssistant(CODEX_ACTIVE, "gpt-5.5")] });
 	});
-	// What a second process finds in the file.
 	const reader = spawnSync(process.execPath, [
 		"-e",
 		"process.stdout.write(JSON.stringify(JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8')).usageByProvider))",
@@ -11342,7 +10815,6 @@ test("a subagent child's latest Codex reading is on disk after the session shuts
 	await withoutNetwork(async () => {
 		await respond(CODEX_ACTIVE);
 		await respond(CODEX_SIBLING);
-		// Arrives after the last run boundary: only the shutdown is left to write it.
 		at(45);
 		await respond(CODEX_ACTIVE);
 		await t.fire("session_shutdown");
@@ -11361,11 +10833,9 @@ test("the periodic status tick puts the latest Codex reading of a long run on di
 		await t.fire("agent_start", {});
 		await respond(CODEX_ACTIVE);
 		await respond(CODEX_SIBLING);
-		// One second before the first tick of the run, the same reading arrives again.
 		context.mock.timers.tick(59_000);
 		await respond(CODEX_ACTIVE);
 		context.mock.timers.tick(1_000);
-		// The tick's own usage refresh runs in the background; let it settle before the network check.
 		for (let turn = 0; turn < 5; turn++) await new Promise<void>((resolve) => setImmediate(resolve));
 	});
 	assert.deepEqual(saved(CODEX_ACTIVE), { fetchedAt: start + 59_000, primary: 25, secondary: 40 });
@@ -11374,18 +10844,12 @@ test("the periodic status tick puts the latest Codex reading of a long run on di
 });
 
 test("an account the provider says is usable right now is used, whatever our bookkeeping predicted", async () => {
-	// The exact shape of the real complaint: accounts had recovered — ChatGPT itself answered
-	// `rate_limit.allowed: true, limit_reached: false` — and the extension kept skipping them,
-	// because it had benched them earlier and was consulting only its own recorded cooldown and a
-	// used-percentage that still read 98%. A cooldown is a guess about the future; the account
-	// saying "yes" right now is not, and it has to win.
 	const now = Date.now();
 	const revived = "openai-codex-account-2";
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		seedState: {
 			stateVersion: 5,
-			// Benched by an earlier refusal, and its meter distrusted because of it.
 			exhaustedUntilByProvider: { [revived]: now + 6 * 60 * 60 * 1000 },
 			exhaustedUntilByModel: {},
 			lastProbeAtByProvider: {},
@@ -11423,10 +10887,6 @@ test("an account the provider says is usable right now is used, whatever our boo
 });
 
 test("an account the provider says is blocked is not tried, even while its meter shows headroom", async () => {
-	// The mirror image, and the reason this must read the verdict rather than just ignore
-	// cooldowns: a free-plan account can be refused outright while its monthly window still shows
-	// room. Believing the percentage there is what sent turn after turn into an account that had
-	// already said no.
 	const now = Date.now();
 	const blocked = "openai-codex-account-2";
 	const t = setup({
@@ -11490,11 +10950,6 @@ test("an account the provider says is blocked is not tried, even while its meter
 });
 
 test("a provider verdict of 'usable' clears the recorded bench, it does not merely bypass it", async () => {
-	// Bypassing the cooldown at selection time is not enough: the record stays on disk, keeps the
-	// account looking spent in `status`, and is what the pending-resume timer waits on. When the
-	// account itself says it is usable again, the bench is wrong and has to go — including the
-	// distrust flag that was set when it refused, since that distrust was about the METER, and
-	// the account has now spoken for itself.
 	const now = Date.now();
 	const revived = "openai-codex-account-2";
 	const t = setup({
@@ -11538,17 +10993,8 @@ test("a provider verdict of 'usable' clears the recorded bench, it does not mere
 	);
 });
 
-// ---------------------------------------------------------------------------
-// A newly managed family must not fall out of an existing config
-// ---------------------------------------------------------------------------
 
 test("a managed family missing from a saved providerOrder still joins the rotation", async () => {
-	// `/multi-account` writes the whole config to disk, `providerOrder` included, so every
-	// installed config pins the family list as it stood that day. When a provider is promoted to a
-	// managed family in a later release, an existing config lists neither it (the order predates
-	// it) nor lets it in as an "other" provider (it is managed now) — so an account that worked
-	// yesterday silently vanishes from the ring, and `rediscover` cannot bring it back because
-	// nothing is broken from discovery's point of view. Exactly what happened to kimi-coding.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
@@ -11556,7 +11002,6 @@ test("a managed family missing from a saved providerOrder still joins the rotati
 		},
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		config: {
-			// A config written before kimi-coding became a managed family.
 			providerOrder: ["anthropic", "openai-codex", "cursor", "qwen", "ollama"],
 		},
 	});
@@ -11578,8 +11023,6 @@ test("a managed family missing from a saved providerOrder still joins the rotati
 });
 
 test("an account of a family missing from providerOrder is reachable by failover", async () => {
-	// Being listed is not enough — it has to actually be selectable, which is the difference
-	// between a cosmetic fix and the account carrying work when everything else is spent.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
@@ -11605,9 +11048,6 @@ test("an account of a family missing from providerOrder is reachable by failover
 });
 
 test("the footer says how many other accounts are ready, so 'switch to what?' has an answer", async () => {
-	// The footer described the current account and stopped there. The question a person actually
-	// has when an account runs dry — is there anywhere to go, and how many — had no answer
-	// anywhere short of running `status` and reading fifteen lines.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -11657,9 +11097,6 @@ test("the footer says how many other accounts are ready, so 'switch to what?' ha
 	);
 });
 
-// ---------------------------------------------------------------------------
-// OAuth refresh: losing a race must not be reported as a dead account
-// ---------------------------------------------------------------------------
 
 const { refreshWithDiskRetry, refreshAndPersistWithStorageLock } = (await import("../index.ts")) as {
 	refreshWithDiskRetry: (opts: {
@@ -11680,12 +11117,7 @@ const { refreshWithDiskRetry, refreshAndPersistWithStorageLock } = (await import
 };
 
 test("an invalid_grant is retried with the token another process just wrote", async () => {
-	// Anthropic rotates the refresh token on every use and invalidates the old one immediately.
-	// Any second holder of that credential — another Pi window, a usage probe that raced the
-	// request — therefore presents a token that was valid when it was read and is dead by the time
-	// it is sent. That is a lost race, not a dead account, and the fresh token is already sitting
-	// on disk. Retrying with it is the difference between a working account and one that gets
-	// dropped and demands a re-login it does not need.
+	// external: Anthropic rotates refresh tokens and immediately invalidates the old one.
 	const attempts: string[] = [];
 	const result = await refreshWithDiskRetry({
 		credentials: { type: "oauth", access: "old-access", refresh: "stale-refresh" },
@@ -11916,8 +11348,6 @@ test("a shadowed Codex slot updates the sidecar without exposing OAuth in auth.j
 });
 
 test("a genuinely revoked token is not retried in a loop", async () => {
-	// When disk holds the same token that just failed, nothing has changed and there is nothing to
-	// retry — the account really is revoked and must fail fast so the rotation moves on.
 	let calls = 0;
 	await assert.rejects(
 		refreshWithDiskRetry({
@@ -11934,8 +11364,6 @@ test("a genuinely revoked token is not retried in a loop", async () => {
 });
 
 test("a network failure is not mistaken for a revoked token", async () => {
-	// Only invalid_grant means "this token is dead". A timeout must surface as itself, or a blip
-	// would drop a perfectly good account out of the rotation.
 	let calls = 0;
 	await assert.rejects(
 		refreshWithDiskRetry({
@@ -11952,11 +11380,6 @@ test("a network failure is not mistaken for a revoked token", async () => {
 });
 
 test("a revoked Claude login explains what revoked it, not just 'run /login'", async () => {
-	// Re-logging in and being kicked out again hours later, repeatedly, with the tool saying only
-	// "authorization is invalid, run /login", gives a person no way to break the cycle. Claude
-	// Pro/Max logins from every CLI share ONE client id, and Anthropic keeps one live refresh
-	// token per account for it — so signing the same account into a second tool, a second machine,
-	// or a second slot here silently kills the first. That is the fact that ends the loop.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 	});
@@ -11978,9 +11401,6 @@ test("a revoked Claude login explains what revoked it, not just 'run /login'", a
 });
 
 test("'best' switches straight to an account that can work right now", async () => {
-	// `next` walks the ring one step at a time and `switch` needs a name typed exactly, so with
-	// fourteen accounts — most of them spent — reaching a working one meant pressing next until
-	// something answered. There was no way to say "just put me somewhere that works".
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -12017,7 +11437,6 @@ test("'best' switches straight to an account that can work right now", async () 
 		},
 	});
 	await t.fire("session_start");
-	// Pin the starting point so the assertion can only be satisfied by `best` itself.
 	t.setCurrent("anthropic", "claude-opus-4-8");
 	t.rec.setModels.length = 0;
 	await t.command("best");
@@ -12035,7 +11454,6 @@ test("'best' switches straight to an account that can work right now", async () 
 });
 
 test("'best' says so plainly when nothing can work", async () => {
-	// Silence here would read as "it ignored me". If every account is spent, that is the answer.
 	const now = Date.now();
 	const t = setup({
 		accounts: { anthropic: { type: "oauth", access: "a", refresh: "r" } },
@@ -12067,12 +11485,6 @@ test("'best' says so plainly when nothing can work", async () => {
 });
 
 test("an account we cannot cheaply re-probe is not re-tried every ten minutes", async () => {
-	// The recheck ceiling exists because a quota forecast is a guess and asking again is nearly
-	// free — for accounts with a usage endpoint, where "asking" is a background probe that costs
-	// the user nothing. Kimi publishes no such endpoint (every path 404s), so the only way to ask
-	// is to spend a real turn: the user sends a message, it lands on the spent account, refuses,
-	// and gets bounced. Doing that every ten minutes to an account that just said its quota
-	// returns "in the next billing cycle" is exactly the thrashing this ceiling was meant to stop.
 	const t = setup({
 		accounts: {
 			"kimi-coding": { type: "api_key", key: "kimi-key" },
@@ -12103,8 +11515,6 @@ test("an account we cannot cheaply re-probe is not re-tried every ten minutes", 
 });
 
 test("an account with a usage endpoint still honours the recheck ceiling", async () => {
-	// The ceiling must stay exactly as it was wherever asking is genuinely cheap — that is the
-	// behaviour that stops a month-long forecast from parking a Codex account for weeks.
 	const t = setup({
 		accounts: {
 			"openai-codex-account-2": {
@@ -12216,9 +11626,6 @@ test("an xAI API key is not treated as a cheap subscription usage probe", async 
 });
 
 test("switch accepts the name people actually type", async () => {
-	// `switch kimi` answered `unknown provider "kimi"`, because the slot is called kimi-coding —
-	// so the one command that reaches a chosen account directly required knowing the exact id,
-	// and `next` was the only fallback. A short, unambiguous name is what a person types.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "r" },
@@ -12237,7 +11644,6 @@ test("switch accepts the name people actually type", async () => {
 });
 
 test("an ambiguous short name is refused with the options, not guessed", async () => {
-	// Guessing between two Codex slots would silently spend the wrong account's quota.
 	const t = setup({
 		accounts: {
 			"openai-codex-account-2": {
@@ -12265,7 +11671,6 @@ test("an ambiguous short name is refused with the options, not guessed", async (
 });
 
 test("an exact id still wins over any prefix match", async () => {
-	// `ollama` must never resolve to `ollama-account-2` just because both start the same way.
 	const t = setup({
 		accounts: {
 			ollama: { type: "api_key", key: "k1" },
@@ -12285,10 +11690,6 @@ test("an exact id still wins over any prefix match", async () => {
 });
 
 test("a confirmed-available account outranks one whose state is merely unknown", async () => {
-	// `best` promised "an account that can work right now" and landed on Kimi, which was out of
-	// quota. Ranking treated "the provider told us allowed:true" and "we have no idea" as the same
-	// thing, so an unmeasurable account sitting earlier in the ring beat a measured, confirmed one.
-	// Confirmation is evidence; absence of a cooldown is not.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -12302,7 +11703,6 @@ test("a confirmed-available account outranks one whose state is merely unknown",
 			},
 		},
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		// Kimi sits EARLIER in the ring than the codex slot, so only ranking can save this.
 		config: { providerOrder: ["anthropic", "kimi-coding", "openai-codex"] },
 		seedState: {
 			stateVersion: 5,
@@ -12335,9 +11735,6 @@ test("a confirmed-available account outranks one whose state is merely unknown",
 });
 
 test("when nothing is confirmed, best says the choice is a guess", async () => {
-	// With every measurable account spent, the only candidates left are ones we cannot check.
-	// Switching there silently reads as "it threw me somewhere random again" — which is exactly
-	// how it looked. Saying it is an unverified guess makes the same action honest.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -12367,16 +11764,6 @@ test("when nothing is confirmed, best says the choice is a guess", async () => {
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Forced OAuth refresh: a rotated token must never be thrown away (issue #22)
-// ---------------------------------------------------------------------------
-//
-// Anthropic (and Cursor) rotate the refresh token on every refresh call and revoke the old
-// one immediately. So a forced refresh we cannot PERSIST does not merely fail — it destroys
-// the account's credential and discards the replacement. On pi 0.84.x that is exactly what
-// happened: `AuthStorage` no longer exposes the `set()` this extension persisted with, the
-// post-refresh guard tripped every single time, and the user lost their Claude login roughly
-// once a day, needing a manual `/login`.
 
 test("a refreshed credential is persisted through pi 0.84's AuthStorage, which has no set()", async () => {
 	installCursorProvider();
@@ -12422,9 +11809,6 @@ test("a refreshed credential is persisted through pi 0.84's AuthStorage, which h
 });
 
 test("with nowhere to persist, the token is never rotated in the first place", async () => {
-	// The order matters more than the outcome: checking persistence AFTER the network call
-	// is what burned the credential. A host that cannot store the result must never get as
-	// far as asking the provider to rotate it.
 	assert.equal(
 		canPersistRefreshedCredentials({ read: async () => undefined }, () => false),
 		false,
@@ -12466,7 +11850,6 @@ test("persistence falls through modify -> set -> auth.json instead of dropping t
 	);
 	assert.deepEqual(modified, [{ provider: "anthropic", next: credential }]);
 
-	// A host whose modify() throws (locked file, read-only storage) must still land the token.
 	const setCalls: any[] = [];
 	assert.equal(
 		await persistRefreshedCredentials(
@@ -12483,7 +11866,6 @@ test("persistence falls through modify -> set -> auth.json instead of dropping t
 	);
 	assert.deepEqual(setCalls, [{ provider: "anthropic", value: credential }]);
 
-	// Neither method exists: write auth.json ourselves rather than lose a rotated token.
 	let written: any;
 	assert.equal(
 		await persistRefreshedCredentials({ reload: () => {} }, "anthropic", credential, {
@@ -12499,7 +11881,6 @@ test("persistence falls through modify -> set -> auth.json instead of dropping t
 		anthropic: credential,
 	});
 
-	// And when nothing can store it, say so — never report a refresh that did not stick.
 	assert.equal(
 		await persistRefreshedCredentials({}, "anthropic", credential, {
 			read: () => ({}),
@@ -12512,10 +11893,6 @@ test("persistence falls through modify -> set -> auth.json instead of dropping t
 });
 
 test("a forced Cursor refresh loads the vendored provider, not the retired clone path", async () => {
-	// Cursor's refresh used to be imported from
-	// ~/.pi/agent/git/github.com/ndraiman/pi-cursor-provider/auth.ts — a path that stopped
-	// existing when the provider was vendored into this extension (issue #20), so every
-	// forced Cursor refresh threw before it could refresh anything.
 	installCursorProvider();
 	const t = setup({
 		accounts: {
@@ -12541,16 +11918,6 @@ test("a forced Cursor refresh loads the vendored provider, not the retired clone
 	uninstallCursorProvider();
 });
 
-// ---------------------------------------------------------------------------
-// The registry is Pi's, not ours: narrowing /model must not delete models
-// ---------------------------------------------------------------------------
-//
-// Pi's model registry is the single place ANYTHING — Pi itself, a `--models` pattern,
-// another extension pinning a model by reference — asks "does this model exist?".
-// Re-registering a provider with `models: []` answers "no" to every one of them, so
-// emptying a provider Pi knows on its own does not hide a model, it deletes it. The
-// caller then falls back to whatever the session is running on, which under rotation is
-// a different account every few turns: invisible from here, undebuggable from there.
 
 test("only-active never makes a model Pi knows on its own unresolvable", async () => {
 	const t = setup({
@@ -12562,8 +11929,6 @@ test("only-active never makes a model Pi knows on its own unresolvable", async (
 				refresh: "cr2",
 				accountId: "codex-2",
 			},
-			// A provider Pi knows from models.json / its own built-ins. This extension
-			// never registered it and must never unregister it.
 			zai: { type: "api_key", key: "sk-zai" },
 		},
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -12571,7 +11936,6 @@ test("only-active never makes a model Pi knows on its own unresolvable", async (
 	await t.fire("session_start");
 	await t.command("only-active on");
 
-	// Exactly how an outside caller resolves a pinned model.
 	const resolvable = (provider: string) =>
 		t.ctx.modelRegistry
 			.getAll()
@@ -12592,7 +11956,6 @@ test("only-active never makes a model Pi knows on its own unresolvable", async (
 });
 
 test("only-active never empties a public provider, including account aliases", async () => {
-	// A picker preference cannot remove routes from any independent Pi client.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "ar" },
@@ -12625,11 +11988,6 @@ test("only-active never empties a public provider, including account aliases", a
 });
 
 test("a slot published into models.json is usable by a bare child, not just resolvable", async () => {
-	// Publishing a provider Pi cannot authenticate is worse than not publishing it: the
-	// model resolves and every call then dies at `credentials_not_configured`. Cursor's
-	// real credential is an OAuth token this extension holds and a child cannot read, so
-	// the published entry carries the proxy's own placeholder — the proxy recognises it
-	// and supplies the real token itself.
 	installCursorProvider();
 	const t = setup({
 		accounts: { cursor: { type: "oauth", access: "c", refresh: "cr" } },
@@ -12649,9 +12007,6 @@ test("a slot published into models.json is usable by a bare child, not just reso
 });
 
 test("the published placeholder is the one the vendored proxy actually accepts", async () => {
-	// The placeholder only works because cursor/cursor-shared.ts treats this exact string
-	// as "no token on this request". If the vendored provider ever stops doing that,
-	// publishing it would send a bogus bearer instead of falling back to the real token.
 	const shared = readFileSync(
 		join(dirname(fileURLToPath(import.meta.url)), "..", "cursor", "cursor-shared.ts"),
 		"utf8",
@@ -12663,16 +12018,7 @@ test("the published placeholder is the one the vendored proxy actually accepts",
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Mid-run context guard — wiring
-//
-// context-guard.test.ts proves the accounting and the elision. These prove the extension
-// actually reaches them: the guard has to fire from inside the `context` hook (the only hook Pi
-// runs before EVERY LLM call, including the hundreds inside one autonomous run) and it has to ask
-// for a real summary only once the agent has settled.
-// ---------------------------------------------------------------------------
 
-/** A conversation shaped like the real 78-minute run: mostly large tool results. */
 function bigConversation(turns: number) {
 	const messages: any[] = [
 		{ role: "user", content: [{ type: "text", text: "продовжуй" }], timestamp: 1 },
@@ -12692,21 +12038,19 @@ function bigConversation(turns: number) {
 			toolName: "read",
 			isError: false,
 			timestamp: 2000 + i,
-			content: [{ type: "text", text: "x".repeat(20_000) }], // 5 000 tokens each
+			content: [{ type: "text", text: "x".repeat(20_000) }],
 		});
 	}
 	return messages;
 }
 
 test("the context guard measures the request a context-owning extension actually sends", async () => {
-	// OptChat replaces the whole conversation in `context_with_system`. The guard used to measure
-	// Pi's raw transcript in `context` and warned "75% of the window" while 136k of 1M went out.
 	const t = setup({ current: { provider: "anthropic", id: "claude-opus-5-5" } });
 	t.ctx.model.contextWindow = 1_000_000;
 	const notices: string[] = [];
 	t.ctx.ui.notify = (message: string) => notices.push(message);
 	if (!piHasContextWithSystem(PI_HOST_VERSION)) {
-		// Pi < 0.87 has no request-time phase after `context`, so the guard measures there.
+		// external: Pi before 0.87 has no request-time phase after context.
 		assert.ok(t.hasHandler("context"), `on Pi ${PI_HOST_VERSION} the guard must run in context`);
 		assert.equal(t.hasHandler("context_with_system"), false, "no handler for a phase this host never emits");
 		return;
@@ -12715,7 +12059,7 @@ test("the context guard measures the request a context-owning extension actually
 	const projected = [{ role: "system", content: "prompt" }, ...bigConversation(5)];
 	t.prependHandler("context_with_system", () => ({ messages: projected }));
 
-	const result = await t.fire("context", { messages: bigConversation(70) }); // ~350k raw tokens
+	const result = await t.fire("context", { messages: bigConversation(70) });
 
 	assert.equal(result?.messages, projected, "the projected request goes out untouched");
 	assert.deepEqual(notices.filter((n) => n.includes("context reached")), []);
@@ -12726,8 +12070,6 @@ test("the context guard trims a mid-run request instead of letting it overflow",
 	t.ctx.model.contextWindow = 272_000;
 	t.ctx.getSystemPrompt = () => "s".repeat(24_000);
 
-	// ~250 000 tokens of tool results: past the soft line, and the point at which Pi itself would
-	// still be doing nothing at all because the run has not ended.
 	const messages = bigConversation(50);
 	const result = await t.fire("context", { messages });
 
@@ -12738,10 +12080,8 @@ test("the context guard trims a mid-run request instead of letting it overflow",
 			m.role === "toolResult" && String(m.content?.[0]?.text ?? "").includes("context-guard"),
 	);
 	assert.ok(stubbed.length > 0, "old tool output must be left out of the request");
-	// The tail the agent is actively working in stays verbatim.
 	const last = result.messages[result.messages.length - 1];
 	assert.equal(String(last.content[0].text).includes("context-guard"), false);
-	// And the transcript Pi holds is untouched — we only shape what goes over the wire.
 	assert.equal(messages[2].content[0].text.length, 20_000);
 });
 
@@ -12768,8 +12108,6 @@ test("the context guard asks for a real summary only once the agent has settled"
 	t.ctx.getSystemPrompt = () => "";
 
 	await t.fire("context", { messages: bigConversation(50) });
-	// Mid-run: nothing may call compact(), because the real one starts with an abort() and would
-	// throw away the work the agent is in the middle of.
 	t.setIdle(false);
 	await t.fire("agent_settled", {});
 	assert.equal(t.rec.compacts.length, 0, "compaction must never be triggered mid-run");
@@ -12778,12 +12116,7 @@ test("the context guard asks for a real summary only once the agent has settled"
 	await t.fire("agent_settled", {});
 	assert.equal(t.rec.compacts.length, 1, "a settled boundary is where the summary belongs");
 
-	// A compaction rebuilds the message list, so every elision key now points at history that is
-	// no longer in the request. If the guard kept them, the next small request would come back
-	// stubbed for no reason — and the prompt cache would be thrown away with it.
 	await t.fire("session_compact", {});
-	// 20 turns: comfortably under the soft line, but long enough that part of it sits outside the
-	// protected tail — so a stale elision key would visibly stub it.
 	const afterCompaction = await t.fire("context", { messages: bigConversation(20) });
 	assert.equal(afterCompaction, undefined, "stale elisions must not survive a summary");
 	t.setIdle(true);
@@ -13012,7 +12345,6 @@ test("provider policy refusal stops failover until genuine user input", async ()
 	assert.deepEqual(t.rec.setModels, [], "extension-owned input must not reset the refusal latch");
 
 	await t.input("Retry the request");
-	// The test host reuses one context object; Pi gives a new user turn a fresh AbortSignal.
 	t.ctx.signal.aborted = false;
 	await t.fire("message_end", {
 		message: assistantError("anthropic", "claude-opus-4-8", "429 rate limit exceeded"),
@@ -13041,7 +12373,6 @@ test("continueAfterCompaction also opts out of context-guard wake", async () => 
 
 test("the context guard stands down when the model's window is unknown", async () => {
 	const t = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" } });
-	// mkModel deliberately has no contextWindow: with no window there is no basis for a decision.
 	const messages = bigConversation(50);
 	const result = await t.fire("context", { messages });
 	assert.equal(result, undefined, "no window ⇒ no opinion, never a guess");
@@ -13061,15 +12392,11 @@ test("the context guard leaves an ordinary conversation completely alone", async
 	assert.equal(t.rec.compacts.length, 0);
 });
 
-// The guard lives entirely in this extension, so a Pi update cannot delete it — but it CAN stop
-// calling it. Every handler here is crash-isolated, so a removed hook does not fail loudly: the
-// guard just never runs again. These lock the detection of that silent death.
 
 test("the context guard reports itself when the host stops calling the pre-request hook", async () => {
 	const t = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" } });
 	t.ctx.model.contextWindow = 272_000;
 	const usage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 };
-	// Six LLM responses and not one `context` event: the hook the guard hangs off is gone.
 	for (let i = 0; i < 6; i++) {
 		await t.fire("message_end", {
 			message: {
@@ -13085,7 +12412,6 @@ test("the context guard reports itself when the host stops calling the pre-reque
 	}
 	const warning = t.rec.notifies.find((n: string) => n.includes("context guard is NOT running"));
 	assert.ok(warning, `expected a warning, got: ${JSON.stringify(t.rec.notifies)}`);
-	// Said once, not on every turn.
 	assert.equal(
 		t.rec.notifies.filter((n: string) => n.includes("context guard is NOT running")).length,
 		1,
@@ -13094,8 +12420,6 @@ test("the context guard reports itself when the host stops calling the pre-reque
 
 test("the context guard says so when it has no window to measure against", async () => {
 	const t = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" } });
-	// mkModel has no contextWindow — the guard stands down, and silently standing down is exactly
-	// the state a user must be told about rather than left to discover from an overflow.
 	const usage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 };
 	for (let i = 0; i < 6; i++) {
 		await t.fire("context", { messages: bigConversation(1) });
@@ -13148,17 +12472,8 @@ test("a healthy guarded session says nothing at all", async () => {
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Carrying the task on after an automatic compaction
-//
-// Pi ends the run whenever a threshold compaction fires. The continuation route is Pi's own:
-// `_runAutoCompaction` returns `this.agent.hasQueuedMessages()`, and `_runAgentPrompt` turns a
-// `true` there into `agent.continue()`, which drains the follow-up queue. Pi uses that for
-// overflow recovery but queues nothing on the threshold path. These lock the one queued
-// follow-up, and every case where it must stay silent.
-// ---------------------------------------------------------------------------
 
-/** Fire session_compact the way Pi does mid-run: the run loop is still live. */
+// external: Pi emits session_compact during a live run loop.
 async function fireCompact(t: ReturnType<typeof setup>, over: Record<string, unknown> = {}) {
 	t.setIdle(false);
 	return t.fire("session_compact", {
@@ -13185,14 +12500,10 @@ test("an automatic compaction carries the task on when explicitly enabled", asyn
 
 	const queued = continuations(t);
 	assert.equal(queued.length, 1, "exactly one follow-up may be queued");
-	// followUp is what agent.continue() drains when the last message is an assistant — which is
-	// always the case right after a compaction rebuilt the context.
 	assert.equal(queued[0].options?.deliverAs, "followUp");
 	assert.equal(queued[0].message.display, true, "the user must be able to see why it carried on");
 	const text = String(queued[0].message.content);
 	assert.match(text, /compacted/i);
-	// The escape hatch that makes this safe: ~a third of compactions land on finished work, and
-	// no cheap signal separates them, so the model is told plainly that "done" is a valid answer.
 	assert.match(text, /really is finished/i);
 	assert.match(text, /[Dd]o not restart/);
 });
@@ -13206,9 +12517,7 @@ test("an automatic compaction continuation stays inside the current recovery cha
 	await fireCompact(t);
 	assert.equal(continuations(t).length, 1);
 
-	// Pi starts the queued custom follow-up without an input event. before_agent_start must
-	// recognise it as the continuation we just queued, not as a fresh owner prompt that resets
-	// the shared failover/compaction budget.
+	// external: Pi starts queued custom follow-up without an input event.
 	await t.fire("before_agent_start", {});
 	await fireCompact(t);
 	assert.equal(
@@ -13221,7 +12530,7 @@ test("an automatic compaction continuation stays inside the current recovery cha
 test("it stays out of the way when Pi is already continuing the turn itself", async () => {
 	const t = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" } });
 	await t.fire("agent_start");
-	// Overflow recovery: Pi returns true from _runAutoCompaction on its own and calls continue().
+	// external: Pi continues automatically after overflow compaction.
 	await fireCompact(t, { reason: "overflow", willRetry: true });
 	assert.equal(continuations(t).length, 0, "a second queued message would double the turn");
 });
@@ -13237,8 +12546,6 @@ test("nothing is queued once the session is idle", async () => {
 	const t = setup({ current: { provider: "openai-codex", id: "gpt-5.6-sol" } });
 	await t.fire("agent_start");
 	t.setIdle(true);
-	// With no live run the follow-up queue is never drained; the same call would instead append a
-	// stray message that nothing delivers.
 	await t.fire("session_compact", {
 		compactionEntry: { type: "compaction", summary: "s", firstKeptEntryId: "e1" },
 		reason: "threshold",
@@ -13307,8 +12614,6 @@ test("a mixed context, quota, and continuation chain ends at the shared global r
 	assert.ok(initialChain.some((event: any) => event.category === "quota"));
 
 	for (let attempt = 0; attempt < 50; attempt++) {
-		// Simulate an actual quota response between automatic continuations. It resets the
-		// shorter no-request guard, but not the global no-success recovery budget.
 		await t.fire("after_provider_response", { status: 429, headers: {} });
 		await fireCompact(t);
 		if (t.rec.notifies.some((message: string) => /automatic failover has STOPPED itself/.test(message))) break;
@@ -13360,16 +12665,7 @@ test("contextGuard and continueAfterCompaction can each be turned off alone", as
 	assert.equal(continuations(on).length, 1, "explicit opt-in is on");
 });
 
-// ---------------------------------------------------------------------------
-// The failover ladder — where work goes once the whole provider is spent
-//
-// Rotation's first step already works: 588 of 602 automatic failovers in the black box stayed
-// inside the same provider family. The other 14 had no policy behind them and scattered across
-// five destinations, and not one of the 602 ever reached a per-token account. These lock the
-// ladder that replaces that, and — just as importantly — the two things it must never override.
-// ---------------------------------------------------------------------------
 
-/** Three live families plus a per-token provider, none of them cooling. */
 const LADDER_ACCOUNTS = {
 	anthropic: { type: "oauth" as const, access: "a", refresh: "ar" },
 	"kimi-coding-account-2": { type: "oauth" as const, access: "k", refresh: "kr", accountId: "k2" },
@@ -13378,9 +12674,6 @@ const LADDER_ACCOUNTS = {
 };
 
 test("the ladder decides the hop the telemetry cannot", async () => {
-	// Leaving Codex with nothing to separate the survivors: all live, none refused. This is the
-	// exact spot where the old order fell through to discovery sequence and the destination was
-	// effectively arbitrary.
 	const t = setup({
 		accounts: { ...LADDER_ACCOUNTS, "openai-codex": { type: "oauth", access: "o", refresh: "or2" } },
 		current: { provider: "openai-codex", id: "gpt-5.5" },
@@ -13394,7 +12687,6 @@ test("the ladder decides the hop the telemetry cannot", async () => {
 });
 
 test("reordering the ladder reorders the hop", async () => {
-	// The same starting position, one setting different — nothing else may explain the change.
 	const t = setup({
 		accounts: { ...LADDER_ACCOUNTS, "openai-codex": { type: "oauth", access: "o", refresh: "or2" } },
 		current: { provider: "openai-codex", id: "gpt-5.5" },
@@ -13408,8 +12700,6 @@ test("reordering the ladder reorders the hop", async () => {
 });
 
 test("a per-token account is not spent while a flat-rate one is free", async () => {
-	// Never reached automatically in 602 failovers, which was right — but by accident of
-	// `providerOrder` being unable to name it, not by a policy anyone chose. Now it is the policy.
 	const t = setup({
 		accounts: { ...LADDER_ACCOUNTS, "openai-codex": { type: "oauth", access: "o", refresh: "or2" } },
 		current: { provider: "openai-codex", id: "gpt-5.5" },
@@ -13437,9 +12727,6 @@ test("naming a per-token provider first is honoured — it is the user's money",
 });
 
 test("the ladder never pulls work off the current family while a sibling is free", async () => {
-	// The step that already worked, and the one the ladder must not touch: staying on the family
-	// keeps the model the user chose. A ladder that ranks anthropic first must still try the other
-	// Codex slot before leaving Codex at all.
 	const t = setup({
 		accounts: {
 			anthropic: { type: "oauth", access: "a", refresh: "ar" },
@@ -13457,8 +12744,6 @@ test("the ladder never pulls work off the current family while a sibling is free
 });
 
 test("the ladder never sends work to an account the provider says is spent", async () => {
-	// Evidence about one account beats a preference about its category. An earlier draft put the
-	// ladder above the liveness signals and this is the case that caught it.
 	const now = Date.now();
 	const t = setup({
 		accounts: {
@@ -13467,7 +12752,6 @@ test("the ladder never sends work to an account the provider says is spent", asy
 			alibaba: { type: "api_key", key: "qwen-key" },
 		},
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		// Codex is ranked ahead of Qwen — and is also reported 100 % used.
 		config: { providerPriority: ["openai-codex", "qwen"] },
 		seedState: {
 			stateVersion: 5,
@@ -13503,7 +12787,6 @@ test("an empty ladder leaves every ordering exactly as it was", async () => {
 	assert.ok(t.rec.setModels.length > 0, "failover must still happen with no stated preference");
 });
 
-// ---- the command -----------------------------------------------------------
 
 test("/multi-account priority reports the ladder without changing it", async () => {
 	const t = setup({ current: { provider: "anthropic", id: "claude-opus-5" } });
@@ -13531,7 +12814,6 @@ test("/multi-account priority sets, persists and confirms a new ladder", async (
 });
 
 test("/multi-account priority names providers you are not logged in to", async () => {
-	// Otherwise a typo produces a ladder that looks accepted and silently never applies.
 	const t = setup({ current: { provider: "anthropic", id: "claude-opus-5" } });
 	await t.command("priority anthropic totally-made-up");
 	assert.match(t.rec.notifies.join("\n"), /Not logged in.*totally-made-up/s);
@@ -13566,13 +12848,6 @@ test("/multi-account priority distinguishes reset from clear", async () => {
 	]);
 });
 
-// ---------------------------------------------------------------------------
-// Pi's published files: the contract this extension actually depends on
-//
-// Two Pi changes have broken this extension without announcing themselves, because neither
-// auth.json nor models.json carries a schema version. These lock the detection: the extension
-// looks at the files, and says so when one stops matching.
-// ---------------------------------------------------------------------------
 
 const contractWarning = (t: ReturnType<typeof setup>) =>
 	t.rec.notifies.find((message) => message.includes("no longer matches what this extension"));
@@ -13586,13 +12861,9 @@ test("a healthy install says nothing about the file contract", async () => {
 });
 
 test("a models.json written with bare model ids is reported at session start", async () => {
-	// The real incident: bare strings where Pi requires objects made Pi reject the WHOLE file, so
-	// every custom provider the user had vanished at once, silently.
 	writeFileSync(
 		MODELS,
 		JSON.stringify({
-			// A third-party provider on purpose: our own slots get rewritten by provisioning, and
-			// the point of the check is the file as the USER left it.
 			providers: { "my-local-thing": { api: "openai-completions", models: ["k3"] } },
 		}),
 	);
@@ -13603,7 +12874,6 @@ test("a models.json written with bare model ids is reported at session start", a
 		assert.ok(warning, `expected a contract warning; notifies=${t.rec.notifies.join(" | ")}`);
 		assert.match(warning, /models\.json/);
 		assert.match(warning, /bare string/);
-		// Blast radius, or it reads like a problem confined to one slot.
 		assert.match(warning, /ENTIRE file/);
 		await t.fire("session_shutdown");
 	} finally {
@@ -13626,8 +12896,6 @@ test("a corrupt published file is reported rather than silently ignored", async 
 });
 
 test("settings.json is NOT judged before a switch has happened", async () => {
-	// At session start the file legitimately still names the previous session's choice. Warning
-	// about that would be noise on every single startup.
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		settings: { defaultProvider: "openai-codex-account-2", defaultModel: "gpt-5.5" },
@@ -13680,7 +12948,6 @@ test("after a switch, settings.json naming the live model is silent", async () =
 		settings: { defaultProvider: "anthropic", defaultModel: "claude-opus-4-8" },
 	});
 	await t.fire("session_start");
-	// Pi did its job: the file follows the switch.
 	t.setCurrent("openai-codex-account-2", "gpt-5.5");
 	writeFileSync(
 		SETTINGS,
@@ -13692,14 +12959,8 @@ test("after a switch, settings.json naming the live model is silent", async () =
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// What the rotation looks like to something that does NOT load this extension
-// ---------------------------------------------------------------------------
 
 test("with the proxy off, status says which slots an extension-free child cannot authenticate to", async () => {
-	// Measured 2026-08-24: a numbered slot with an OAuth credential resolves by name and then
-	// fails with "No API key found", because Pi honours OAuth only for a provider definition that
-	// declares the flow. Publishing the name is not publishing a usable route.
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -13715,16 +12976,13 @@ test("with the proxy off, status says which slots an extension-free child cannot
 	await t.command("status");
 	const status = t.rec.notifies.at(-1) ?? "";
 	assert.match(status, /Extension-free children: \d+\/\d+ rotation slots usable/);
-	// The numbered OAuth slot is the unusable one; the built-in and the API-key account are not.
 	assert.match(status, /cannot authenticate: [^\n]*openai-codex-account-2/);
 	assert.equal(/cannot authenticate: [^\n]*\bzai\b/.test(status), false, status);
 	await t.fire("session_shutdown");
 });
 
 test("with the proxy off, status warns that the saved default a bare unpinned child inherits is unusable", async () => {
-	// A child without --model inherits settings.json. Since Pi 0.84.3 this saved global choice is
-	// deliberately independent of the current session's live route; if it is unusable, the child
-	// silently falls back to another provider. Explicitly pinned broker/subagent children bypass it.
+	// external: Since Pi 0.84.3 the saved global choice is not persisted on each model switch.
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
@@ -13741,9 +12999,7 @@ test("with the proxy off, status warns that the saved default a bare unpinned ch
 });
 
 test("a canonical port held by an independent process cannot hang session_start", async () => {
-	// A same-process listener can re-enter listen() synchronously after EADDRINUSE on some Node
-	// versions, which let the ownership test below pass while every second real Pi process hung.
-	// Hold the canonical port from another process to reproduce the actual multi-session boundary.
+	// external: Some Node versions can synchronously re-enter listen after EADDRINUSE.
 	process.env.PI_MULTI_ACCOUNT_SLOT_PROXY_PORT = String(takeSlotProxyPort());
 	const port = currentSlotProxyPort();
 	const blocker = spawn(
@@ -13754,7 +13010,6 @@ test("a canonical port held by an independent process cannot hang session_start"
 		],
 		{ stdio: ["ignore", "pipe", "inherit"] },
 	);
-	// A blocker that cannot bind exits without a word; waiting only for "ready" hung the file.
 	await new Promise<void>((resolve, reject) => {
 		blocker.once("error", reject);
 		blocker.once("exit", (code) => reject(new Error(`the port blocker exited (${code}) before listening on ${port}`)));
@@ -13783,12 +13038,6 @@ test("a canonical port held by an independent process cannot hang session_start"
 });
 
 test("a second process that cannot own the canonical port leaves the owner's files alone", async () => {
-	// The listening port IS the ownership token for the SHARED files. A second Pi process — and
-	// a `pi-subagents` child is just another process on this machine — used to hit EADDRINUSE,
-	// quietly take a RANDOM port, and republish every rotation slot against itself. The owner's
-	// children were then pointed at a socket that died the moment that short-lived process
-	// exited, and its shutdown restored auth.json and unpublished routes that were never its
-	// own. A non-owner may serve its own callers, but must not touch models.json or auth.json.
 	const owner = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		accounts: {
@@ -13811,9 +13060,6 @@ test("a second process that cannot own the canonical port leaves the owner's fil
 		"precondition: the owner shadowed the credential a child must not see",
 	);
 
-	// A second instance on the same machine, contending for the port the owner still holds. It
-	// starts from the files exactly as the owner left them — that is what a real second process
-	// finds on disk, shadow and all.
 	const second = setup({
 		reuseSlotProxyPort: true,
 		sessionId: "non-owner-session",
@@ -13843,8 +13089,6 @@ test("a second process that cannot own the canonical port leaves the owner's fil
 });
 
 test("a slot published against a parent-owned loopback route counts as usable", async () => {
-	// This is what the Cursor slots already do: a non-secret placeholder plus a route the parent
-	// serves, so the child authenticates to this machine and the real token never leaves.
 	writeFileSync(
 		MODELS,
 		JSON.stringify({
@@ -13888,8 +13132,6 @@ test("shutdown drains pending model publications before cleaning shared routes",
 		assert.match(provider.baseUrl, /^http:\/\/127\.0\.0\.1:/);
 		mkdirSync(`${MODELS}.lock`);
 		await t.command("rediscover");
-		// A contending publisher releases its lock asynchronously. Blocking cleanup
-		// before our pending writer drains would starve this timer and abandon routes.
 		unlock = setTimeout(() => rmSync(`${MODELS}.lock`, { recursive: true, force: true }), 20);
 		await t.fire("session_shutdown");
 		const remaining = JSON.parse(readFileSync(MODELS, "utf8")).providers?.anthropic;
@@ -13903,10 +13145,7 @@ test("shutdown drains pending model publications before cleaning shared routes",
 });
 
 test("a reload keeps numbered accounts published, so the rebuilt registry never falls back to the base account", async () => {
-	// Live 2026-11-04: Pi's reload fires session_shutdown("reload"), rebuilds its model registry
-	// from models.json, then fires session_start. Unpublishing anthropic-account-2 on that shutdown
-	// left only the base `anthropic` (another account) for about a second; a summary requested in
-	// that gap went to account 1 and failed with "credit balance is too low".
+	// external: Pi reload fires session_shutdown and rebuilds its model registry before session_start.
 	rmSync(MODELS, { force: true });
 	const accounts: Account = {
 		anthropic: { type: "api_key", key: "sk-ant-api-base-fixture" },
@@ -13924,7 +13163,6 @@ test("a reload keeps numbered accounts published, so the rebuilt registry never 
 			"Pi rebuilds its registry from models.json between reload's shutdown and start");
 		assert.equal(JSON.parse(readFileSync(AUTH, "utf8"))["anthropic-account-2"].type, "api_key",
 			"the child-facing placeholder stays while the same process restarts");
-		// A request in the handoff gap waits for the next root instead of failing.
 		const inGap = callProxy(route, "/v1/messages", {});
 		reloaded = setup({ reuseSlotProxyPort: true, preserveConfig: true,
 			accounts: JSON.parse(readFileSync(AUTH, "utf8")),
@@ -13996,14 +13234,10 @@ test("user modelOverrides survive proxy publication, rediscovery, and shutdown c
 		assert.match(provider.baseUrl, /^http:\/\/127\.0\.0\.1:/);
 		assert.deepEqual(provider.modelOverrides, modelOverrides);
 
-		// Force rediscovery to replace stale generated routing/catalog data again. The user's
-		// override layer must survive even when provisioning cannot take its no-op fast path.
 		provider.baseUrl = "https://stale-again.example.invalid";
 		provider.models = [{ id: "claude-opus-5", contextWindow: 1_000_000 }];
 		writeFileSync(MODELS, JSON.stringify({ providers: { anthropic: provider } }));
 		await t.command("rediscover");
-		// Rediscovery publishes in the background; wait for the async file transaction,
-		// not a single event-loop turn (which need not finish lock acquisition).
 		for (let attempt = 0; attempt < 200; attempt++) {
 			provider = JSON.parse(readFileSync(MODELS, "utf8")).providers.anthropic;
 			if (provider.baseUrl.startsWith("http://127.0.0.1:")) break;
@@ -14023,8 +13257,6 @@ test("user modelOverrides survive proxy publication, rediscovery, and shutdown c
 });
 
 test("with the proxy on, the OAuth slots a child could not use become usable", async () => {
-	// The whole point of the parent-owned route: the slot the rotation chose is the slot the
-	// child runs on, instead of Pi's first-available provider on some other vendor.
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -14046,13 +13278,9 @@ test("with the proxy on, the OAuth slots a child could not use become usable", a
 		);
 		assert.equal(/first-available provider/.test(status), false, status);
 
-		// And the route it was published against is this machine, with a non-secret placeholder —
-		// the real OAuth token must never be written into a file a child reads.
 		const slot = JSON.parse(readFileSync(MODELS, "utf8")).providers["openai-codex-account-2"];
 		assert.ok(slot, "the slot must be published for a bare child to resolve it");
 		assert.equal(new URL(slot.baseUrl).hostname, "127.0.0.1");
-		// A key must be published or Pi refuses the provider outright; which shape it takes per
-		// family is covered by its own test.
 		assert.ok(typeof slot.apiKey === "string" && slot.apiKey.length > 0);
 		const published = readFileSync(MODELS, "utf8");
 		assert.equal(published.includes("c-tok-2"), false, "no real token in a published file");
@@ -14063,7 +13291,6 @@ test("with the proxy on, the OAuth slots a child could not use become usable", a
 	}
 });
 
-/** Talk to the running proxy the way a bare child would: plain HTTP on loopback. */
 function callProxy(
 	baseUrl: string,
 	path: string,
@@ -14124,13 +13351,11 @@ test("the proxy swaps the placeholder for the real token and never forwards the 
 
 		const response = await callProxy(slot.baseUrl, "/codex/responses", {
 			authorization: `Bearer ${slot.apiKey}`,
-			// Pi fills this in from the placeholder it was given; the proxy must replace it.
 			"chatgpt-account-id": "pi-multi-account-proxy",
 		});
 		assert.equal(response.status, 200);
 		assert.equal(seen.length, 1, "the request must reach the upstream exactly once");
 		assert.equal(seen[0].url, "https://chatgpt.com/backend-api/codex/responses");
-		// The real credential is added here and only here — a child never holds it.
 		assert.equal(seen[0].headers.authorization, "Bearer c-tok-2");
 		assert.equal(seen[0].headers["chatgpt-account-id"], "acct-9");
 		assert.equal(
@@ -14146,8 +13371,7 @@ test("the proxy swaps the placeholder for the real token and never forwards the 
 });
 
 test("the proxy refreshes an expired opaque Anthropic token before forwarding", async () => {
-	// Anthropic OAuth access tokens (`sk-ant-oat…`) are not JWTs, so there is no `exp` to decode.
-	// The stored `expires` is the only expiry signal; ignoring it forwards a dead token upstream.
+	// external: Anthropic OAuth access tokens are not JWTs and do not expose exp.
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -14382,7 +13606,7 @@ test("production Anthropic refresh keeps a shadowed slot private throughout pers
 		t.ctx.modelRegistry.authStorage.modify = async (...args: any[]) => {
 			const result = await modify(...args);
 			snapshots.push(JSON.parse(readFileSync(AUTH, "utf8"))[slotId]);
-			await wait(10); // A bare child could observe this committed auth snapshot.
+			await wait(10);
 			return result;
 		};
 		globalThis.fetch = (async (url: any, init: any) => {
@@ -14520,9 +13744,6 @@ test("a disconnected loopback caller aborts its upstream request without a provi
 });
 
 test("the proxy refuses a caller that did not come from a slot we published", async () => {
-	// A loopback port is reachable by every process on this machine, and what sits behind it is
-	// the user's subscription. Anything that cannot present the published placeholder is refused
-	// before a single upstream call is made.
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -14546,7 +13767,6 @@ test("the proxy refuses a caller that did not come from a slot we published", as
 			authorization: "Bearer sk-someone-elses-key",
 		});
 		assert.equal(wrongKey.status, 401);
-		// Nor may the refusal repeat back what was presented — refusals get logged.
 		assert.equal(wrongKey.body.includes("sk-someone-elses-key"), false);
 
 		const port = new URL(slot.baseUrl).port;
@@ -14564,8 +13784,7 @@ test("the proxy refuses a caller that did not come from a slot we published", as
 });
 
 test("the proxy refuses a WebSocket upgrade so Pi falls back to SSE without a wasted round trip", async () => {
-	// Measured on a real bare child: Pi's Codex API tries a WebSocket first and only then POSTs
-	// over SSE. Forwarding that attempt upstream would spend a request that could never work.
+	// external: Pi Codex transport tries WebSocket before POSTing to SSE.
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -14585,8 +13804,6 @@ test("the proxy refuses a WebSocket upgrade so Pi falls back to SSE without a wa
 		const response = await callProxy(slot.baseUrl, "/codex/responses", {
 			authorization: `Bearer ${slot.apiKey}`,
 			upgrade: "websocket",
-			// `connection: upgrade` would make Node treat this as a real handshake; the header
-			// alone is enough to prove the request path refuses it.
 		});
 		assert.equal(response.status, 501);
 		assert.equal(upstreamCalls, 0);
@@ -14598,9 +13815,7 @@ test("the proxy refuses a WebSocket upgrade so Pi falls back to SSE without a wa
 });
 
 test("the Codex slot is published with a token-shaped placeholder that carries nothing real", async () => {
-	// Pi's Codex API reads an account id out of the key before it will send anything at all
-	// (measured: "Failed to extract accountId from token" on a plain placeholder). The shape is
-	// therefore required — the content must still be worthless.
+	// external: Pi Codex API reads an account id from the key before sending a request.
 	rmSync(MODELS, { force: true });
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -14621,7 +13836,6 @@ test("the Codex slot is published with a token-shaped placeholder that carries n
 		const payload = JSON.parse(
 			Buffer.from(String(slot.apiKey).split(".")[1], "base64").toString("utf8"),
 		);
-		// The user's real account id must not be in a file a child reads — the proxy substitutes it.
 		assert.equal(payload["https://api.openai.com/auth"].chatgpt_account_id, "pi-multi-account-proxy");
 		assert.equal(published.includes("acct-real-9"), false);
 		assert.equal(published.includes("c-tok-2"), false);
@@ -14631,23 +13845,7 @@ test("the Codex slot is published with a token-shaped placeholder that carries n
 	}
 });
 
-// ---------------------------------------------------------------------------
-// The rotation that never sent a request
-//
-// Recorded on a real machine: 275 account switches in four minutes, alternating between
-// openai-codex-account-2 and openai-codex-account-3 roughly every 1.24 s, with not one request
-// leaving the machine and a free Anthropic account sitting unasked at the top of the ladder.
-// Esc did nothing because there was no run to cancel, and `/multi-account stop` had to be typed
-// several times before it took.
-//
-// The mechanism: `findFallbackModels` admits a same-family sibling whose meter reads 100 % as
-// long as it has "not refused this session", and the pending-resume path rotates onto an account
-// without ever sending it a request — so it never refuses, so it stays admissible for ever. Two
-// such siblings re-admit each other indefinitely, and same-model ranks them above the free
-// account every time.
-// ---------------------------------------------------------------------------
 
-/** Four accounts: three spent Codex slots and one live Anthropic one. */
 const SPENT_CODEX_FLEET: Account = {
 	"openai-codex": { type: "oauth", access: "c1", refresh: "r1", accountId: "codex-1" },
 	"openai-codex-account-2": { type: "oauth", access: "c2", refresh: "r2", accountId: "codex-2" },
@@ -14655,7 +13853,6 @@ const SPENT_CODEX_FLEET: Account = {
 	anthropic: { type: "oauth", access: "a1", refresh: "ar1" },
 };
 
-/** A meter that reads "spent" without any refusal having happened yet. */
 function spentCodexUsage(provider: string, now: number) {
 	return {
 		provider,
@@ -14701,12 +13898,9 @@ fakeClockTest("two spent siblings cannot rotate onto each other for ever while a
 		"gpt-5.5",
 		"Codex error: The usage limit has been reached",
 	);
-	// Long enough for a 25 ms poll to make a dozen hops if nothing bounds it.
 	await wait(500);
 
 	const switches = t.rec.setModels;
-	// Each spent sibling is owed exactly one attempt — its meter is a forecast, and a forecast is
-	// worth one request. Rotating onto it IS that request's worth of doubt, spent.
 	const perAccount = new Map<string, number>();
 	for (const target of switches) {
 		const provider = target.split("/")[0];
@@ -14726,9 +13920,6 @@ fakeClockTest("two spent siblings cannot rotate onto each other for ever while a
 		t.rec.continueCalls.length >= 1,
 		"and the interrupted task must actually be resumed there",
 	);
-	// Not merely finite: direct. A wait that has to walk every spent slot in the family before it
-	// reaches the account it can actually use is a minute of switching for nothing, and on a fleet
-	// of seven Codex slots it would spend the whole hop budget getting there.
 	assert.ok(
 		switches.length <= 3,
 		`the live account must be reached without walking the spent ones; got: ${switches.join(", ")}`,
@@ -14737,9 +13928,6 @@ fakeClockTest("two spent siblings cannot rotate onto each other for ever while a
 });
 
 test("the resume timer only rotates onto an account it could actually resume on", async () => {
-	// The dispatch that follows a timer rotation refuses to resume onto a cooling account — so
-	// rotating onto one tests nothing and changes nothing, it just moves the session sideways.
-	// Everywhere a request is genuinely sent, a forecast-spent sibling still gets its attempt.
 	const now = Date.now();
 	const t = setup({
 		accounts: SPENT_CODEX_FLEET,
@@ -14774,9 +13962,6 @@ test("the resume timer only rotates onto an account it could actually resume on"
 });
 
 fakeClockTest("a rotation that reaches nothing usable stops instead of polling for ever", async () => {
-	// Same fleet, but the Anthropic account is spent too — so there is genuinely nowhere to go.
-	// The wait itself must then be finite and say so, rather than switching account every second
-	// until the user kills the session.
 	const now = Date.now();
 	const t = setup({
 		accounts: SPENT_CODEX_FLEET,
@@ -14793,7 +13978,6 @@ fakeClockTest("a rotation that reaches nothing usable stops instead of polling f
 		}),
 	});
 	await t.fire("session_start");
-	// A typed prompt is the one turn allowed to probe a fleet that is cooling down.
 	await t.input("go");
 	await t.fire("agent_start");
 
@@ -14816,8 +14000,6 @@ fakeClockTest("a rotation that reaches nothing usable stops instead of polling f
 		settled,
 		"and once stopped it must stay stopped",
 	);
-	// Parking is the right answer — but it has to be said, or a session that has quietly stopped
-	// looks exactly like one that is about to do something.
 	assert.ok(
 		t.rec.notifies.some((message) =>
 			/all accounts are cooling down\. This session will retry automatically/.test(message),
@@ -14870,14 +14052,6 @@ test("one /multi-account stop is enough to end a rotation", async () => {
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// Compaction that walked the whole fleet
-//
-// Also recorded: 98 consecutive compaction failures — "insufficient balance", "requires a
-// subscription", "no endpoints found", "does not exist or you do not have access" — because the
-// summary was offered to every account in the rotation in turn, each with the full hang bound of
-// its own, while the user watched "Compacting context…".
-// ---------------------------------------------------------------------------
 
 test("a routed compaction asks a few accounts, not the whole fleet", async () => {
 	const asked: string[] = [];
@@ -14972,9 +14146,7 @@ test("compaction recovery subscribes to Pi's public failure event, not its inter
 });
 
 test("a compaction that answers through neither callback does not switch the guard off", async () => {
-	// A cancelled compaction reports through `session_compact_failed`; `onComplete`/`onError` may
-	// never fire. The in-flight flag is the only thing gating the next request, so leaving it set costs
-	// the session every remaining summary — the context then grows until nothing can be sent.
+	// external: Pi can report cancelled compaction through session_compact_failed without invoking callbacks.
 	const t = setup({
 		current: { provider: "openai-codex", id: "gpt-5.6-sol" },
 		config: { compactionWatchdogMs: 30 },
@@ -15015,8 +14187,6 @@ test("a failed guard compaction clears demand and backs off before retrying", as
 	await t.fire("agent_settled", {});
 	assert.equal(t.rec.compacts.length, 1, "the guard asks once");
 
-	// Pi >=0.84.3 emits this public extension event on cancellation even when the callbacks
-	// supplied to ctx.compact() never fire.
 	await t.fire("session_compact_failed", {
 		reason: "manual",
 		aborted: true,
@@ -15040,10 +14210,6 @@ test("a failed guard compaction clears demand and backs off before retrying", as
 });
 
 test("a summarizer answering after its request was written off cannot settle the next compaction", async () => {
-	// A request the guard has already written off keeps its callbacks. Once a later request is in
-	// flight, a late answer from the first must not clear the second's in-flight flag or dispatch
-	// the second's continuation: the guard would then start a third summary while the second still
-	// runs, and "carry on" would be sent into a compaction that has not finished.
 	const realNow = Date.now;
 	let clockOffsetMs = 0;
 	mock.method(Date, "now", () => realNow() + clockOffsetMs);
@@ -15069,12 +14235,11 @@ test("a summarizer answering after its request was written off cannot settle the
 		});
 		await wait(0);
 		const sentAfterFirstWriteOff = t.rec.sent.length;
-		// The resumed turn finishes, which frees the recovery lease the next summary needs.
 		await t.fire("agent_end", {
 			messages: [{ role: "assistant", stopReason: "stop", content: [] }],
 		});
 
-		clockOffsetMs = 10 * 60_000; // past the failure backoff and the compaction cooldown
+		clockOffsetMs = 10 * 60_000;
 		await t.fire("context", { messages: bigConversation(50) });
 		await t.fire("agent_settled", {});
 		assert.equal(t.rec.compacts.length, 2, "after the backoff the guard asks again");
@@ -15130,26 +14295,7 @@ test("an unanswered guard compaction still resumes the interrupted task", async 
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// The governor
-//
-// Eight separate entries in this changelog fix the same shape: an automatic mechanism that ran
-// without progress and could not be stopped. "Runaway failover loop that could freeze the
-// machine", "Escape did not stop the loop", "API-key providers no longer loop forever on a dead
-// key", "a session/rate limit is no longer hot-retried every second", "Compaction no longer
-// leaves 'Compacting context…' spinning forever", "a refusal that cannot be classified no longer
-// strands the session forever", "the stuck-resume watchdog now ACTS instead of only warning",
-// and the 275-switch rotation. Every one was fixed in its own path, and the next path was
-// unbounded again by default.
-//
-// These tests are deliberately about the INVARIANT rather than any of those paths, because a
-// test per path is what has already been tried eight times.
-// ---------------------------------------------------------------------------
 
-/**
- * A fleet the size of a real one — fifteen accounts across six vendors — so a rotation always has
- * somewhere else to go and the governor is the only thing that can end the sequence.
- */
 const WIDE_FLEET: Account = {
 	anthropic: { type: "oauth", access: "a1", refresh: "r1" },
 	"anthropic-account-2": { type: "oauth", access: "a2", refresh: "r2" },
@@ -15172,18 +14318,11 @@ test("a session that acts and acts without a single request reaching a provider 
 	const t = setup({
 		accounts: WIDE_FLEET,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
-		// Cooldowns expire at once, so there is always another account to move to. That is the
-		// shape of the bug: never out of options, never actually sending anything.
 		config: { pendingPollMs: 25, cooldownMs: 1, maxAutoContinuesPerPrompt: 99 },
 	});
 	await t.fire("session_start");
-	// One real request, so the governor knows this host reports requests at all. Without having
-	// seen the signal work once it stays dormant on purpose — a safety stop that fires because it
-	// cannot see is worse than the hang it was meant to prevent.
 	t.beforeReq({ messages: [] });
 
-	// Now drive failure after failure. Nothing here sends anything: the harness never emits a
-	// provider request or response, which is precisely the state a spinning session is in.
 	for (let i = 0; i < 20; i++) {
 		await t.fire("agent_start");
 		await finishError(
@@ -15202,7 +14341,6 @@ test("a session that acts and acts without a single request reaching a provider 
 	const stopped = readDebugLog().filter((entry) => entry.kind === "governor_stopped");
 	assert.ok(stopped.length > 0, "and it must be recorded, not only shown");
 
-	// Stopped means stopped: no timer, no queue, nothing armed to start it again.
 	const settled = t.rec.setModels.length;
 	await wait(250);
 	assert.equal(
@@ -15215,15 +14353,10 @@ test("a session that acts and acts without a single request reaching a provider 
 });
 
 test("stopping never eats the words the user typed", async () => {
-	// A fresh prompt belongs in Pi's transcript, not in extension-owned memory. That makes the
-	// message recoverable by the ordinary failed-turn handoff even if the user immediately stops
-	// automation; `/multi-account stop` must not claim it consumed or returned text it never owned.
 	const cooling: Record<string, number> = {};
 	for (const provider of Object.keys(WIDE_FLEET)) cooling[provider] = 10 * 60 * 1000;
 	const t = setup({
 		accounts: WIDE_FLEET,
-		// A single-slot provider on purpose: a family with a spare sibling always has one more
-		// account to try, so the message would go out rather than be held.
 		current: { provider: "openrouter", id: "glm-5.1" },
 		config: { pendingPollMs: 25, maxAutoContinuesPerPrompt: 99 },
 		seedCooldownsMsFromNow: cooling,
@@ -15241,10 +14374,6 @@ test("stopping never eats the words the user typed", async () => {
 });
 
 test("a working session is never stopped by the governor", async () => {
-	// The failure mode that would make this cure worse than the disease: stopping a healthy
-	// session because the signals it watches were never emitted. Identical to the test above in
-	// every respect but one — here the requests actually reach providers — so that difference is
-	// the only thing that can explain the different outcome.
 	const t = setup({
 		accounts: WIDE_FLEET,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
@@ -15255,7 +14384,6 @@ test("a working session is never stopped by the governor", async () => {
 
 	for (let i = 0; i < 20; i++) {
 		await t.fire("agent_start");
-		// A real request goes out for each attempt, exactly as it would on a live host.
 		t.beforeReq({ messages: [] });
 		await finishError(
 			t,
@@ -15274,15 +14402,12 @@ test("a working session is never stopped by the governor", async () => {
 });
 
 test("the governor stays dormant on a host that never reports requests", async () => {
-	// Old and unusual Pi builds may emit neither hook. There, "no request was observed" means
-	// "we cannot observe requests", and acting on it would break sessions that are perfectly fine.
 	const t = setup({
 		accounts: WIDE_FLEET,
 		current: { provider: "anthropic", id: "claude-opus-4-8" },
 		config: { pendingPollMs: 25, cooldownMs: 1, maxAutoContinuesPerPrompt: 99 },
 	});
 	await t.fire("session_start");
-	// Deliberately no beforeReq(): this host never tells us a request happened.
 
 	for (let i = 0; i < 20; i++) {
 		await t.fire("agent_start");
@@ -15328,7 +14453,6 @@ test("a user message re-enables everything the governor stopped", async () => {
 		`status must be able to say the session stopped itself; got: ${t.rec.notifies.at(-1)}`,
 	);
 
-	// A stop the user cannot undo is a session they have to kill. Their next message is the undo.
 	await t.input("carry on then");
 	await t.command("status");
 	assert.ok(
@@ -15446,11 +14570,7 @@ test("two extension instances retain each other's newly observed account failure
  await b.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// Automatic resume when quota returns (fake clock; no user message ever)
-// ---------------------------------------------------------------------------
 
-/** Run `body` on a fake setTimeout/Date; `tick` also drains the async work each timer starts. */
 async function onFakeClock(body: (tick: (ms: number) => Promise<void>) => Promise<void>) {
 	mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
 	const tick = async (ms: number) => {
@@ -15490,7 +14610,6 @@ function assertQuotaResumed(t: ReturnType<typeof setup>, trace: QuotaTimerTrace)
 		const parsed: unknown = JSON.parse(readFileSync(STATE, "utf8"));
 		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) state = parsed;
 	} catch {
-		// A missing or unreadable state must not masquerade as an empty, readable state.
 	}
 	const diagnostic = {
 		now: Date.now(),
@@ -15588,9 +14707,6 @@ test("quota auto-resume: repeated exhaustion cycles each resume exactly once", a
 });
 
 test("quota auto-resume: an Anthropic API key out of credit is not re-sent a turn on the 10-minute probe ceiling", async () => {
-	// Its usage probe can only say "api-key": it cannot see Console credit, so a background
-	// check never proves the key funded again. Re-checking it every ten minutes therefore spent a
-	// real resumed turn (and a compaction) on the same refusal, over and over.
 	const t = setup({
 		accounts: { anthropic: { type: "api_key", key: "k1" } },
 		current: { provider: "anthropic", id: "claude-haiku-5-5" },

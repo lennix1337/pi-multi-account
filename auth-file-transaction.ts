@@ -1,4 +1,3 @@
-/** Pi-compatible cross-process auth lock and crash-safe OAuth shadow publication. */
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -37,18 +36,16 @@ export function mutateProxyAuth(
     try { writeFileSync(authPath, "{}\n", { mode: 0o600, flag: "wx" }); }
     catch (error: any) { if (error?.code !== "EEXIST") throw error; }
   }
-  // Same package/options as Pi FileAuthStorageBackend. Never read a snapshot before locking.
+  // external: Pi FileAuthStorageBackend uses the same lock package and options.
   const lockfile = require("proper-lockfile") as { lockSync(path: string, options: object): () => void };
   const release = lockfile.lockSync(authPath, { realpath: false });
   try {
     const plan = transform(read(authPath), read(sidecarPath));
     if (!plan.changed) return false;
     if (mode === "shadow") {
-      // Persist the only recoverable OAuth copy BEFORE replacing auth with a placeholder.
       write(sidecarPath, plan.sidecar);
       write(authPath, plan.auth);
     } else {
-      // Restore the real credential BEFORE removing its recovery copy.
       write(authPath, plan.auth);
       write(sidecarPath, plan.sidecar);
     }

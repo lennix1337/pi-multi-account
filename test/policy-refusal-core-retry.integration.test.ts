@@ -4,10 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-delete process.env.PI_SUBAGENT_CHILD; // This fixture exercises an interactive session.
+delete process.env.PI_SUBAGENT_CHILD;
 
-// Real Pi agent retry loop with a synthetic local provider. The provider never performs a
-// network request; this checks the host retry independently from extension continuation hooks.
 test("provider policy refusal aborts Pi's native agent retry", { timeout: 15000 }, async () => {
 	const { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } =
 		await import("@earendil-works/pi-coding-agent");
@@ -131,7 +129,6 @@ test("provider policy refusal aborts Pi's native agent retry", { timeout: 15000 
 			try {
 				await session.prompt("Complete the synthetic retry test.");
 			} catch {
-				// The protected policy-refusal run is expected to abort rather than retry.
 			}
 			return requests;
 		} finally {
@@ -150,8 +147,7 @@ test("provider policy refusal aborts Pi's native agent retry", { timeout: 15000 
 		if (piAbortStopsAgentRetry(VERSION)) {
 			assert.equal(protectedRequests.length, 1, "the policy refusal aborts the host retry, not only extension continuation");
 		} else {
-			// Documented host limitation (README): before 0.86.0 Pi keeps its own retry after an abort.
-			// Pinned so a host that gains the fix flips this test and the contract boundary moves.
+			// external: Before Pi 0.86.0 the host can continue its own retry after abort.
 			assert.equal(protectedRequests.length, 2, `Pi ${VERSION} still sends its own retry after the abort`);
 		}
 	} finally {

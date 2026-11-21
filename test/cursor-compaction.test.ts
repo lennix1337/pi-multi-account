@@ -1,22 +1,3 @@
-/**
- * Compaction on Cursor was a treadmill, observed end-to-end in a real session:
- *
- *   16:15:20  compaction succeeds, summary is 11 130 chars, real context ≈ 22k tokens
- *   16:16:16  next reply reports prompt_tokens = 208 080
- *   16:18:32  auto-compaction fires again; nothing left to summarize, so Pi drops the
- *             accumulated summary and writes a 2 032-char one starting "No prior history."
- *
- * Three independent defects stack up there:
- *
- * 1. The bridge keeps Cursor's own server-side conversation behind a checkpoint and replays
- *    it on every request — Pi's (now compacted) message list is ignored while that checkpoint
- *    exists. Compaction therefore shrinks nothing on the model side, and Cursor's usedTokens
- *    never falls back down.
- * 2. That usedTokens number was handed to Pi as prompt_tokens, so Pi kept seeing 200k+ over
- *    its 200k window and re-compacted on every single turn.
- * 3. Pi's own compact() forgets `previousSummary` when the history range is empty and only a
- *    split-turn prefix is left, silently destroying the accumulated summary.
- */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -59,8 +40,6 @@ test("compaction drops the Cursor-side checkpoint so the next request is rebuilt
 			false,
 			"a surviving checkpoint makes Cursor replay the pre-compaction context",
 		);
-		// A fresh id matters as much as the dropped checkpoint: reusing the old conversation id
-		// lets Cursor resurrect its own server-side state for that conversation.
 		assert.notEqual(
 			deterministicConversationId(convKey),
 			idBefore,
@@ -150,7 +129,6 @@ test("session shutdown only cleans session state; the process-scoped proxy survi
 });
 
 test("a compaction that lost its history keeps the previous summary instead of 'No prior history.'", () => {
-	// Verbatim shape of the 2 032-char summary Pi wrote at 16:18:32.
 	const damaged =
 		"No prior history.\n\n---\n\n**Turn Context (split turn):**\n\n## Original Request\nПродовжити імпорт.";
 	const previous = "## Goal\n- Поставити на карту 5 530 проспектів\n\n## Next Steps\n1. Залити піни у хмару";
@@ -176,7 +154,6 @@ test("restorePreviousSummary leaves healthy summaries and empty inputs alone", (
 });
 
 test("a checkpoint that missed turns taken on another provider is not resumed", () => {
-	// Rotation ran the session on Anthropic for three turns; Cursor saw none of them.
 	const stored = {
 		conversationId: "c", checkpoint: new Uint8Array([1]), sessionScoped: true,
 		blobStore: new Map(), lastAccessMs: 0, turnsCovered: 4,

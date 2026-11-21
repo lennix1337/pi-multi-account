@@ -1,19 +1,3 @@
-/**
- * Pi died with ERR_STREAM_WRITE_AFTER_END on 2026-08-23, minutes after compaction started
- * closing the Cursor conversation:
- *
- *   at Object.write (cursor/proxy.ts:378)          <- the bridge handle
- *   at sendKvResponse (cursor/proxy.ts:1218)       <- answering Cursor's blob request
- *   at processServerMessage (cursor/proxy.ts:1191) <- data still arriving on a closed bridge
- *
- * The write site was already wrapped in try/catch, and that is the whole trap: a write into an
- * ended pipe does not throw there. Node raises it on a later tick as an `error` event on the
- * stream, and a stream with no error listener turns that into an uncaughtException — fatal for
- * the host, from inside a provider bridge that has no business ever killing it.
- *
- * These tests lock the class, not just the one path: nothing the bridge does may reach the
- * host as an uncaught exception, and a pipe we closed ourselves must read as closed.
- */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -40,7 +24,6 @@ function makeBridge() {
 	return { proc, handle, written, debug };
 }
 
-/** Let Node deliver the stream error it queues for a later tick. */
 async function settle(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 5));
 }
@@ -51,8 +34,6 @@ test("a write after the bridge was ended is dropped instead of killing the host"
 	handle.end();
 	const afterEnd = written.length;
 
-	// This is the crash: compaction ended the bridge, Cursor asked for one more blob, and the
-	// reply went into the closed pipe.
 	handle.write(new TextEncoder().encode("kv reply"));
 	await settle();
 
@@ -83,9 +64,6 @@ test("destroying a cancelled bridge terminates its HTTP/2 subprocess", () => {
 
 test("a late write that slips past the guard still cannot become an uncaught exception", async () => {
 	const { proc } = makeBridge();
-	// Bypass the handle entirely and write straight into the ended pipe — the failure mode the
-	// error listener exists for. Without that listener this line takes the whole process down,
-	// and the test run with it.
 	proc.stdin.end();
 	proc.stdin.write(lpEncode(new TextEncoder().encode("late")));
 	await settle();
@@ -107,7 +85,6 @@ test("the bridge still delivers length-prefixed frames and its exit code", async
 	const closed: number[] = [];
 	handle.onClose((code) => closed.push(code));
 
-	// Two frames in one chunk, plus a third split across chunk boundaries.
 	const whole = Buffer.concat([
 		lpEncode(new TextEncoder().encode("alpha")),
 		lpEncode(new TextEncoder().encode("beta")),

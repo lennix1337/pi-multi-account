@@ -4,14 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-// Replays the 10/11 incident with a real Pi session and stubbed provider wire APIs (no network,
-// no credentials): anthropic-account-2 rate-limits, anthropic is out of credit, both Codex accounts
-// are out of quota. Later turns, started by background-worker reports instead of the user, must not
-// send a single request to the accounts already known to be spent.
 const dir = mkdtempSync(join(tmpdir(), "multi-account-exhausted-gate-"));
 process.env.PI_CODING_AGENT_DIR = dir;
 process.env.PI_OFFLINE = "1";
-delete process.env.PI_SUBAGENT_CHILD; // This fixture exercises an interactive session.
+delete process.env.PI_SUBAGENT_CHILD;
 const { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } =
 	await import("@earendil-works/pi-coding-agent");
 const { createAssistantMessageEventStream } = await import("@earendil-works/pi-ai");
@@ -37,7 +33,6 @@ const MODEL_ID: Record<string, string> = {
 
 const requests: string[] = [];
 function refuse(model: any, _context: any, options: any) {
-	// A provider handed an already-aborted signal never opens a connection.
 	if (options?.signal?.aborted !== true) requests.push(model.provider);
 	const stream = createAssistantMessageEventStream();
 	queueMicrotask(() => {
@@ -140,8 +135,6 @@ test("turns started by background reports send no request while every account is
 				throw new Error(JSON.stringify(error));
 			},
 		});
-		// Pi routes the Codex wire API through its own transport, not the compat registry: swap the
-		// transport of both Codex accounts for the stub, keeping their registered catalogues.
 		for (const id of ["openai-codex", "openai-codex-account-2"]) {
 			const catalogue = session.modelRuntime.getModels(id);
 			assert.ok(catalogue.length > 0, `${id} has a catalogue`);
@@ -157,7 +150,6 @@ test("turns started by background reports send no request while every account is
 		assert.ok(first, `anthropic-account-2 model is registered; have ${JSON.stringify(session.modelRuntime.getModels().map((m: any) => m.provider + "/" + m.id).filter((m: string) => /account|codex|^anthropic\/claude-opus/.test(m)).slice(0, 20))}`);
 		await session.setModel(first);
 
-		// ---- the incident chain: each account refuses once, in rotation order ----
 		await session.prompt("start the task");
 		await waitFor(() => requests.length >= providers.length, "the failover chain to reach every account").catch((error) => {
 			assert.fail(`${error.message}; requests=${JSON.stringify(requests)} notices=${JSON.stringify(notices)}`);
@@ -167,13 +159,9 @@ test("turns started by background reports send no request while every account is
 
 		const state = () => JSON.parse(readFileSync(join(dir, "provider-failover-state.json"), "utf8"));
 		const cooldownMs = (provider: string) => state().exhaustedUntilByProvider?.[provider] - Date.now();
-		// "credit balance is too low" is billing, not a blip: it must bench the account for hours,
-		// never for the transient retry window.
 		assert.ok(cooldownMs("anthropic") > 60 * 60 * 1000, `credit exhaustion must be a long cooldown, got ${cooldownMs("anthropic")}ms`);
-		// A parsed "Try again in ~1129 min" is recorded (bounded by the recheck ceiling), not dropped.
 		assert.ok(cooldownMs("openai-codex-account-2") > 5 * 60 * 1000, "the stated horizon must be persisted");
 
-		// ---- background-worker reports start new turns while everything is spent ----
 		const before = requests.length;
 		const noticesBefore = notices.length;
 		for (let turn = 0; turn < 5; turn++) {
@@ -195,7 +183,6 @@ test("turns started by background reports send no request while every account is
 		}
 		assert.match(summaries[0], /\d{2}:\d{2}/, "the error must say when the first account returns");
 
-		// The wait for recovery must survive the refused turns.
 		assert.ok(state().pendingFrom, "the pending resume stays armed so the work continues on recovery");
 	} finally {
 		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

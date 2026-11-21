@@ -7,10 +7,6 @@ import { join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 
-// `/multi-account use <Tab>` runs on every keystroke. It lists every account with its cached usage
-// snapshot, and each snapshot is only valid while its credential is unchanged. The credential store
-// is read ONCE per listing; each account used to re-read and re-parse auth.json and the proxy sidecar
-// to check its own snapshot, so one keystroke cost N+1 reads of the same files.
 delete process.env.PI_WEB_SESSION;
 delete process.env.PI_SUBAGENT_CHILD;
 delete process.env.PI_MULTI_ACCOUNT_INDEPENDENT_ROOTS;
@@ -67,7 +63,6 @@ async function openCommand() {
   return command.getArgumentCompletions!;
 }
 
-/** Counts every read of the credential files made while `run` executes. */
 async function countCredentialReads<T>(run: () => Promise<T>): Promise<{ result: T; authReads: number; sidecarReads: number }> {
   const real = fs.readFileSync;
   const counts = { authReads: 0, sidecarReads: 0 };
@@ -113,7 +108,6 @@ test("a rotated credential drops only its own usage snapshot from the listing", 
   const before = (await complete("use ")) as Array<{ label: string; description: string }>;
   assert.ok(before.find((item) => item.label === "openai-codex-3")?.description.includes("user2@example.invalid"));
 
-  // Re-login of slot 3 with a different token: its snapshot must no longer be trusted.
   auth["openai-codex-3"].access = fakeToken();
   writeFileSync(join(dir, "auth.json"), JSON.stringify(auth));
   const after = (await complete("use ")) as Array<{ label: string; description: string }>;

@@ -1,4 +1,3 @@
-/** Shared cooldown/cache state: lock before reading, merge local deltas, publish atomically. */
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -25,7 +24,6 @@ export function mergeStateDeltas<T extends State>(base: T, local: T, disk: T): T
     for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
       if (JSON.stringify(before[key]) === JSON.stringify(after[key])) continue;
       if (Object.hasOwn(after, key)) {
-        // A slower fetch must not overwrite a newer observation of the same credential.
         const newer = values[key], candidate = after[key];
         if ((field === "usageByProvider" || field === "codexModelCatalogByProvider") &&
             newer?.credentialHash === candidate?.credentialHash && newer?.fetchedAt > candidate?.fetchedAt) continue;
@@ -45,7 +43,6 @@ export function mutateStateFile<T extends State>(path: string, transform: (disk:
   }
   const lockfile = require("proper-lockfile") as { lockSync(path: string, options: object): () => void };
   let release: (() => void) | undefined;
-  // Writes are synchronous and short. Bound contention rather than hanging the Pi event loop.
   const deadline = Date.now() + 250;
   while (!release) {
     try { release = lockfile.lockSync(path, { realpath: false }); }
@@ -62,7 +59,7 @@ export function mutateStateFile<T extends State>(path: string, transform: (disk:
       if (!disk || typeof disk !== "object" || Array.isArray(disk)) disk = {} as T;
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
-      disk = {} as T; // Derived state is recoverable; credentials never enter this file.
+      disk = {} as T;
     }
     const next = transform(disk);
     writeFileSync(temp, `${JSON.stringify(next, null, "\t")}\n`, { mode: 0o600, flag: "wx" });

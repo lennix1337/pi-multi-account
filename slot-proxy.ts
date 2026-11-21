@@ -1,31 +1,3 @@
-/**
- * A parent-owned loopback route that lets a child run on the account the rotation chose.
- *
- * ## The problem this exists for
- *
- * A process spawned without this extension — a memory consolidation, external CLI, or bare
- * `pi -p --no-extensions` call — either receives an explicit model or inherits Pi's saved global
- * default. Since Pi 0.84.3 that saved value intentionally does not track every live session
- * switch. In either case, publishing a rotation slot's *name* into `models.json` is not enough:
- * measured 2026-08-24, a
- * published slot carrying an OAuth credential fails with `No API key found`, because Pi honours
- * an OAuth credential only for a provider definition that declares the flow, and a `models.json`
- * entry declares none. The child then falls through to Pi's own first-available provider — a
- * different account, usually a different vendor, silently.
- *
- * The Cursor slots already solve this, and the shape is the answer for every OAuth family:
- * publish the slot against a route the parent serves on `127.0.0.1`, with a deliberately
- * non-secret placeholder as its `apiKey`. Pi sees a credential and admits the provider; the child
- * authenticates to this machine with a string worth nothing; the parent swaps in the real token
- * and adds whatever the family needs. The credential never leaves the parent.
- *
- * ## What lives here
- *
- * Only the decisions — routing, admission, and the exact shape of the upstream request. No
- * socket, no credential store, no file. That keeps the security-relevant rules (the placeholder is
- * never forwarded, an unknown caller is never served, a token never reaches a diagnostic) testable
- * exhaustively and without a network.
- */
 
 /**
  * The `apiKey` published into `models.json` for a proxied slot.
@@ -36,28 +8,10 @@
  */
 export const PROXY_PLACEHOLDER_KEY = "pi-multi-account-proxy";
 
-/**
- * Non-secret Anthropic placeholder with the shape Pi's native transport recognizes as OAuth.
- * Request identity, tool-name conversion and response mapping all depend on this marker; adding
- * a Bearer header at the proxy is too late. The proxy replaces it with the real token on egress.
- * The legacy generic placeholder remains recognizable for restoration during an upgrade.
- */
+/** Non-secret Anthropic OAuth-shaped marker replaced by the proxy on egress. */
 export const ANTHROPIC_PROXY_PLACEHOLDER_KEY = "sk-ant-oat01-pi-multi-account-proxy";
 
-/**
- * The `apiKey` published for a **Codex** slot.
- *
- * Pi's Codex API does not merely pass the key along: before any request it splits it on `.`,
- * base64-decodes the middle segment and reads `chatgpt_account_id` out of it, failing with
- * "Failed to extract accountId from token" if that does not work (measured 2026-08-24 against a
- * real `pi -p --no-extensions` child). So the placeholder for that family has to be shaped like a
- * token even though it is not one.
- *
- * Nothing here is secret and nothing here is real: the algorithm is `none`, there is no signature,
- * and the account id is the placeholder string rather than the user's — the proxy replaces both
- * the authorization header and the account id with the genuine values on the way out, so the
- * published file never carries either.
- */
+/** Non-secret unsigned Codex placeholder JWT; the proxy replaces its credential and account ID on egress. */
 export const PROXY_PLACEHOLDER_JWT = [
 	Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64"),
 	Buffer.from(
@@ -76,15 +30,7 @@ export function isPublishedPlaceholder(value: string | undefined): boolean {
 
 export type ProxyFamily = "anthropic" | "codex";
 
-/**
- * Which family, if any, this parent-owned loopback can serve.
- *
- * Base `anthropic` is included because a bare child on a subscription token is refused as a
- * third-party app (measured 2026-08-30). Base `openai-codex` is not: the same child reached the
- * network on Pi's built-in provider. Numbered Codex/Anthropic slots are included because a
- * models.json entry has no OAuth method, so Pi never consults a published placeholder while an
- * OAuth blob sits under the same key.
- */
+/** Return the parent-owned proxy family for a supported slot, or undefined. */
 export function proxyFamilyFor(slotId: string): ProxyFamily | undefined {
 	if (slotId === "anthropic" || /^anthropic-account-\d+$/.test(slotId)) return "anthropic";
 	if (/^openai-codex-account-\d+$/.test(slotId)) return "codex";
@@ -114,13 +60,6 @@ export interface ProxyCredential {
 	accountId?: string;
 }
 
-/**
- * Headers a proxy must never copy from the incoming request to the outgoing one.
- *
- * The hop-by-hop set is per RFC 9110; `host` and `content-length` are recomputed by the client;
- * `authorization`/`x-api-key` are dropped because replacing them is the entire point of this
- * proxy and forwarding the placeholder would authenticate nothing.
- */
 const DROPPED_HEADERS = new Set([
 	"authorization",
 	"x-api-key",
@@ -137,13 +76,7 @@ const DROPPED_HEADERS = new Set([
 	"accept-encoding",
 ]);
 
-/**
- * Split `/slot-id/v1/messages` into the slot and the path to forward.
- *
- * Returns `undefined` for anything that is not that shape, including a path that tries to climb
- * out of its slot. A loopback port is reachable by every process on the machine, so the parsing
- * here is the first of the two gates — the second is {@link admitRequest}.
- */
+/** Parse a slot and upstream path, rejecting invalid paths and traversal. */
 export function parseProxyPath(
 	rawUrl: string,
 ): { slotId: string; rest: string } | undefined {
@@ -155,8 +88,6 @@ export function parseProxyPath(
 	).split("?")[0];
 	if (!slotId || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slotId)) return undefined;
 	const rest = separator === -1 ? "/" : pathname.slice(separator);
-	// `..` in any form is refused rather than normalised: there is no legitimate caller that needs
-	// it, and normalising is where path-traversal bugs live.
 	if (rest.includes("..") || rest.includes("%2e%2e") || rest.includes("%2E%2E")) {
 		return undefined;
 	}
@@ -181,17 +112,7 @@ export type Admission =
 	| { ok: true; route: ProxyRoute }
 	| { ok: false; status: number; message: string };
 
-/**
- * Decide whether to serve a request at all.
- *
- * Two gates, and both matter. The slot has to be one we published — otherwise the port becomes a
- * way to reach any upstream through the user's tokens. And the caller has to present either the
- * published placeholder or the current access token for that slot — otherwise every process on
- * this machine can spend the user's subscription just by finding the port. The placeholder is not
- * a secret; the access token is, and a refusal never echoes either. The access-token path exists
- * because a built-in Anthropic child still presents OAuth: Pi ignores a models.json apiKey when
- * the stored credential is OAuth, and the request only becomes shapable if this proxy accepts it.
- */
+/** Admit requests for published slots bearing their placeholder or current access token without echoing credentials. */
 export function admitRequest(args: {
 	rawUrl: string;
 	headers: Readonly<Record<string, string | string[] | undefined>>;
@@ -208,7 +129,6 @@ export function admitRequest(args: {
 		isPublishedPlaceholder(presented) ||
 		(!!presented && !!args.acceptedSecrets?.includes(presented));
 	if (!accepted) {
-		// Never echo what was presented: it may be a real credential belonging to whoever called.
 		return { ok: false, status: 401, message: "this route serves published slots only" };
 	}
 	return { ok: true, route, rest: parsed.rest };
@@ -270,20 +190,17 @@ export function shapeUpstreamRequest(args: {
 		}
 		headers.authorization = `Bearer ${credential.access}`;
 		if (route.family === "anthropic") {
-			// The header Anthropic requires before it will accept a subscription token at all.
+			// external: Anthropic requires this beta header for subscription tokens.
 			headers["anthropic-beta"] = mergeBeta(headers["anthropic-beta"], "oauth-2025-04-20");
 		} else if (route.family === "codex") {
-			// Codex routes a subscription request by account. Pi fills this header in from the
-			// placeholder it was given, so it must be overwritten here — not defaulted — or the
-			// request goes upstream naming an account that does not exist.
+			// external: Pi fills chatgpt-account-id from its placeholder credential.
 			if (credential.accountId) headers["chatgpt-account-id"] = credential.accountId;
 			else delete headers["chatgpt-account-id"];
 			headers.originator = headers.originator ?? "pi";
 		}
 	}
 
-	// Image tools append these endpoints directly to the slot base; chat already sends /codex.
-	// Leave all other paths and families intact, including usage requests.
+	// external: Image tools append endpoints directly to the base URL; chat includes /codex.
 	const upstreamRest =
 		route.family === "codex" && /^\/images\/(?:generations|edits)(?:\?.*)?$/.test(rest)
 			? `/codex${rest}`
@@ -292,7 +209,6 @@ export function shapeUpstreamRequest(args: {
 	return { ok: true, url: `${base}${upstreamRest}`, headers };
 }
 
-/** Keep any beta flags the caller asked for, and add ours once. */
 function mergeBeta(existing: string | undefined, required: string): string {
 	if (!existing) return required;
 	const parts = existing

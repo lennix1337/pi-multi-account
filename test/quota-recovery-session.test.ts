@@ -4,11 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-// Real Pi lifecycle with synthetic local providers. No network or personal credentials.
 const dir = mkdtempSync(join(tmpdir(), "multi-account-quota-recovery-sdk-"));
 process.env.PI_CODING_AGENT_DIR = dir;
 process.env.PI_OFFLINE = "1";
-delete process.env.PI_SUBAGENT_CHILD; // This fixture exercises an interactive session.
+delete process.env.PI_SUBAGENT_CHILD;
 const {
 	createAgentSession,
 	DefaultResourceLoader,

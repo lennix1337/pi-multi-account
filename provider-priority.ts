@@ -9,15 +9,7 @@ export const MANAGED_GROUPS = [
   "ollama",
 ] as const;
 
-/**
- * The ladder shipped by default.
- *
- * Flat-rate subscriptions with real quota telemetry first, strongest coding models earliest;
- * then the cheap/local tier; then — by omission — everything else, which is where per-token
- * billing lands. It is the same sequence rotation already used as its final tiebreak, promoted
- * to a stated policy so the cross-family hop stops being decided by whatever the telemetry
- * happened to say at that moment.
- */
+/** Default provider-group order for cross-family failover. */
 export const DEFAULT_PROVIDER_PRIORITY: string[] = [
   "anthropic",
   "openai-codex",
@@ -46,14 +38,7 @@ const ALIASES: Record<string, string> = {
   router: "openrouter",
 };
 
-/**
- * Reduce anything the user or the runtime might say to one group name.
- *
- * Handles a bare family, a numbered rotation slot (`kimi-coding-account-2`), a provider/model
- * pair (`openai-codex/gpt-5.6-sol`), and the common nicknames above. Unknown names pass through
- * normalised rather than being rejected: a provider this build has never heard of is exactly the
- * case the old `ProviderFamily[]` type made unrankable, and it must be rankable now.
- */
+/** Normalize a family, account slot, provider/model pair or nickname to a provider group; unknown names pass through normalized. */
 export function normalizeGroup(raw: string): string {
   const first = String(raw ?? "")
     .trim()

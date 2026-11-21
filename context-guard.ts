@@ -79,14 +79,7 @@ export function estimateMessageTokens(message: GuardMessage): number {
   return Math.ceil(chars / 4);
 }
 
-/**
- * Raw estimate of everything that goes into the request: the message list plus the system prompt.
- *
- * The system prompt matters. Pi's own fallback estimate (`estimateContextTokens`) sums messages
- * only, so the system prompt and the tool schemas — tens of thousands of tokens — are invisible to
- * it whenever provider usage is missing. Here the system prompt is counted; the tool schemas,
- * which extensions cannot see, are what the learned overhead below is for.
- */
+/** Estimate request tokens from messages and the optional system prompt, excluding tool schemas. */
 export function estimateRawTokens(messages: GuardMessage[], systemPrompt?: string): number {
   let total = 0;
   for (const message of messages) total += estimateMessageTokens(message);
@@ -106,14 +99,7 @@ export interface OverheadTracker {
   adjust(rawTokens: number): number;
 }
 
-/**
- * Learns one number: how much bigger the real prompt is than our raw estimate.
- *
- * Observations outside [0.5x, 4x] of the raw estimate are thrown away rather than learned from.
- * That is the defence against Cursor's and Codex's server-side counters: when a provider reports
- * the size of ITS copy of the conversation instead of the request we sent, the ratio blows out and
- * the observation is discarded instead of poisoning the model.
- */
+/** Track prompt overhead, ignoring observations outside 0.5–4 times the raw estimate. */
 export function createOverheadTracker(initialOverhead = INITIAL_OVERHEAD): OverheadTracker {
   let overhead = Math.max(0, Math.min(initialOverhead, MAX_LEARNED_OVERHEAD));
   return {
@@ -276,18 +262,7 @@ function isAlreadyStub(message: GuardMessage): boolean {
   return false;
 }
 
-/**
- * Build the trimmed message list.
- *
- * Two passes on purpose. The first re-applies every key that was elided before — unconditionally,
- * even when the request would already fit — because a request whose prefix keeps changing throws
- * away the provider's prompt cache on every single turn. The second pass adds new elisions,
- * oldest first, and stops the moment the target is met, so no more history is given up than the
- * window actually demands.
- *
- * Messages are never removed and assistant tool calls are never touched: a tool result must stay
- * paired with the call that produced it or providers reject the request outright.
- */
+/** Reapply prior elisions, then elide oldest results to reach the target without removing messages or tool calls. */
 export function planElision(
   messages: GuardMessage[],
   elidedKeys: Set<string>,

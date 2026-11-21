@@ -109,24 +109,12 @@ export function piHasContextWithSystem(version: string): boolean {
   return (compareVersion(version, CONTEXT_WITH_SYSTEM_SINCE) ?? -1) >= 0;
 }
 
-/**
- * Whether `ctx.abort()` from an extension also cancels Pi's own agent retry (Pi 0.86.0+, which
- * fixed retry state surviving cancellation). On older hosts a provider policy refusal still stops
- * this extension's recovery, but Pi itself sends its configured retry once more. Unknown hosts
- * answer false so nobody is promised a stop the host may not deliver.
- */
+/** Whether extension abort also stops the host agent retry; unknown versions return false. */
 export function piAbortStopsAgentRetry(version: string): boolean {
   return (compareVersion(version, ABORT_STOPS_AGENT_RETRY_SINCE) ?? -1) >= 0;
 }
 
-/**
- * Whether an ordinary Pi model switch is expected to rewrite the saved global default.
- *
- * Pi 0.84.3 deliberately made model/thinking selection session-scoped unless the caller passes
- * `{ persist: true }` (the TUI's explicit Ctrl+S action). Unknown/non-semver hosts are treated as
- * session-scoped: emitting a loud compatibility warning from an assumption we cannot establish is
- * worse than omitting an optional legacy diagnostic.
- */
+/** Whether a model switch persists the global default; unknown versions return false. */
 export function piAutoPersistsSelectedModel(version: string): boolean {
   return (compareVersion(version, SESSION_SCOPED_MODEL_SELECTION_SINCE) ?? 0) < 0;
 }
@@ -194,13 +182,7 @@ export function checkModelsShape(raw: unknown): ShapeVerdict {
   return { file: "models.json", ok: problems.length === 0, problems };
 }
 
-/**
- * `settings.json`: the saved default keys are optional, but must be strings when present.
- *
- * Since Pi 0.84.3 their absence is ordinary: a live model selection is session-scoped unless the
- * user explicitly persists it. Whether a saved value must track the live model is therefore a
- * versioned behavioural check, not part of the file's shape.
- */
+/** Check that optional saved default settings are strings when present. */
 export function checkSettingsShape(raw: unknown): ShapeVerdict {
   const problems: string[] = [];
   if (!isPlainObject(raw)) {
@@ -235,14 +217,7 @@ export function describeContractDrift(verdicts: readonly ShapeVerdict[]): string
   ].join("\n");
 }
 
-/**
- * Legacy-only behavioural check: on Pi <=0.84.2, does `settings.json` name the model running now?
- *
- * Pi >=0.84.3 intentionally separates the live session selection from the saved global default,
- * so callers MUST gate this check with `piAutoPersistsSelectedModel()`. A bare child without an
- * explicit `--model` then inherits the saved default by design; a broker/subagent child with an
- * explicit provider/model remains isolated from that global value.
- */
+/** Check that the saved default matches the active model; call only when piAutoPersistsSelectedModel is true. */
 export function checkSettingsTracksActive(
   raw: unknown,
   active: { provider: string; id: string },

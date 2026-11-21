@@ -127,14 +127,7 @@ function anthropicVersionParts(id: string): number[] {
 		.filter((n) => Number.isFinite(n) && n < 100_000);
 }
 
-/**
- * Strongest-first ordering for Anthropic model ids, so a newly released flagship (e.g.
- * `claude-opus-5` arriving in Pi's registry) outranks the newest id this extension happened to
- * be released with — the same release-per-model treadmill that was removed for Codex.
- *
- * Tier dominates version: Anthropic's flagship line is Opus, and the project's hard rule is to
- * stay on a provider's top model. Within a tier, the higher generation wins.
- */
+/** Compare Anthropic model IDs strongest first, prioritizing tier over generation. */
 export function compareAnthropicModelStrength(a: string, b: string): number {
 	const tier = anthropicTierRank(b) - anthropicTierRank(a);
 	if (tier !== 0) return tier;
@@ -232,14 +225,7 @@ export class OllamaCatalogFetchError extends Error {
 	}
 }
 
-/**
- * Pull the live Ollama Cloud model catalog (`GET https://ollama.com/v1/models`).
- * Unlike Codex, Ollama Cloud publishes a single account-agnostic catalog keyed by an
- * API key, so one fetch covers the base provider and every cloned `ollama-account-N` slot.
- * Returns the canonical model ids Ollama Cloud expects in chat requests (e.g. `kimi-k3`,
- * `glm-5.2`) — no `:cloud` suffix. The extension registers them verbatim; Ollama Cloud
- * accepts both the bare and the `:cloud`-suffixed form, so legacy configured ids keep working.
- */
+/** Fetch canonical Ollama Cloud model IDs, without the :cloud suffix, for all accounts. */
 export async function fetchOllamaCloudCatalog(
 	apiKey: string,
 	options: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},

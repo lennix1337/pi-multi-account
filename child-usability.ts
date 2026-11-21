@@ -41,15 +41,7 @@ function isLoopback(baseUrl?: string): boolean {
   }
 }
 
-/**
- * Decide, for one slot, whether an extension-free child can run on it.
- *
- * Order matters: Pi's resolver keys off the stored credential *type* before it ever looks at a
- * models.json apiKey. An OAuth blob under the same key as a published placeholder is therefore
- * not a usable child route — measured against Pi's own `resolveProviderAuth`: stored OAuth plus a
- * provider that has no OAuth method returns undefined (\"No API key found\"), and stored OAuth
- * plus a built-in OAuth method ignores the placeholder entirely.
- */
+/** Classify whether an extension-free child can use a slot and explain any blocker. */
 export function classifyChildUsability(facts: SlotChildFacts): ChildUsability {
   const { slotId, credential, builtin, publishedApiKey, publishedBaseUrl } = facts;
 
@@ -121,15 +113,7 @@ export function classifyChildUsability(facts: SlotChildFacts): ChildUsability {
   };
 }
 
-/**
- * The slot a bare unpinned child would actually be sent to, given Pi's saved global default.
- * Returns `undefined` when that saved route is usable.
- *
- * This is the check that turns a silent, far-away failure into something sayable here: when the
- * active rotation slot is not child-usable, every child spawned without an explicit `--model`
- * falls through Pi's own "first available provider" list instead — which is a different account,
- * often a different vendor, and never the one the rotation chose.
- */
+/** Describe the saved default route when an unpinned child cannot use it; otherwise return undefined. */
 export function defaultRouteWarning(
   savedDefaultSlotId: string | undefined,
   classify: (slotId: string) => ChildUsability | undefined,

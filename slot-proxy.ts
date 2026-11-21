@@ -8,28 +8,10 @@
  */
 export const PROXY_PLACEHOLDER_KEY = "pi-multi-account-proxy";
 
-/**
- * Non-secret Anthropic placeholder with the shape Pi's native transport recognizes as OAuth.
- * Request identity, tool-name conversion and response mapping all depend on this marker; adding
- * a Bearer header at the proxy is too late. The proxy replaces it with the real token on egress.
- * The legacy generic placeholder remains recognizable for restoration during an upgrade.
- */
+/** Non-secret Anthropic OAuth-shaped marker replaced by the proxy on egress. */
 export const ANTHROPIC_PROXY_PLACEHOLDER_KEY = "sk-ant-oat01-pi-multi-account-proxy";
 
-/**
- * The `apiKey` published for a **Codex** slot.
- *
- * Pi's Codex API does not merely pass the key along: before any request it splits it on `.`,
- * base64-decodes the middle segment and reads `chatgpt_account_id` out of it, failing with
- * "Failed to extract accountId from token" if that does not work (measured 2026-08-24 against a
- * real `pi -p --no-extensions` child). So the placeholder for that family has to be shaped like a
- * token even though it is not one.
- *
- * Nothing here is secret and nothing here is real: the algorithm is `none`, there is no signature,
- * and the account id is the placeholder string rather than the user's — the proxy replaces both
- * the authorization header and the account id with the genuine values on the way out, so the
- * published file never carries either.
- */
+/** Non-secret unsigned Codex placeholder JWT; the proxy replaces its credential and account ID on egress. */
 export const PROXY_PLACEHOLDER_JWT = [
 	Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64"),
 	Buffer.from(
@@ -48,15 +30,7 @@ export function isPublishedPlaceholder(value: string | undefined): boolean {
 
 export type ProxyFamily = "anthropic" | "codex";
 
-/**
- * Which family, if any, this parent-owned loopback can serve.
- *
- * Base `anthropic` is included because a bare child on a subscription token is refused as a
- * third-party app (measured 2026-08-30). Base `openai-codex` is not: the same child reached the
- * network on Pi's built-in provider. Numbered Codex/Anthropic slots are included because a
- * models.json entry has no OAuth method, so Pi never consults a published placeholder while an
- * OAuth blob sits under the same key.
- */
+/** Return the parent-owned proxy family for a supported slot, or undefined. */
 export function proxyFamilyFor(slotId: string): ProxyFamily | undefined {
 	if (slotId === "anthropic" || /^anthropic-account-\d+$/.test(slotId)) return "anthropic";
 	if (/^openai-codex-account-\d+$/.test(slotId)) return "codex";
@@ -102,13 +76,7 @@ const DROPPED_HEADERS = new Set([
 	"accept-encoding",
 ]);
 
-/**
- * Split `/slot-id/v1/messages` into the slot and the path to forward.
- *
- * Returns `undefined` for anything that is not that shape, including a path that tries to climb
- * out of its slot. A loopback port is reachable by every process on the machine, so the parsing
- * here is the first of the two gates — the second is {@link admitRequest}.
- */
+/** Parse a slot and upstream path, rejecting invalid paths and traversal. */
 export function parseProxyPath(
 	rawUrl: string,
 ): { slotId: string; rest: string } | undefined {
@@ -144,17 +112,7 @@ export type Admission =
 	| { ok: true; route: ProxyRoute }
 	| { ok: false; status: number; message: string };
 
-/**
- * Decide whether to serve a request at all.
- *
- * Two gates, and both matter. The slot has to be one we published — otherwise the port becomes a
- * way to reach any upstream through the user's tokens. And the caller has to present either the
- * published placeholder or the current access token for that slot — otherwise every process on
- * this machine can spend the user's subscription just by finding the port. The placeholder is not
- * a secret; the access token is, and a refusal never echoes either. The access-token path exists
- * because a built-in Anthropic child still presents OAuth: Pi ignores a models.json apiKey when
- * the stored credential is OAuth, and the request only becomes shapable if this proxy accepts it.
- */
+/** Admit requests for published slots bearing their placeholder or current access token without echoing credentials. */
 export function admitRequest(args: {
 	rawUrl: string;
 	headers: Readonly<Record<string, string | string[] | undefined>>;

@@ -1039,13 +1039,7 @@ export function shortAccount(account: string | undefined): string | undefined {
 /** Where a window sits in the snapshot: the two rotation windows, or an extra metered pool. */
 export type UsageWindowPosition = "primary" | "secondary" | "tertiary";
 
-/**
- * Name a quota window by how long it actually is.
- *
- * The label used to be positional — whatever sat in the "primary" slot was called `5h` — but a
- * Codex free plan meters a THIRTY-DAY window there. A number that resets next month then read as
- * one resetting this afternoon, which is a materially different decision about whether to wait.
- */
+/** Label a quota window by its duration rather than its position. */
 export function windowLabel(
 	window: UsageWindow,
 	family: UsageFamily,

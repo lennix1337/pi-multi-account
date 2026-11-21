@@ -1258,12 +1258,7 @@ export function preserveInterruptedTurns(messages: any[]): any[] {
 	return out;
 }
 
-/**
- * What the continuation prompt tells the next account about the turn that just failed, read from
- * the session branch. Returns "" when the branch does not end in an interrupted turn.
- * With content, it is the full handoff record (so the instruction can never point at something the
- * host's context pipeline drops); without, it states plainly that there is nothing to read.
- */
+/** Return the interrupted-turn handoff from a session branch, or an empty string if none exists. */
 export function interruptedTurnNote(branch: any[]): string {
 	const messages = (Array.isArray(branch) ? branch : [])
 		.filter((entry: any) => entry?.type === "message" && entry.message)
@@ -2206,15 +2201,7 @@ function apexIdentity(modelId: string | undefined): "astra" | "fable" | undefine
 	return undefined;
 }
 
-/**
- * Coarse cross-provider quality bands used only to prevent an automatic downgrade or promotion.
- *
- * Astra/Fable are a quarantined apex band: a frontier session cannot discover them as a stronger
- * fallback, while a user-selected apex session never silently falls back to Sol/Opus. Provider is
- * an optional second axis because Cursor currently publishes Fable-named aliases with materially
- * different 200K/64K, reasoning=false metadata; those aliases stay manual/unclassified until a
- * live calibration proves equivalence to native Anthropic Fable.
- */
+/** Classify a model into a quality band for automatic routing, or return undefined for unclassified models. */
 export function modelQualityBand(modelId: string | undefined, provider?: string): ModelQualityBand | undefined {
 	if (!modelId) return undefined;
 	const exceptional = apexIdentity(modelId);
@@ -2308,14 +2295,7 @@ function codexModelDef(id: string) {
 	);
 }
 
-/**
- * Merge a freshly refreshed OAuth credential back onto the stored one. Spreading `...refreshed` is
- * the whole point: it carries the NEW access token (and expiry) onto the credential Pi uses next.
- * Dropping it — keeping only the old access — makes every post-refresh call reuse an expired token
- * and 401 forever, which is how an alias slot got its tokens silently discarded and was then wrongly
- * killed by the consecutive-401 guard. `refresh` is preserved when the provider mints no new refresh
- * token. Exported for unit testing so the two refresh paths can never silently diverge again.
- */
+/** Merge refreshed OAuth fields, preserving the stored refresh token when no new one is supplied. */
 export function mergeRefreshedCredentials(credentials: any, refreshed: any) {
 	return {
 		...credentials,

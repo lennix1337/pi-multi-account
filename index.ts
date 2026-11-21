@@ -316,8 +316,6 @@ const REASONING_LEVELS: ReasoningLevel[] = [
 	"xhigh",
 	"max",
 ];
-// "auto" = follow the session's own level (per-agent `--thinking`, `/thinking`) instead of
-// forcing a global one. Any explicit level still forces that level on every turn.
 type ReasoningLevelSetting = ReasoningLevel | "auto";
 
 type OpenAICodexAliasConfig = {
@@ -334,11 +332,6 @@ type AnthropicOAuthAliasConfig = {
 type ProviderFailoverConfig = {
 	enabled?: boolean;
 	autoContinue?: boolean;
-	/**
-	 * Keep quota-blocked work armed when every compatible account is cooling, then resume in the
-	 * same live session as soon as any account is genuinely usable. Independent of the immediate
-	 * post-switch `autoContinue` setting. Default: true.
-	 */
 	resumeAfterAllAccountsRecover?: boolean;
 	autoDiscover?: boolean;
 	autoDiscoverModels?: boolean;
@@ -346,52 +339,17 @@ type ProviderFailoverConfig = {
 	includeQwen?: boolean;
 	qwenProvider?: string;
 	includeOllama?: boolean;
-	/**
-	 * Let providers outside the five specially-managed families take part in rotation — any
-	 * account with a usable key that Pi already knows how to call. Off is for someone paying per
-	 * token who does not want background failover spending a plain API key.
-	 */
 	includeOtherProviders?: boolean;
 	includeCursor?: boolean;
-	/**
-	 * Serve OAuth rotation slots to extension-free children through a parent-owned loopback
-	 * route. Off means such a child cannot use those accounts at all and silently reroutes to
-	 * whichever provider Pi finds first.
-	 */
 	childProxy?: boolean;
-	/**
-	 * When true, `/model` shows only the currently active rotation account: every other
-	 * provider is re-registered with an empty model list (its auth and OAuth config are
-	 * preserved by Pi's merge) and restored on switch or when the flag goes off.
-	 */
 	onlyActive?: boolean;
-	/**
-	 * Provider ids whose foreground route this extension must not automatically change,
-	 * including preflight with stale cooldowns and actionable response errors.
-	 *
-	 * For providers we do not manage (no cooldown/refresh lifecycle of ours) that run their own
-	 * retry logic — typically a companion extension that owns retries for that provider. Failing
-	 * over would fight it: we would switch accounts while the other extension is mid-retry.
-	 * Only meaningful for unmanaged providers; a managed account still cools and rotates normally.
-	 */
 	neverFailoverProviders?: string[];
 	providerOrder?: ProviderFamily[];
-	// Where work goes once EVERY account of the current family is spent. An ordered list of
-	// provider groups — a managed family, or the base id of anything else you are logged in to
-	// (`openrouter`, `zai`, `minimax`…), which `providerOrder` could never name. Same-family
-	// failover always runs first and is not affected; an account on a real cooldown is still never
-	// chosen over a free one. Only the order among candidates that are all selectable right now
-	// changes. Anything unlisted sorts after everything listed. Set with
-	// `/multi-account priority ...`.
 	providerPriority?: string[];
 	cooldownMs?: number;
 	probeCooldownMs?: number;
 	invalidCooldownMs?: number;
 	transientCooldownMs?: number;
-	/**
-	 * How long automatic recovery slows down once it keeps failing (the breaker) or has spent its
-	 * per-prompt budget. Recovery then resumes by itself; it never waits for a user message.
-	 */
 	breakerCooldownMs?: number;
 	showUsage?: boolean;
 	showUsageWindows?: boolean;
@@ -408,69 +366,22 @@ type ProviderFailoverConfig = {
 	modelErrorPatterns?: string[];
 	ignoreErrorPatterns?: string[];
 	continuationPrompt?: string;
-	// Hard ceiling on how long ANY prediction may stop us from simply trying an account again.
-	// Providers reset quota windows early and without notice, and they resize the windows
-	// themselves — so a reset timestamp, a "try again in N min" sentence and a used-percentage are
-	// all forecasts, not facts. The only fact is what the account answers when asked. Default: 10
-	// minutes. Set higher to probe less often, never to "trust" a provider's own estimate.
+	// external: provider quota reset forecasts can change or reset early.
 	maxRecheckIntervalMs?: number;
-	// Rewrite the interrupted turn into a verbatim `user` handoff record so the account
-	// taking over still sees exactly where the previous one stopped. Without this, pi-ai
-	// drops the interrupted assistant message entirely before the next request is built,
-	// so the continuation lands on an account that cannot see the work it is told not to
-	// repeat. Default: true.
-	// Keep a request inside the model's context window WHILE the agent is working. Pi only checks
-	// whether to compact after a whole agent run has ended and before a new user prompt, so a long
-	// autonomous run is never measured: one 78-minute run grew from 85 663 to 542 529 tokens
-	// against a 272 000 window with no check at all. `true`/absent uses the
-	// defaults; an object overrides individual thresholds; `false` disables the guard entirely.
+	// external: Pi checks compaction between runs, not during an autonomous run.
 	contextGuard?: boolean | Partial<ContextGuardSettings>;
-	// After an AUTOMATIC compaction, carry the task on instead of stopping and waiting for the
-	// user to type "продовжуй". Pi already has the machinery: `_runAutoCompaction` ends with
-	// `return this.agent.hasQueuedMessages()`, and the run loop turns a `true` there into
-	// `agent.continue()`. Pi uses that on the overflow path but queues nothing on the threshold
-	// path, so a threshold compaction otherwise ends the run. This is enabled by default for
-	// run-to-completion; another extension (for example pi-goal) may own continuation, in which
-	// case set this explicitly to false to avoid competing follow-ups.
+	// external: Pi queues continuation for overflow compaction but not threshold compaction.
 	continueAfterCompaction?: boolean;
 	preserveInterruptedContext?: boolean;
-	// When the active account is rate-limited/cooling/invalid and Pi needs to compact
-	// (context overflow or threshold), run the summary on a HEALTHY fallback account
-	// instead of letting the default summary die on the dead account. If every live
-	// attempt fails, CANCEL — never fall through to Pi's unbounded default on the spent
-	// account (that is the infinite "Compacting context…" spinner). Default: true.
 	routeCompactionToHealthyAccount?: boolean;
-	// Upper bound for one routed compaction attempt. 0/absent ⇒ built-in default.
 	compactionWatchdogMs?: number;
-	// When a resumed turn wedges (silent past stuckWatchdogMs with no tool running), auto-cancel
-	// it and auto-resume when an account frees, instead of only notifying. Default: true.
 	autoRecoverStuck?: boolean;
-	// Write a structured "black box" decision log to provider-failover-debug.log. Default: true.
-	// Contains no credentials — only provider/model ids, decisions, and truncated reasons.
 	debugLog?: boolean;
-	// Always upgrade to the newest available model on failover instead of carrying a
-	// previously-downgraded model forward forever. Default: true.
 	preferLatestModel?: boolean;
-	// Reasoning effort to preserve across model/account switches. Default: "auto" — the level
-	// the session actually runs at (per-agent `--thinking`, `/thinking`, your Pi default) is
-	// honoured and only restored after a switch, never overridden. Set an explicit level to
-	// FORCE it on every turn regardless of the session. Extreme levels such as xhigh are
-	// opt-in only.
 	reasoningLevel?: ReasoningLevelSetting;
-	// Per-family override of the preferred model order (newest first). Lets you pin the
-	// latest model for each provider WITHOUT a code change when a new one ships, e.g.
-	// { "openai-codex": ["gpt-5.6", "gpt-5.5"], "anthropic": ["claude-opus-4-9"] }.
-	// Keys: anthropic | openai-codex | cursor | qwen | ollama.
 	preferredModels?: Record<string, string[]>;
-	// Explicit per-account-group model preference. It never selects a foreground model,
-	// bypasses a cooldown, or authorizes an automatic quality-tier change.
 	pinnedModels?: Record<string, string>;
-	// Per-account-group model for the FIRST call after an automatic failover lands there, e.g.
-	// { "anthropic": "claude-haiku-5-5" }. That one call runs on the warm-up model; once it
-	// returns successfully the route switches back to the account's normal (flagship) model for
-	// every later call. Opt-in; skipped when the target account does not have the model.
 	failoverWarmupModels?: Record<string, string>;
-	// Forward-progress watchdog tunables (see constants above). 0/absent ⇒ built-in default.
 	resumeIdleTimeoutMs?: number;
 	stuckWatchdogMs?: number;
 };

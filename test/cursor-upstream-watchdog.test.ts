@@ -10,11 +10,6 @@ import {
   startUpstreamWatchdog,
 } from "../cursor/upstream-watchdog.ts";
 
-/**
- * With SSE keepalives holding the client connection open, the only thing that can end a turn
- * Cursor has silently abandoned is our own view of upstream progress. Visible tokens and
- * Pi-bound tools push the deadline; heartbeat, checkpoints, and blob fetches do not.
- */
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -30,8 +25,6 @@ test("fires once after upstream goes quiet, reporting how long it was silent", a
 
 test("observed progress pushes the deadline back", async () => {
   let fired = 0;
-  // Touches every 25 ms against a 400 ms deadline: a loaded machine (parallel test files) can
-  // delay a 25 ms sleep well past a tight deadline, which made a 60 ms version flaky.
   const watchdog = startUpstreamWatchdog(() => { fired += 1; }, 400);
   for (let i = 0; i < 5; i += 1) {
     await sleep(25);
@@ -84,7 +77,6 @@ test("stall durations read naturally in the error surfaced to the user", () => {
   assert.equal(formatStallDuration(301_400), "5m 1s");
 });
 
-// Generated protobuf enums need transpilation; keep the test loader local to this subprocess.
 test("the proxy distinguishes dead transport from a live but unproductive Run", () => {
   execFileSync(process.execPath, ["--import", new URL("./fixtures/typescript-loader.mjs", import.meta.url).href, "--input-type=module", "-e", `
     import assert from "node:assert/strict";
@@ -183,7 +175,6 @@ test("the proxy distinguishes dead transport from a live but unproductive Run", 
   `], { cwd: new URL("../", import.meta.url), stdio: "pipe" });
 });
 
-// A timer wake-up is advisory; the elapsed deadline remains authoritative.
 test("an early timer wake cannot declare an upstream stall", (t) => {
   let now = 0;
   t.mock.method(performance, "now", () => now);

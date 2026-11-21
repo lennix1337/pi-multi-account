@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-// Exercise Pi's real continuation dispatch without external requests or personal credentials.
 const dir = mkdtempSync(join(tmpdir(), "multi-account-access-recovery-"));
 process.env.PI_CODING_AGENT_DIR = dir;
 process.env.PI_OFFLINE = "1";

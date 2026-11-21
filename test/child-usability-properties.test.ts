@@ -1,10 +1,3 @@
-/**
- * Seeded property checks for subagent account inheritance (child-usability.ts).
- *
- * The oracle is the matrix documented at the top of the module: which slot shapes a bare child can
- * run on, and which loopback route makes an Anthropic subscription usable. A failing case prints
- * its seed; the same seed replays the exact facts.
- */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -64,7 +57,6 @@ function genFacts(seed: number): SlotChildFacts {
 	};
 }
 
-/** Loopback by the WHATWG host of the URL, exact match. */
 function isLoopbackUrl(url: string | undefined): boolean {
 	if (url === undefined) return false;
 	let host: string;

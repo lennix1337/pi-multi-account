@@ -200,7 +200,6 @@ process.stdout.write(${JSON.stringify(SAMPLE_AGY_QUOTA)} + "\\n");
 			},
 		});
 
-		// 1. State file persisted usageByProvider.agy
 		const statePath = join(dir, "provider-failover-state.json");
 		assert.ok(existsSync(statePath), "provider-failover-state.json should exist");
 		const state = JSON.parse(readFileSync(statePath, "utf8"));
@@ -213,7 +212,6 @@ process.stdout.write(${JSON.stringify(SAMPLE_AGY_QUOTA)} + "\\n");
 			Date.parse("2026-11-14T19:13:00Z"),
 		);
 
-		// 2. agy never appears as a route/account choice candidate
 		const command = created.session.extensionRunner.getCommand("multi-account");
 		assert.ok(command, "multi-account command is registered");
 		const completions = (await command.getArgumentCompletions?.("use ")) ?? [];
@@ -222,7 +220,6 @@ process.stdout.write(${JSON.stringify(SAMPLE_AGY_QUOTA)} + "\\n");
 			`agy must never appear in route choices, got ${JSON.stringify(completions)}`,
 		);
 
-		// 3. `/multi-account accounts` displays the agy (Gemini) line
 		notifications.length = 0;
 		await command.handler("accounts", { ui: fakeUi, model } as any);
 		assert.ok(
@@ -230,7 +227,6 @@ process.stdout.write(${JSON.stringify(SAMPLE_AGY_QUOTA)} + "\\n");
 			`expected agy line in accounts output, got ${JSON.stringify(notifications)}`,
 		);
 
-		// 4. Failure on refresh logs via logEvent and preserves previous reading
 		writeFileSync(modeFile, "fail");
 		await command.handler("accounts refresh", { ui: fakeUi, model } as any);
 		const stateAfterFail = JSON.parse(readFileSync(statePath, "utf8"));
@@ -246,14 +242,11 @@ process.stdout.write(${JSON.stringify(SAMPLE_AGY_QUOTA)} + "\\n");
 			`expected agy_quota_failed in log, got ${logText}`,
 		);
 
-		// 5. Verify agy was invoked with -p=/quota
 		const calls = readFileSync(callsFile, "utf8").trim().split(/\r?\n/);
 		assert.ok(calls.length >= 2);
 		assert.ok(calls.every((c) => c === "-p=/quota"));
-		// A home without the user's mcp_config.json keeps agy from starting every MCP server (and flashing consoles) just to read quota.
 		const homes = readFileSync(callsFile + ".home", "utf8").trim().split(/\r?\n/);
 		const quietHome = join(tmpdir(), "agy-quota-home");
-		// The updater agy spawns in the background opens a visible console window; a quota read never needs it.
 		assert.ok(homes.every((h) => h === `${quietHome}|${quietHome}|true`), homes.join(", "));
 
 		await created.session.dispose();

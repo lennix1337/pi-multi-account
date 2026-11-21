@@ -1,19 +1,3 @@
-/**
- * The failover ladder: where work goes once EVERY account of the current provider is spent.
- *
- * Rotation already gets the first step right — of 602 automatic failovers in this machine's black
- * box, 588 stayed inside the same provider family. The other 14 are what this is about. They had
- * no policy behind them and scattered:
- *
- *     kimi-coding → openai-codex   3      cursor       → openai-codex  1
- *     openai-codex → anthropic     3      anthropic    → cursor        1
- *     kimi-coding → anthropic      2      ollama       → kimi-coding   2
- *     kimi-coding → cursor         2
- *
- * And not one of those 602 ever reached a per-token account (openrouter, zai, minimax,
- * opencode-go-api, openai) — correct as a default, but it was an accident of `providerOrder`
- * being typed to the six managed families rather than a policy anyone chose.
- */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -28,7 +12,6 @@ import {
 
 
 test("every rotation slot of one account collapses to a single group", () => {
-  // Preferring one numbered slot over its sibling is rotation's job, not the ladder's.
   assert.equal(normalizeGroup("openai-codex-account-3"), "openai-codex");
   assert.equal(normalizeGroup("kimi-coding-account-2"), "kimi-coding");
   assert.equal(normalizeGroup("cursor-account-2"), "cursor");
@@ -48,8 +31,6 @@ test("the nicknames people actually type are understood", () => {
 });
 
 test("a provider this build has never heard of is still rankable", () => {
-  // The whole second half of the gap: `providerOrder` was typed to the six managed families, so
-  // openrouter/zai/minimax could not be placed in the order at all and sat last by construction.
   for (const group of ["openrouter", "zai", "minimax", "opencode-go-api", "deepseek"]) {
     assert.equal(normalizeGroup(group), group, `${group} must survive normalisation`);
   }
@@ -62,7 +43,6 @@ test("normalizePriority cleans a list without silently reordering it", () => {
     "anthropic",
     "kimi-coding",
   ]);
-  // First mention wins: that is where the person meant to put it.
   assert.deepEqual(normalizePriority(["cursor", "claude", "cursor"]), ["cursor", "anthropic"]);
   assert.deepEqual(normalizePriority(["", "  ", null as unknown as string]), []);
   assert.deepEqual(normalizePriority(undefined), []);
@@ -88,7 +68,6 @@ test("an unranked group sorts after every ranked one", () => {
 
 test("silence is not a preference: two unranked groups are left exactly as they were", () => {
   const ladder = ["anthropic"];
-  // Returning 0 hands the decision to the next tiebreak instead of inventing an order.
   assert.equal(comparePriority("openrouter", "zai", ladder), 0);
   assert.equal(comparePriority("zai", "openrouter", ladder), 0);
 });
@@ -104,8 +83,6 @@ test("the ladder is a total order over the groups it names", () => {
   assert.ok(comparePriority("anthropic", "openai-codex", ladder) < 0);
   assert.ok(comparePriority("cursor", "openai-codex", ladder) < 0, "must be transitive");
   assert.equal(comparePriority("cursor", "cursor", ladder), 0);
-  // Antisymmetry — a comparator that fails this can make Array.sort produce garbage.
-  // `+ 0` normalises the -0 that negating a zero sign produces, which is a distinct value here.
   for (const [a, b] of [["cursor", "anthropic"], ["anthropic", "openrouter"], ["zai", "zai"]]) {
     assert.equal(
       Math.sign(comparePriority(a, b, ladder)) + 0,
@@ -123,7 +100,6 @@ test("ranking reads slot names and nicknames, not just canonical ids", () => {
 
 
 test("the description names the accounts that are not logged in", () => {
-  // A typo in a provider name would otherwise look exactly like a ladder that worked.
   const lines = describePriority(["anthropic", "openrouter"], ["anthropic", "cursor"]);
   assert.match(lines[0], /1\. anthropic$/);
   assert.match(lines[1], /2\. openrouter {2}\(not logged in\)/);

@@ -7,8 +7,7 @@ import { join } from "node:path";
 import { mutateConfigFile } from "../config-file-transaction.ts";
 import { replaceFileSync } from "../replace-file.ts";
 
-// Another process (a second Pi session reading models.json, an antivirus scan) holds the target
-// open for a moment. On Windows a bare rename over it fails with EPERM and the update is lost.
+// external: Windows rename can fail with EPERM while another process holds the target open.
 function holdOpen(path: string, ms: number): Promise<() => Promise<void>> {
 	const child = spawn(process.execPath, [
 		"-e",

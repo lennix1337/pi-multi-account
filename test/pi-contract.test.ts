@@ -1,16 +1,3 @@
-/**
- * The assumptions this extension makes about Pi, and the shape checks that notice when one stops
- * holding.
- *
- * Two Pi changes have already broken this extension, and neither announced itself:
- *  - `AuthStorage` dropped `set()` on 0.84.x — the file format was fine, the write path was not;
- *    the user re-logged into Anthropic roughly daily until it was found.
- *  - Slot catalogues were written into `models.json` as bare id strings where Pi requires
- *    objects; Pi rejected the WHOLE file and every custom provider vanished at once.
- *
- * Neither `auth.json` nor `models.json` carries a schema version, so a format change cannot be
- * detected by comparing versions. Looking at the shape is the only option available.
- */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -29,8 +16,6 @@ import {
 
 
 test("the interface is exactly the three files Pi publishes", () => {
-  // A bare child reads these and nothing else — anything deeper is a design smell, not a
-  // dependency to formalise.
   assert.deepEqual([...PUBLISHED_FILES], ["auth.json", "models.json", "settings.json"]);
 });
 
@@ -39,8 +24,6 @@ test("every assumption says whether Pi promised it, where, and what breaks", () 
   for (const assumption of PI_ASSUMPTIONS) {
     assert.ok(assumption.id && assumption.fact, `${assumption.id}: fact required`);
     assert.ok(["documented", "observed"].includes(assumption.kind), assumption.id);
-    // "Where" and "what breaks" are what make the row actionable after an upgrade. A row without
-    // them is a note, not a check.
     assert.ok(assumption.surface.length > 10, `${assumption.id}: needs a surface`);
     assert.ok(assumption.breaks.length > 10, `${assumption.id}: needs a consequence`);
   }
@@ -78,7 +61,6 @@ test("auth.json: the ordinary shape passes", () => {
 });
 
 test("auth.json: an unfamiliar credential kind is reported, not silently skipped", () => {
-  // Silently skipping is how an account disappears from the rotation with no explanation.
   const verdict = checkAuthShape({ future: { type: "passkey" } });
   assert.equal(verdict.ok, false);
   assert.match(verdict.problems[0], /future.*passkey/);
@@ -100,8 +82,6 @@ test("models.json: a bare model id string is caught, and the message says how ba
   });
   assert.equal(verdict.ok, false);
   assert.match(verdict.problems[0], /2 model entries are a bare string/);
-  // Pi rejects the whole file, so the blast radius is every other provider too — the message has
-  // to say that or it reads like a local problem.
   assert.match(verdict.problems[0], /ENTIRE file/);
 });
 
@@ -110,7 +90,6 @@ test("models.json: model objects pass, and an absent registry is not a fault", (
     checkModelsShape({ providers: { zai: { models: [{ id: "glm-5.2" }] } } }).ok,
     true,
   );
-  // A user with no custom providers at all is a normal install, not drift.
   assert.equal(checkModelsShape({}).ok, true);
 });
 
@@ -154,8 +133,6 @@ test("settings.json naming the running model is the whole point, and passes", ()
 });
 
 test("a stale default is caught, and the message names both models", () => {
-  // This is the exact live failure that started all of this: the rotation was on Codex, the file
-  // said something else, and a bare child ended up on Anthropic and got billed-refused.
   const verdict = checkSettingsTracksActive(
     { defaultProvider: "anthropic", defaultModel: "claude-opus-5" },
     active,
@@ -163,8 +140,6 @@ test("a stale default is caught, and the message names both models", () => {
   assert.equal(verdict.ok, false);
   assert.match(verdict.problems[0], /anthropic\/claude-opus-5/);
   assert.match(verdict.problems[0], /openai-codex-account-4\/gpt-5\.6-sol/);
-  // Without the consequence spelled out this reads as cosmetic drift rather than "your children
-  // are running on the wrong account".
   assert.match(verdict.problems[0], /child/);
 });
 
@@ -184,8 +159,6 @@ test("missing saved defaults are a legacy mismatch only when this gated check is
 });
 
 test("a broken settings file reports the shape problem rather than a bogus mismatch", () => {
-  // Reporting "records (unset)/(unset)" for a file that is not even an object would send someone
-  // hunting for a rotation bug instead of a corrupt file.
   const verdict = checkSettingsTracksActive("nonsense", active);
   assert.equal(verdict.ok, false);
   assert.deepEqual(verdict.problems, ["not a JSON object"]);
@@ -209,8 +182,6 @@ test("drift names the file, the problem, and why nothing warned us", () => {
   assert.ok(message);
   assert.match(message, /models\.json/);
   assert.match(message, /bare string/);
-  // The reason matters: without it this reads as our bug rather than an unversioned format
-  // changing underneath us.
   assert.match(message, /carries no version|no version/);
   assert.equal(/settings\.json/.test(message), false, "a healthy file must not appear in the report");
 });

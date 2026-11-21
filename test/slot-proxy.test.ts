@@ -1,9 +1,3 @@
-/**
- * The rules a parent-owned loopback route has to hold.
- *
- * A port on 127.0.0.1 is reachable by every process on the machine, and what sits behind this one
- * is the user's subscription. So the interesting tests here are refusals, not forwards.
- */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -41,7 +35,6 @@ test("a slot route splits into the slot and the path to forward", () => {
 		slotId: "openai-codex-account-4",
 		rest: "/codex/responses?stream=1",
 	});
-	// A bare slot with no path is legitimate; it forwards to the upstream root.
 	assert.deepEqual(parseProxyPath("/zai"), { slotId: "zai", rest: "/" });
 });
 
@@ -52,7 +45,6 @@ test("anything that is not a slot route is refused rather than guessed at", () =
 });
 
 test("a path trying to climb out of its slot is refused, not normalised", () => {
-	// Normalising is where traversal bugs live; there is no caller that needs `..`.
 	for (const url of [
 		"/anthropic-account-2/../openai-codex-account-4/v1",
 		"/anthropic-account-2/v1/%2E%2E/admin",
@@ -75,7 +67,6 @@ test("a published slot presenting the placeholder is admitted", () => {
 });
 
 test("a slot we never published is not served", () => {
-	// Otherwise the port is a way to reach any upstream on the user's tokens.
 	const verdict = admitRequest({
 		rawUrl: "/some-other-provider/v1/messages",
 		headers: withKey(),
@@ -87,8 +78,6 @@ test("a slot we never published is not served", () => {
 });
 
 test("a caller that does not present the placeholder is refused", () => {
-	// Every process on this machine can find a loopback port. Without this gate, any of them
-	// could spend the user's subscription.
 	for (const headers of [{}, withKey("something-else"), { "x-api-key": "sk-real-looking" }]) {
 		const verdict = admitRequest({
 			rawUrl: "/anthropic-account-2/v1/messages",
@@ -102,7 +91,6 @@ test("a caller that does not present the placeholder is refused", () => {
 });
 
 test("a refusal never echoes what the caller presented", () => {
-	// It may be a real credential belonging to whoever called, and refusals get logged.
 	const verdict = admitRequest({
 		rawUrl: "/anthropic-account-2/v1/messages",
 		headers: { "x-api-key": "sk-caller-secret" },
@@ -278,7 +266,6 @@ test("hop-by-hop and recomputed headers are not copied through", () => {
 	for (const dropped of ["host", "content-length", "connection", "transfer-encoding", "accept-encoding"]) {
 		assert.equal(shaped.headers[dropped], undefined, dropped);
 	}
-	// A header the caller legitimately set still travels.
 	assert.equal(shaped.headers["user-agent"], "pi");
 });
 
@@ -317,14 +304,11 @@ test("the published route points at this machine and carries the slot", () => {
 
 
 test("Pi reads an account id out of the Codex key, so that placeholder is token-shaped", () => {
-	// Measured against a real `pi -p --no-extensions` child: a plain placeholder fails before any
-	// request with "Failed to extract accountId from token". Pi splits on ".", base64-decodes the
-	// middle segment and reads chatgpt_account_id — no signature is checked.
+	// external: Pi extracts chatgpt_account_id from the middle JWT segment of a Codex key.
 	const parts = PROXY_PLACEHOLDER_JWT.split(".");
 	assert.equal(parts.length, 3);
 	const payload = JSON.parse(Buffer.from(parts[1], "base64").toString("utf8"));
 	assert.equal(payload["https://api.openai.com/auth"].chatgpt_account_id, PROXY_PLACEHOLDER_KEY);
-	// Nothing real is in it: no signature, no algorithm, and the user's own account id stays out.
 	assert.equal(parts[2], "");
 	assert.equal(JSON.parse(Buffer.from(parts[0], "base64").toString("utf8")).alg, "none");
 });
@@ -354,8 +338,7 @@ test("a Codex slot presenting the JWT placeholder is admitted", () => {
 });
 
 test("the account id Pi filled in from the placeholder is replaced, never merely defaulted", () => {
-	// Pi sets chatgpt-account-id from whatever it read out of the key. Left alone, the request
-	// would reach Codex naming an account that does not exist.
+	// external: Pi sets chatgpt-account-id from the credential.
 	const shaped = shapeUpstreamRequest({
 		route: codexRoute,
 		rest: "/codex/responses",

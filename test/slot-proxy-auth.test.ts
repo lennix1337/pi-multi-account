@@ -1,6 +1,3 @@
-/**
- * Numbered OAuth slots cannot keep the subscription token in the file a child reads.
- */
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ANTHROPIC_PROXY_PLACEHOLDER_KEY, PROXY_PLACEHOLDER_JWT, PROXY_PLACEHOLDER_KEY } from "../slot-proxy.ts";

@@ -1,10 +1,3 @@
-/**
- * Seeded property and model-based checks for the completion route planner.
- *
- * Each property states its oracle on its own terms (the documented precedence, the budgets,
- * the anti-ping-pong window) instead of re-running the implementation's branches. A failing case
- * prints its seed; the same seed replays the exact input.
- */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -92,12 +85,6 @@ function genRanking(seed: number): { scored: Candidate[]; options: Options } {
 	};
 }
 
-/**
- * The documented precedence, one dimension at a time: same model, same family, liveness
- * (confirmed, then not predicted busy), the provider ladder, last refusal, recency, rotation.
- * Liveness sits above the ladder on purpose: evidence about a specific account beats a
- * preference about its category (see the comment in index.ts next to the ladder comparator).
- */
 function precedes(a: Candidate, b: Candidate, o: Options): boolean {
 	const dimensions: Array<[number, number]> = [];
 	if (o.preferSameIdentity) {
@@ -117,7 +104,6 @@ function precedes(a: Candidate, b: Candidate, o: Options): boolean {
 
 const byPrecedence = (o: Options) => (a: Candidate, b: Candidate) => (precedes(a, b, o) ? -1 : precedes(b, a, o) ? 1 : 0);
 
-/** The oracle: free accounts in precedence order, minus the just-left one inside its window; else nothing (availableNowOnly) or every account by recovery time. */
 function expectedRanking(scored: readonly Candidate[], o: Options): string[] {
 	const free = scored.filter((c) => c.remaining === 0);
 	const pingPong =
@@ -171,7 +157,7 @@ test("when identity is preferred, same-model accounts lead the free list and sam
 		const served = rankAutomaticRouteCandidates(scored, options);
 		const byProvider = new Map(scored.map((c) => [c.provider, c]));
 		const flags = served.map((m) => byProvider.get(m.provider)!);
-		if (!flags.every((c) => c.remaining === 0)) continue; // cooled-down fallback is ordered by recovery time instead
+		if (!flags.every((c) => c.remaining === 0)) continue;
 		const firstOther = flags.findIndex((c) => !c.sameModel);
 		if (firstOther >= 0) {
 			assert.ok(flags.slice(firstOther).every((c) => !c.sameModel), `seed ${seed}: a same-model account came after another account`);
@@ -296,7 +282,6 @@ function genAttempt(next: () => number): RouteAttemptFact {
 	};
 }
 
-/** The precedence written as a list: each rule is consulted only when the ones above it did not decide. */
 function specKind(a: RouteAttemptFact): RouteFailureKind {
 	if (a.stopReason === "route_unavailable") return "route_unavailable";
 	if (a.stopReason === "aborted") return "aborted";

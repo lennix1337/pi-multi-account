@@ -10,8 +10,6 @@ function usesModernAgentContext(version: string): boolean {
 	return major > 0 || (major === 0 && minor >= 86);
 }
 
-// Exercise Pi's REAL loader rather than importing the wrapper in this test process.
-// A deliberately incompatible nested package must never supply the transport.
 for (const bundled of [false, true]) for (const api of ["anthropic-messages", "openai-completions"]) {
 	test(`${bundled ? "bundled" : "node"} host-bound ${api} preserves system and tools despite a stale nested pi-ai`, async () => {
 		const { DefaultResourceLoader, SettingsManager, VERSION } = bundled

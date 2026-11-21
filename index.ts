@@ -305,8 +305,6 @@ type ReasoningLevel =
 	| "high"
 	| "xhigh"
 	| "max";
-// Reasoning levels ordered weakest → strongest. Used to tell a host clamp (a drop forced by a
-// weaker fallback model) apart from a deliberate change by the user.
 const REASONING_LEVELS: ReasoningLevel[] = [
 	"off",
 	"minimal",
@@ -2901,17 +2899,7 @@ function lastAssistantStopReason(messages: any[]): string | undefined {
 	return undefined;
 }
 
-// Anthropic OAuth request shaping (vendored)
-//
-// Makes Claude Pro/Max (OAuth) accounts work out of the box — no separate
-// pi-anthropic-auth install required. Ported from gotgenes/pi-anthropic-auth
-// (MIT). The logic is idempotent: if pi-anthropic-auth is ALSO installed, both
-// before_provider_request hooks run, but the second sees the request already
-// shaped (billing header present, Pi preamble already replaced) and no-ops.
-//
-// CLAUDE_CODE_VERSION must track the current Claude Code release; if it drifts
-// too far Anthropic may reject or miscount OAuth requests. Check `claude
-// --version` or https://github.com/anthropics/claude-code.
+// external: Portado de Anthropic OAuth: Claude Code version drift may cause rejected or miscounted OAuth requests.
 
 const PI_DEFAULT_PROMPT_PREFIX =
 	"You are an expert coding assistant operating inside pi, a coding agent harness.";
@@ -2992,8 +2980,6 @@ function hasOAuthAnthropicSystemMarker(block: unknown): boolean {
 	);
 }
 
-// Only requests that Pi already marked as OAuth (Claude Code identity block, or
-// already-shaped) are touched — API-key Anthropic requests pass through untouched.
 function isOAuthAnthropicPayload(payload: ShapeAnthropicPayload): boolean {
 	if (!Array.isArray(payload.system)) return false;
 	return payload.system.some(hasOAuthAnthropicSystemMarker);
@@ -3053,7 +3039,6 @@ function prependBillingHeader(
 		: system == null
 			? []
 			: [normalizeSystemBlock(system)];
-	// Idempotent: don't add a second billing header (e.g. pi-anthropic-auth also ran).
 	if (
 		systemBlocks.some((block) =>
 			block.text.includes("x-anthropic-billing-header:"),
@@ -3064,8 +3049,7 @@ function prependBillingHeader(
 	return [billingBlock, ...systemBlocks];
 }
 
-// The Anthropic API rejects assistant turns where non-tool_use blocks follow a
-// tool_use block; Pi's serializer can produce that, so split into two turns.
+// external: Portado de Anthropic OAuth: Anthropic rejects non-tool_use blocks after tool_use in assistant turns.
 function splitAssistantToolUseTrailingContent(
 	messages: ShapeMessageParam[],
 ): ShapeMessageParam[] {
@@ -3128,7 +3112,6 @@ function shapeAnthropicOAuthSystemPrompt(systemPrompt: string): string {
 			systemPrompt.slice(terminatorEnd)
 		);
 	}
-	// Pi reworded its preamble terminator → fall back to slicing from project context.
 	const projectContextStart = findProjectContextStart(systemPrompt);
 	if (projectContextStart === -1) return MINIMAL_ANTHROPIC_OAUTH_PROMPT;
 	return `${MINIMAL_ANTHROPIC_OAUTH_PROMPT}${systemPrompt.slice(projectContextStart)}`;
@@ -3142,11 +3125,10 @@ function shapeSystemBlocks(blocks: ShapeTextBlock[]): ShapeTextBlock[] {
 	});
 }
 
-/** before_provider_request shaper: makes Claude Pro/Max OAuth requests acceptable. */
 function shapeAnthropicOAuthPayload(payload: unknown): unknown {
 	if (!isAnthropicMessagesPayload(payload)) return payload;
 	const messages = payload.messages as ShapeMessageParam[];
-	if (!isOAuthAnthropicPayload(payload)) return payload; // API-key / non-OAuth → untouched
+	if (!isOAuthAnthropicPayload(payload)) return payload;
 	const normalizedMessages = splitAssistantToolUseTrailingContent(messages);
 	const shapedSystem = Array.isArray(payload.system)
 		? shapeSystemBlocks(payload.system as ShapeTextBlock[])

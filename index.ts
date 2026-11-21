@@ -3155,14 +3155,7 @@ function shapeAnthropicOAuthPayload(payload: unknown): unknown {
 	return { ...payload, messages: normalizedMessages, system: finalSystem };
 }
 
-/**
- * before_provider_request shaper for Qwen/Alibaba (OpenAI-compatible). Pi sends the system
- * instructions with the OpenAI-only `developer` role (the o1+/Codex convention), but Qwen's
- * compatible-mode API rejects it with `400 invalid_parameter_error: developer is not one of
- * ['system','assistant','user','tool','function']`. Rewrite that role to `system` (which Qwen
- * accepts) in place. Idempotent and role-only — content is untouched. Returns whether it changed
- * anything, so callers/tests can assert it fired.
- */
+// external: Qwen uses system messages rather than the OpenAI developer role.
 function rewriteDeveloperRoleToSystem(payload: unknown): boolean {
 	if (!payload || typeof payload !== "object") return false;
 	const messages = (payload as { messages?: unknown }).messages;
@@ -3205,8 +3198,7 @@ function registerAnthropicLoginMethods(
 		: undefined;
 	const provider = anthropicLoginProvider(base, id, readAnthropicLoginCredential, models);
 	const oauth = provider.auth.oauth!;
-	// Do not follow this with a legacy string/config registration: Pi discards the native
-	// provider (including its API-key login guard) when the legacy registration replaces it.
+	// external: Pi discards a native provider registration when it is replaced by legacy string/config registration.
 	pi.registerProvider({
 		...provider,
 		baseUrl,
@@ -3225,12 +3217,7 @@ function registerAnthropicLoginMethods(
 
 export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
 
-/**
- * pi-subagents owns model selection and fallback routing inside its child
- * processes. Loading this extension there is still useful for provider/account
- * registration and request shaping, but a child must never restore the parent
- * process's remembered model or start a second failover loop.
- */
+// external: pi-subagents owns model selection and fallback routing in its child processes.
 export function isSubagentChildProcess(
 	env: Record<string, string | undefined> = process.env,
 ): boolean {
@@ -3260,8 +3247,6 @@ function parseExplicitCliArgs(argv: readonly string[] = process.argv): {
 	return { model, provider, thinking };
 }
 
-// Registration has no model catalog. Once session_start supplies one, delegate model suffix
-// parsing to the same resolver as Pi's CLI, including exact colon IDs and provider custom IDs.
 async function resolveExplicitCliModelThinkingLevel(
 	args: ReturnType<typeof parseExplicitCliArgs>,
 	ctx: any,
@@ -3312,11 +3297,6 @@ interface HostCompletionRouter {
 	onAttempt?(attempt: RouteAttemptFact): void | Promise<void>;
 }
 
-/**
- * Cross-extension request: "which model should a subagent child launch on?". The asker fills
- * `version`, `purpose` and `model`; the root session's listener fills `result` synchronously.
- * No `result` means no live root answered (not installed, a passive child, failover disabled).
- */
 const MODEL_ROUTE_REQUEST_EVENT = "pi:model-route:request:v1";
 type ModelRouteRequest = {
 	version: 1;
@@ -3333,23 +3313,15 @@ interface HostCompletionRouterAPI {
 }
 
 export default function piMultiAccount(pi: ExtensionAPI) {
-	// Warm up the OAuth helpers before any provider registration: providers are
-	// registered synchronously below and their `usesCallbackServer`/`getApiKey`
-	// use the cached host adapter. An unusable OAuth factory remains non-fatal:
-	// API-key accounts keep working and session start reports unavailable OAuth.
 	const oauthUnavailable = piAiOauthUnavailableReason();
 	let subagentChild = isSubagentChildProcess();
 	let hostOwnsSessionModel = false;
 	let startupModel: { provider: string; id: string } | undefined;
-	// Terminal Pi keeps the conservative one-root lease. A replacement of the SAME host
-	// session can reacquire it; an unrelated in-process child remains passive.
 	const activationKey = Symbol.for("pi-multi-account:active-root-session");
 	const activations = globalThis as typeof globalThis & {
 		[activationKey]?: { owner: object; sessionId?: string; relinquish: () => void };
 	};
 	const activationOwner = {};
-	// Independent SDK roots share the canonical child listener and its auth/models
-	// publication by port. Their failover state remains private to each session.
 	type SharedProxyMember = {
 		sessionId?: string;
 		ready: boolean;
@@ -3360,15 +3332,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	};
 	type SharedProxyCoordinator = {
 		members: Map<object, SharedProxyMember>;
-		// Every published slot stays routable when its discovering root exits first.
 		routes: Map<string, ProxyRoute>;
 		sessionOwners: Map<string, object>;
 		server?: Server;
 		starting?: Promise<number | undefined>;
 		publisher?: object;
 		handlerOwner?: object;
-		// Set while the same process replaces its last root (reload, new, resume, fork): the
-		// socket and shared files wait for the next root until this deadline.
 		handoffUntil?: number;
 		handoffTimer?: ReturnType<typeof setTimeout>;
 	};
@@ -3378,12 +3347,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	};
 	const coordinators = coordinatorGlobals[coordinatorKey] ??= new Map<number, SharedProxyCoordinator>();
 	let slotProxyCoordinator: SharedProxyCoordinator | undefined;
-	// pi-web's session daemon hosts many independent root sessions in ONE process. The
-	// terminal-Pi lease heuristic would demote every session but the first to passive,
-	// silently disabling failover there. Genuine subagent children under pi-web run in a
-	// runner process marked PI_SUBAGENT_CHILD, which is checked above and still wins.
-	// Any other multi-session SDK host (e.g. Enso) opts in with the host-neutral switch
-	// PI_MULTI_ACCOUNT_INDEPENDENT_ROOTS=1 instead of borrowing pi-web's marker.
+	// external: pi-web hosts multiple independent root sessions in one process.
 	const multiSessionHost =
 		process.env.PI_WEB_SESSION === "1" ||
 		process.env.PI_MULTI_ACCOUNT_INDEPENDENT_ROOTS === "1";
@@ -3394,8 +3358,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	};
 	const explicitCliThinkingAtRegistration = explicitCliArgs.thinking;
 	const hasExplicitCliSelection = explicitCli.model || explicitCli.thinking;
-	// A CLI launch owns both remembered dimensions until a genuine user change takes ownership
-	// of that dimension. Otherwise a model-only launch can persist its thinking clamp (or vice versa).
 	let modelPreferenceChanged = !hasExplicitCliSelection;
 	let thinkingPreferenceChanged = !hasExplicitCliSelection;
 	const sessionInstanceId = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
@@ -3423,27 +3385,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	let lastModelByFamily: Record<string, string> = {
 		...(persistedState.lastModelByFamily ?? {}),
 	};
-	/** Settles once Cursor fallback models are registered. Pi awaits the factory return, so createAgentSession can getModel(cursor, grok-4.6) instead of falling back. */
+	// external: Pi awaits the extension factory before restoring its selected model.
 	let cursorReady: Promise<unknown> | undefined;
 
-	// ----- only-active model filter -------------------------------------------
-	// When enabled, /model drops this extension's OTHER rotation slots: each is
-	// re-registered with `models: []` (Pi merges re-registrations, so auth/OAuth
-	// config survives) and restored from here on switch or disable.
-	//
-	// It may only ever narrow slots THIS extension invented. Pi's registry is the
-	// single place anything — Pi itself, another extension, a `--models` pattern —
-	// asks "does this model exist?", and re-registering a provider with no models
-	// answers "no" to every one of them. Emptying a provider Pi knows on its own
-	// (a built-in, a models.json entry, another extension's registration) therefore
-	// does not hide a model, it DELETES it: a pinned `zai/glm-5.1` stops resolving,
-	// and a caller that falls back to "just use the session model" silently starts
-	// running on whichever account rotation happens to be on. That is invisible from
-	// here and undebuggable from there. Slots we invented are ours to narrow —
-	// nothing else in Pi knows the name `openai-codex-account-3` — and every model
-	// Pi knows independently stays resolvable by reference while the filter is on.
 	let onlyActiveModels = config.onlyActive;
-	/** Models of the providers WE hid, freshest copy — the only way back. */
 	const hiddenProviderModels = new Map<string, any[]>();
 
 	function unhideProvider(provider: string) {
@@ -3464,29 +3409,18 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		for (const provider of [...hiddenProviderModels.keys()]) unhideProvider(provider);
 	}
 
-	/**
-	 * Narrow /model to the active account. Idempotent and cheap: a provider we already
-	 * hid shows zero models in the registry, so there is nothing to re-hide, and a
-	 * provider that re-registered itself (catalog sync) is re-hidden with the FRESH
-	 * model list stored for restore. Never touches the active provider's registration
-	 * beyond restoring what we previously hid.
-	 */
 	function applyOnlyActiveFilter(_ctx: any, _activeProvider?: string) {
-		// Pi exposes one shared model registry to all clients. Removing entries to filter a UI
-		// breaks independently loaded tools and explicit model selection. Keep the catalog intact.
+		// external: Pi shares one model registry across clients.
 		clearOnlyActiveFilter();
 	}
 
-	/** pi.setModel that first restores the target's models when the filter hid them. */
 	let internalModelChanges = 0;
 	async function setModelEnsuringVisible(
 		target: { provider: string; id: string },
 		_ctx: any,
 	) {
 		if (onlyActiveModels) unhideProvider(target.provider);
-		// Pi <=0.84.2 rewrites the saved global default on this path. Pi >=0.84.3 keeps
-		// ordinary selection session-scoped unless persist:true, so comparing settings.json to
-		// the live route there would report intentional host behaviour as contract drift.
+		// external: Pi versions through 0.84.2 persist the selected model as the global default.
 		pendingSettingsCheck = piAutoPersistsSelectedModel(PI_HOST_VERSION);
 		internalModelChanges++;
 		try {
@@ -3496,11 +3430,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 	}
 
-	/**
-	 * Registry lookup that also sees providers the filter hid. Without it the failover's
-	 * own candidate search would starve: a hidden provider shows zero models, so the
-	 * rotation could never switch INTO it.
-	 */
 	function findModelIncludingHidden(ctx: any, provider: string, modelId: string) {
 		const direct =
 			ctx.modelRegistry.find(provider, modelId) ??
@@ -3516,17 +3445,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			];
 			const exact = pool.find((m: any) => m.id === modelId);
 			if (exact) return exact;
-			// Cursor catalogs fold effort variants (`cursor-grok-4.6-high` → `cursor-grok-4.6`).
-			// A remembered or in-flight id with the suffix must still resolve to the folded model.
+			// external: Cursor catalogs include reasoning-effort suffixes on model ids.
 			return pool.find((m: any) => sameModelIdentity(m.id, modelId));
 		} catch {
 			return undefined;
 		}
 	}
 
-	// Clamp any persisted far-future cooldown on load: a pre-fix (or mis-parsed long-window) state
-	// could carry a weeks-away reset that would keep evicting a live account until it expired. Cap it
-	// so the account is re-probed within MAX_LIVE_COOLDOWN_MS and usage reconciliation takes over.
 	const clampCooldownUntil = (until: number, now = Date.now()): number =>
 		Number.isFinite(until) ? Math.min(until, now + MAX_LIVE_COOLDOWN_MS) : until;
 	const exhaustedUntilByProvider = new Map<string, number>(
@@ -3548,63 +3473,20 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	);
 	const usageFetches = new Map<string, Promise<UsageSnapshot>>();
 	const usageErrors = new Map<string, string>();
-	// Per-provider 401 tracking (in-memory, reset on any success): the token hash that last failed
-	// and how many DISTINCT (refreshed) tokens have failed in a row. Only 401s on a *rotated* token
-	// advance toward a permanent kill, so a refreshable account whose refresh isn't reaching the wire
-	// is never wrongly revoked.
 	const authFailures = new Map<string, { hash: string; distinct: number }>();
-	// Response headers arrive before the final assistant message. Keep their cooldown hints, but
-	// never switch accounts from that early hook: Pi may still be retrying the same HTTP request.
 	const responseCooldownHints = new Map<string, number>();
 	const handledAssistantErrors = new Set<string>();
-	// Consecutive limit-error accounting per provider (in-memory, reset on any success). Two limit
-	// errors in a row prove the usage-% window is not seeing this account's real limit, so usage is
-	// distrusted until `usageUntrustedUntilByProvider` expires — this is what stops the ~1s
-	// retry-loop against a session-limited account whose quota window still shows headroom.
 	const limitStreakByProvider = new Map<
 		string,
 		{ count: number; lastAt: number }
 	>();
-	/**
-	 * Accounts this failover chain has already rotated ONTO while their own quota forecast still
-	 * said they were spent.
-	 *
-	 * `findFallbackModels` deliberately admits a same-family sibling that no error has refused
-	 * yet, even when its meter reads 100 %: the meter is a forecast, and skipping straight to
-	 * another vendor on a forecast is what once sent a Codex turn to Claude with three Codex slots
-	 * still untried. The exception was written as "has not refused THIS SESSION", and that phrasing
-	 * is the hole. The pending-resume path rotates onto an account WITHOUT sending it a request, so
-	 * it never refuses, so `lastRefusalAt` stays 0 and it stays eligible for ever. Two such
-	 * siblings then re-admit each other about once a second: 275 switches in four minutes with not
-	 * one request leaving the machine, while a free Anthropic account sat at the top of the ladder
-	 * and was never asked, because same-model outranks every other key in the comparator.
-	 *
-	 * So the reprieve is spent by SELECTION, not by refusal: one rotation onto the account is the
-	 * single attempt its stale forecast has earned. Cleared when the account proves itself
-	 * (`noteAuthSuccess`) or a genuine user prompt begins a fresh chain.
-	 */
-	// Seeded from disk: the proof that an account's meter lies must outlive the process that
-	// observed it, or every new session re-selects the spent account all over again. Only
-	// still-future entries are carried; an expired one has already served its purpose.
 	const usageUntrustedUntilByProvider = new Map<string, number>(
 		Object.entries(persistedState.usageUntrustedUntilByProvider ?? {}).filter(
 			([, until]) => typeof until === "number" && until > Date.now(),
 		),
 	);
 
-	// An account the user picked by hand (`next` / `switch`), still owed its one attempt.
-	//
-	// Manual selection deliberately ignores the cooldown bookkeeping, because that bookkeeping is
-	// a forecast and actually asking the account is the only way to prove it wrong. The preflight
-	// that runs on the next user message re-applied the same forecast and moved the user off — so
-	// the override survived only until it was used, which is the one moment it had to hold. This
-	// reprieve is spent by the first attempt, so a user cannot strand themselves on a dead account.
 	let manualPinnedProvider: string | undefined;
-	// Whether the reprieve has already covered a message. The attempt spans several hooks, so
-	// "spent" cannot mean "the first hook asked about it"; it means "a message has gone out under
-	// it". The next message retires it — which is also why nothing here depends on a particular
-	// host emitting a particular event: a reprieve can never outlive the message it was granted
-	// for, even on a host that never reaches `before_agent_start`.
 	let manualPinCoveredMessage = false;
 
 	function pinManualChoice(provider: string | undefined) {
@@ -3612,41 +3494,23 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		manualPinCoveredMessage = false;
 	}
 
-	/** Retire a reprieve that has already had its message. Called when a new prompt arrives. */
 	function retireSpentManualPin() {
 		if (manualPinCoveredMessage) manualPinnedProvider = undefined;
 	}
 
-	/**
-	 * Whether the account currently selected is the one the user just chose by hand.
-	 *
-	 * Deliberately does NOT clear the reprieve. Pi runs the readiness preflight twice for a single
-	 * user message — once on `input`, then again in `before_agent_start` — so a reprieve spent by
-	 * the first "is this account ready?" question was already gone when the second asked, and the
-	 * user was moved off the account they had just picked, one moment before it was used. The
-	 * reprieve covers the ATTEMPT; only the attempt may spend it.
-	 */
 	function hasManualPin(provider: string | undefined): boolean {
 		return !!provider && manualPinnedProvider === provider;
 	}
 
-	/** Mark the reprieve as having covered this message; the next prompt retires it. */
 	function markManualPinUsed(provider: string | undefined) {
 		if (hasManualPin(provider)) manualPinCoveredMessage = true;
 	}
 
-	// Automatic failover onto a same-family sibling whose usage forecast still says spent.
-	// Without a one-attempt pin, the next preflight treats that forecast as a verdict and
-	// bounces to another family (the openai-codex/gpt-5.6-sol → anthropic/claude-opus-5 hop).
 	let failoverPinnedProvider: string | undefined;
 	let failoverPinCoveredMessage = false;
 
 	function pinFailoverProbe(provider: string | undefined) {
 		failoverPinnedProvider = provider;
-		// The hop itself is the attempt. The continuation is not a new user prompt, so the pin
-		// must survive until the next genuine `input`. Marking it covered here means a host that
-		// never emits `before_agent_start` still retires it on the next typed message, instead of
-		// leaving a dead account pinned forever.
 		failoverPinCoveredMessage = true;
 	}
 
@@ -3662,87 +3526,36 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (hasFailoverPin(provider)) failoverPinCoveredMessage = true;
 	}
 
-	// Discovered, authed, deduped provider ids in rotation order.
 	let rotation: string[] = [];
 	let duplicateSlots: Array<{ duplicate: string; primary: string }> = [];
-	// Whether the one-time host-capability notice has already been shown this process.
 	let preflightNotified = false;
-	// Slot ids registered as targets in the interactive /login provider picker.
 	const registeredSlots = new Set<string>();
-	// Host model list an api-key slot was last registered with, so it is refreshed, not re-done.
 	const apiKeySlotHostSignature = new Map<string, string>();
-	// One notice per process when the optional Cursor provider cannot be loaded.
 	let cursorSetupFailureNotified = false;
-	// Strongest-first order learned from OpenAI's live per-account catalogs. It feeds the same
-	// cross-account ranking path as explicit preferredModels, so newly released flagships win
-	// immediately without hard-coding their names in this extension.
 	let discoveredCodexModelOrder: string[] = [];
-	// Same idea one level down: strongest-first order learned from the HOST model registry
-	// (plus our static list). Used whenever the live catalog is unavailable — offline, catalog
-	// fetch failing, or autoDiscoverModels turned off.
 	let registryCodexModelOrder: string[] = [];
-	// The same, for Anthropic. Anthropic publishes no per-account catalog API, so the host
-	// registry is the only way a new flagship (e.g. claude-opus-5) can win without a release.
+	// external: Anthropic does not provide a per-account model catalog API.
 	let registryAnthropicModelOrder: string[] = [];
-	// Live Ollama Cloud catalog (`GET https://ollama.com/v1/models`). Unlike Codex, Ollama
-	// publishes a single account-agnostic catalog per API key, so one fetch covers the base
-	// provider and every cloned `ollama-account-N` slot. Bare ids (e.g. `kimi-k3`) are
-	// registered verbatim — Ollama Cloud accepts them as-is.
+	// external: Ollama Cloud exposes a live model catalog at /v1/models.
 	let discoveredOllamaModelIds: string[] = [];
 	let ollamaCatalogFetchedAt = 0;
 	let lastAuthMtime = -1;
 	const credentialHashes = new Map<string, string>();
-	// Stable per-slot account fingerprints (survive token refresh). A change means the slot was
-	// re-logged into a DIFFERENT real account, which is the only reason to drop its cooldown.
 	const credentialIdentities = new Map<string, string>();
 
 	let currentPromptSwitch: SwitchRecord | undefined;
 	let continuationRecoveryLease: AutomaticRecoveryLease | undefined;
 	let contextGuardRecoveryLease: AutomaticRecoveryLease | undefined;
 	let contextGuardRecoveryEpoch: number | undefined;
-	// Number of auto-continuations issued for the CURRENT task. Crucially this is NOT
-	// reset by the self-triggered re-prompts failover issues (only by a genuine new user
-	// prompt — see before_agent_start), so config.maxAutoContinuesPerPrompt actually bounds
-	// the failover loop instead of resetting to 0 on every iteration.
 	let autoContinuesThisPrompt = 0;
-	/**
-	 * Account rotations performed by the pending-resume timer that did NOT end in a dispatched
-	 * continuation.
-	 *
-	 * `autoContinuesThisPrompt` counts turns we actually started, so it cannot bound a loop that
-	 * never starts one — and the ping-pong never did: every wake switched account, found the new
-	 * account cooling too, re-armed the wait and changed nothing. Counting the rotations themselves
-	 * is what makes `maxAutoContinuesPerPrompt` a real ceiling on that path.
-	 */
 	let pendingResumeHops = 0;
-	/**
-	 * How long the pending-resume timer waits after a wake that changed nothing.
-	 *
-	 * The floor exists so a genuinely-recovered account is picked up promptly. But the wake delay
-	 * is the minimum across EVERY rotation account, so one free account elsewhere pinned it at the
-	 * floor and the session re-checked at 1 Hz for as long as the state lasted. A wake that
-	 * achieves nothing doubles the wait, up to the ordinary poll interval; anything that counts as
-	 * progress puts it back on the floor.
-	 */
 	let pendingWakeBackoffMs = MIN_PENDING_WAKE_MS;
-	/** The same relaxation, for the timer that holds a typed message until an account is free. */
 	let queuedWakeBackoffMs = AUTH_CHANGE_POLL_MS;
-	/**
-	 * Bumped by every explicit "stop what you are doing" — `/multi-account stop`, `reset`, `clear`.
-	 *
-	 * The automatic paths are async: a wake that is already past its guards keeps running while the
-	 * user types, and re-arms the wait a moment after `stop` cleared it. That is why stop had to be
-	 * typed two or three times before it took. Each async chain captures the epoch it started under
-	 * and abandons itself the moment it changes, so one stop is enough.
-	 */
 	let chainEpoch = 0;
 	let pendingWakeTimer: ReturnType<typeof setTimeout> | undefined;
 	let queuedInputWakeTimer: ReturnType<typeof setTimeout> | undefined;
 	let usageStatusTimer: ReturnType<typeof setInterval> | undefined;
-	/** A usage reading is in memory that the shared state file does not hold yet. */
 	let usageTelemetryUnsaved = false;
-	// Pending work is session-local. The shared state file may contain another Pi window's marker;
-	// using that marker as this window's runtime state makes two unrelated tasks resume each other.
 	type PendingResumeMode = "auto-continue" | "quota-recovery";
 	let pendingResume:
 		| {
@@ -3754,65 +3567,19 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			}
 		| undefined;
 
-	// ----- the governor ----------------------------------------------------
-	//
-	// WHY THIS EXISTS, since the alternative has been tried eight times and did not hold.
-	//
-	// This extension drives the session from a dozen independent places: a failed turn, a
-	// resume timer, a queued-input timer, a stuck-turn watchdog, a compaction boundary, two
-	// preflights. Each of them decided for itself when to give up, and between them there are
-	// six unrelated stop conditions — `autoContinuesThisPrompt`, the pending-resume hop count,
-	// the stuck-reminder count, the recovery circuit breaker, the guard's compaction cooldown,
-	// the queue length. Not one of them can see the others, and none of them can see the system.
-	//
-	// The consequence is that a NEW path, or a new interaction between two existing paths, is an
-	// unbounded loop by default; it only becomes safe if whoever wrote it remembered to bound it.
-	// The changelog is the evidence: "Runaway failover loop that could freeze the machine",
-	// "Escape did not stop the loop", "API-key providers no longer loop forever on a dead key",
-	// "a session/rate limit is no longer hot-retried every second", "Compaction no longer leaves
-	// 'Compacting context…' spinning forever", "a refusal that cannot be classified no longer
-	// strands the session forever", "the stuck-resume watchdog now ACTS instead of only warning",
-	// and the 275-switch rotation this governor was written for. Eight separate fixes, eight
-	// separate paths, one shape.
-	//
-	// So the default is inverted. Every automatic action asks here first, and the question is not
-	// "have I personally done this too often" but "has this session gone anywhere". Two invariants
-	// answer that, and both are measured from the PROVIDER, not from our own bookkeeping — the
-	// whole failure mode is that our bookkeeping believed it was making progress:
-	//
-	//   1. No request reached a provider at all across N consecutive actions. That is a spin with
-	//      certainty: nothing was learned, nothing was sent, nothing can change. The 275 switches
-	//      in four minutes made not one request.
-	//   2. No SUCCESSFUL response across M consecutive actions. Slower and rarer, and it is what a
-	//      hot retry against a limit that our meters cannot see looks like. The bound is loose
-	//      enough that walking an entire seventeen-account fleet — a switch and a real request per
-	//      account — completes normally, because every one of those requests resets invariant 1
-	//      and a fleet walk is a legitimate way to spend a minute.
-	//
-	// Tripping is not a pause. It stops every timer, drops every armed continuation, says what
-	// happened in one sentence with the user's own held text handed back, and stays stopped until
-	// the user says something or runs `/multi-account reset`. A session that has stopped is a
-	// session the user can act on; a session that is spinning is one they can only kill.
 	const GOVERNOR_ACTIONS_WITHOUT_REQUEST = 12;
 	const GOVERNOR_ACTIONS_WITHOUT_SUCCESS = 40;
 	let actionsSinceRequest = 0;
 	let actionsSinceSuccess = 0;
 	let firstActionSinceRequestAt = 0;
 	let governorStoppedReason: string | undefined;
-	// A safety stop that misfires is worse than the hang it prevents, and the way it would misfire
-	// is a host that never emits the hooks the governor watches — then "no request was observed"
-	// means "we cannot see requests", not "no request happened". So each invariant arms itself only
-	// after it has seen its own signal work at least once in this session. On a host that emits
-	// nothing, the governor stays dormant and behaviour is exactly what it was before. On a host
-	// that emits normally, the very turn that hit the limit has already armed it, which is all the
-	// spin that follows ever needed.
 	let requestSignalSeen = false;
 	let successSignalSeen = false;
 
 	const queuedUserInputs: Array<{ text: string; images?: any[] }> = [];
-	let continuationDispatchedForAgentTurn = false; // avoid agent_end double-dispatch after message_end failover
-	let userAbortedChain = false; // user pressed Esc → stop auto-continuing until a new prompt
-	let lastLeftProvider: string | undefined; // account we just failed away from (anti-ping-pong)
+	let continuationDispatchedForAgentTurn = false;
+	let userAbortedChain = false;
+	let lastLeftProvider: string | undefined;
 	let lastLeftAt = 0;
 	type ThinkingChangeEvidence = {
 		model: string;
@@ -3820,87 +3587,45 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		appliedLevel: ReasoningLevel;
 	};
 	let automaticModelTarget: ModelRef | undefined;
-	// A failover warm-up model selected by the extension, not the user: never remembered.
 	let automaticWarmupTarget: ModelRef | undefined;
-	// Set while the first post-failover call runs on `config.failoverWarmupModels`; its first
-	// successful reply moves the route to `target`, the model the failover actually chose.
 	let pendingWarmupUpgrade:
 		| { provider: string; warmupId: string; target: { provider: string; id: string } }
 		| undefined;
 	let lastObservedModelKey: string | undefined;
 	let lastObservedThinkingLevel: ReasoningLevel | undefined;
 	let pendingModelThinkingChange: ThinkingChangeEvidence | undefined;
-	// Forward-progress watchdog state. A "resume in flight" is a continuation WE dispatched
-	// (pi.continueAgent after a switch) whose new turn must keep showing activity. Any stream
-	// token, tool event, or provider response is "progress" and disarms the stuck timer; total
-	// silence past stuckWatchdogMs means the rotated turn wedged and the user is staring at a
-	// spinner that will never finish — so we surface a concrete, actionable recovery.
 	let activeResumeWatch: symbol | undefined;
 	let progressWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
 	let watchdogCtx: any;
 	let lastResumeProgressAt = 0;
 	let stuckReminders = 0;
-	// True only while WE deliberately abort a wedged resumed turn, so agent_end can tell our
-	// recovery abort apart from a real user Esc and auto-continue instead of stopping.
-	/**
-	 * Legacy Pi <=0.84.2 only: set on a model switch and cleared after the next turn verifies the
-	 * auto-persisted global default. Pi >=0.84.3 intentionally keeps ordinary selection scoped to
-	 * this session, so this remains false and no comparison against settings.json is attempted.
-	 */
+	// external: Pi versions through 0.84.2 persist model switches as the global default.
 	let pendingSettingsCheck = false;
-	/** Contract drift is stated once per session — it is a standing condition, not an event. */
 	let contractDriftAnnounced = false;
-	/** Last contract verdicts, for the status line. */
 	let lastContractVerdicts: ShapeVerdict[] = [];
 
 	let watchdogAborting = false;
-	// The turn about to start was typed by the user. A user prompt is the one request allowed to
-	// probe a cooling account (a stale forecast is only ever found out that way); a turn started
-	// by anything else (a background-worker report, a custom message) is not.
 	let userPromptStartsTurn = false;
-	// We aborted a turn ourselves because every account is exhausted: agent_end must not read it
-	// as the user pressing Esc, and the aborted message is not provider-health evidence.
 	let exhaustedGateAborting = false;
-	// What the last exhausted-gate notice said, so a run of refused turns states it once.
 	let exhaustedGateNoticeKey: string | undefined;
-	// How many tools are executing right now on the resumed turn. A long build/test command is
-	// silent for minutes but is NOT stuck — never abort while a tool is in flight.
 	let toolInFlight = 0;
-	// Set right before we inject a continuation prompt as a user message (the fallback used when
-	// the transcript tail is not continuable, e.g. after a watchdog abort). before_agent_start
-	// checks it so our own continuation does NOT reset the per-task auto-continue counter — that
-	// keeps maxAutoContinuesPerPrompt bounding the recovery loop.
 	let expectingInjectedContinuation = false;
-	let lastContextOverflowAt = 0; // for /multi-account status visibility
-	let compactionRoutedNote: string | undefined; // last healthy-compaction routing decision, for status
-	// Circuit breaker: consecutive failed auto-recoveries, and the time until which advisory mode
-	// (auto-continue paused) stays in effect once tripped.
+	let lastContextOverflowAt = 0;
+	let compactionRoutedNote: string | undefined;
 	let recoveryFailures = 0;
 	let breakerOpenUntil = 0;
-	// Pi owns a separate agent-level retry loop (`retry.maxRetries`, default 3). Remember the
-	// transient route across those low-level attempts so recovery remains bounded without
-	// mistaking a transport/server failure for quota exhaustion or switching providers.
+	// external: Pi owns an agent-level retry loop separate from extension recovery.
 	let transientFailureStreak:
 		| { route: ModelRef; count: number }
 		| undefined;
-	// Cursor transport recovery is bounded per route across the whole chain. A
-	// single current-route streak forgets the first route after switching and can
-	// ping-pong forever once its short cooldown expires.
 	const cursorStallFailuresByRoute = new Map<
 		ModelRef,
 		{ provider: string; count: number }
 	>();
-	// The thinking level the user intends for this session. pi.setModel() re-clamps AND
-	// persists the thinking level on every model switch, so without re-asserting it the level
-	// drifts downward across failovers ("thinking level keeps dropping"). But the intent must be
-	// read from the SESSION (per-agent `--thinking`, `/thinking`), not from a global default:
-	// forcing config.reasoningLevel on every agent_start clobbered per-agent thinking, so an
-	// agent configured `low` was flipped to `high` on its first turn (issue #6).
+	// external: Pi clamps thinking levels to the selected model capabilities.
 	let desiredThinkingLevel: ReasoningLevel | undefined =
 		explicitCliThinkingAtRegistration;
 	let explicitCliThinkingLevel: ReasoningLevel | undefined = explicitCliThinkingAtRegistration;
-	// What the host applied after we asserted the session's intent, and on which model. A
-	// capability clamp or model default is NOT a user decision, otherwise thinking ratchets.
 	let thinkingClamp: { model: string; level: ReasoningLevel } | undefined;
 	const thinkingChangeSource = new AsyncLocalStorage<"extension">();
 
@@ -3912,7 +3637,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			const level = (pi as any).getThinkingLevel?.();
 			return thinkingRank(level) >= 0 ? (level as ReasoningLevel) : undefined;
 		} catch {
-			// Older hosts have no getThinkingLevel; we simply have nothing to preserve.
+			// external: Older Pi hosts do not expose getThinkingLevel.
 			return undefined;
 		}
 	}
@@ -3927,8 +3652,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			? ref(ctx.model.provider, ctx.model.id)
 			: "unknown";
 
-	// A level lower than the intent that is exactly what the host produced last time we asserted
-	// the intent on THIS model is a clamp, not the user lowering thinking on purpose.
 	function isKnownThinkingClamp(ctx: any, level: ReasoningLevel) {
 		return (
 			!!thinkingClamp &&
@@ -3942,18 +3665,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const forced =
 			config.reasoningLevel === "auto" ? undefined : config.reasoningLevel;
 		if (forced) {
-			// Explicit config is an opt-in override: force it on every turn (old behaviour).
 			desiredThinkingLevel = forced;
 		} else {
 			const actual = readThinkingLevel();
 			if (!actual) {
-				/* host cannot report the level: keep whatever we already know, force nothing */
 			} else if (desiredThinkingLevel === undefined) {
-				// First turn of the session. Prefer the REMEMBERED user intent over whatever the host
-				// currently reports: a startup model switch can clamp the level first (a map may hide
-				// levels, and the host then applies a default), and adopting that clamp here is exactly
-				// how a hand-picked `max` disappeared for the rest of a session. The persisted value is
-				// the only evidence of what the user actually chose.
 				const remembered = persistedState.lastUserThinkingLevel;
 				const rememberedLevel =
 					thinkingRank(remembered) >= 0
@@ -3970,9 +3686,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				actual !== desiredThinkingLevel &&
 				!isKnownThinkingClamp(ctx, actual)
 			) {
-				// The user changed it (`/thinking`, or a delegated agent with its own level).
-				// Deliberately still adopted on any direction: the host reports no cause with the change,
-				// and a user who lowers the level between turns is observable only here.
 				logEvent("thinking_intent", { from: desiredThinkingLevel, to: actual });
 				desiredThinkingLevel = actual;
 			}
@@ -3987,9 +3700,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				(pi as any).setThinkingLevel?.(desiredThinkingLevel),
 			);
 		} catch {
-			/* setThinkingLevel clamps to model caps; ignore if unsupported */
+			// external: Pi clamps thinking levels to model capabilities.
 		}
-		// Record a clamp so the next turn does not mistake the fallback model's cap for intent.
 		const applied = readThinkingLevel();
 		if (!applied) return;
 		lastObservedThinkingLevel = applied;
@@ -4005,51 +3717,25 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 	}
 
-	// ---- crash isolation (v1.12.0) ----------------------------------------
-	// This extension hooks ~12 Pi events and runs several background timers. Node
-	// terminates the whole process on an unhandled promise rejection, and a throw
-	// inside an event handler can break the host. So EVERY handler and EVERY timer
-	// callback is funnelled through these guards: the error is reported once
-	// (deduped, so a repeating fault can't spam) and swallowed, the current failover
-	// step is skipped, and Pi keeps running. This is the systemic net that makes the
-	// whole surface fail-safe — not just the specific bugs we already know about.
 	const reportedErrors = new Map<string, number>();
 	function reportExtensionError(where: string, error: unknown, ctx?: any) {
 		const msg = error instanceof Error ? error.message : String(error);
 		const key = `${where}:${msg.slice(0, 80)}`;
 		const now = Date.now();
 		const last = reportedErrors.get(key) ?? 0;
-		// Always record the raw fault in the black box (deduped only for the user-facing toast).
 		logEvent("internal_error", { where, error: msg });
-		if (now - last < 30_000) return; // dedupe identical errors within 30s
+		if (now - last < 30_000) return;
 		reportedErrors.set(key, now);
-		if (reportedErrors.size > 50) reportedErrors.clear(); // never grow unbounded
+		if (reportedErrors.size > 50) reportedErrors.clear();
 		try {
 			ctx?.ui?.notify?.(
 				`pi-multi-account: recovered from an internal error in ${where} (${msg.slice(0, 140)}). Failover continues; run /multi-account status if anything looks off.`,
 				"warning",
 			);
 		} catch {
-			/* even notify must never throw us out of the guard */
 		}
 	}
 
-	// Register an event handler that can never crash the host. Preserves the handler's
-	// return value (Pi uses these — e.g. the shaped payload, the input action, the
-	// compaction result); on a sync throw OR async rejection it reports once and
-	// returns undefined, which every Pi event treats as "no opinion / default".
-	/**
-	 * Look at the files Pi publishes, and say something only when one no longer has the shape this
-	 * extension depends on.
-	 *
-	 * Neither auth.json nor models.json carries a schema version, so a Pi upgrade can change
-	 * either without anything announcing it — both breakages this extension has already lived
-	 * through were silent for days. Looking is the only detection available.
-	 *
-	 * `includeSettings` is true only on Pi <=0.84.2 and only after a model switch, where the
-	 * legacy host rewrites the saved global default. Pi >=0.84.3 intentionally keeps the live
-	 * route session-scoped, so settings.json is not compared.
-	 */
 	function checkPiContract(ctx: any, why: string, includeSettings = false) {
 		const active =
 			includeSettings && ctx?.model?.provider && ctx?.model?.id
@@ -4058,20 +3744,15 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const verdicts = inspectPiContract(active);
 		lastContractVerdicts = verdicts;
 		const drift = describeContractDrift(verdicts);
-		// A healthy check is logged once, at session start; after that only faults are worth a
-		// line, or the black box fills with "still fine" on every turn.
 		if (drift || why === "session_start") {
 			logEvent("pi_contract_checked", {
 				why,
 				checked: verdicts.map((verdict) => verdict.file),
 				problems: verdicts.flatMap((verdict) => verdict.problems),
-				// Named on every logged check: after an upgrade these are the rows to re-verify by
-				// hand, because nothing in Pi promises them.
 				unpromised: observedAssumptions().map((assumption) => assumption.id),
 			});
 		}
 		if (!drift) {
-			// Cleared, so a fault that comes back later is announced again rather than swallowed.
 			contractDriftAnnounced = false;
 			return;
 		}
@@ -4098,8 +3779,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		});
 	}
 
-	// Fire-and-forget an async background task (timer callbacks) without ever leaking
-	// an unhandled rejection that would abort the Node process.
 	function runBackground(where: string, ctx: any, fn: () => Promise<unknown>) {
 		try {
 			void fn().catch((error) => reportExtensionError(where, error, ctx));
@@ -4136,9 +3815,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				codexModelCatalogByProvider.entries(),
 			),
 		};
-		// Every Pi window and delegated child shares this file. Preserve another live session's
-		// pending marker on ordinary writes, and let an explicit clear remove only a marker owned by
-		// this session. Otherwise an old wake timer can erase a newer session's held message.
+		// external: Pi windows and delegated children can share the same state file.
 		try {
 			next = mutateStateFile<ProviderFailoverState>(STATE_PATH, (disk) => {
 				next = mergeStateDeltas(lastSavedState, next, disk);
@@ -4174,8 +3851,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					nextHasPending &&
 					next.pendingOwner !== sessionInstanceId
 				) {
-					// This process merely observed a marker that has since been cleared by its owner. Do not
-					// resurrect it during an unrelated usage/catalog persistence write.
 					next = {
 						...next,
 						pendingFrom: undefined,
@@ -4185,9 +3860,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 						pendingOwner: undefined,
 					};
 				}
-				// Usage/catalog timers are allowed to persist their own telemetry, but they must not roll
-				// back a model choice saved by another live Pi window from an older in-memory snapshot.
-				// Only rememberUserModel opts into changing these shared user-preference fields.
 				if (!options.writeUserPreferences) {
 					next = {
 						...next,
@@ -4198,7 +3870,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				}
 				return next;
 			});
-			// Adopt the merged snapshot so a later local write cannot undo a concurrent session.
 			for (const [map, values] of [
 				[exhaustedUntilByProvider, next.exhaustedUntilByProvider],
 				[exhaustedUntilByModel, next.exhaustedUntilByModel],
@@ -4230,14 +3901,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		persist();
 	}
 
-	// ----- invalidation (dead authorization) --------------------------------
 
 	function clearReauthedInvalidations(auth: Record<string, AuthEntry>) {
 		let changed = false;
 		for (const [provider, record] of [...invalidatedByProvider.entries()]) {
 			const entry = auth[provider];
 			const currentHash = entry ? credentialHash(entry) : undefined;
-			// Re-login (credential changed) or entry removed → clear invalidation.
 			if (!entry || (currentHash && currentHash !== record.tokenHash)) {
 				invalidatedByProvider.delete(provider);
 				exhaustedUntilByProvider.delete(provider);
@@ -4256,11 +3925,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			at: Date.now(),
 			reason: reason.slice(0, 500),
 		});
-		// Invalidation = "drop from rotation until the user re-logs in / replaces the key".
-		// We do NOT also set a 365-day cooldown — that polluted cooldown displays ("Cooldowns:
-		// account-2: 8696h") and confused users into thinking a dead account was merely rate-
-		// limited. Selection logic checks isInvalidated() directly, so the cooldown entry is
-		// redundant. State stays clean: invalidated providers are reported separately.
 		persist();
 	}
 
@@ -4268,7 +3932,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return invalidatedByProvider.has(provider);
 	}
 
-	/** True if this account can self-heal a 401 by refreshing its OAuth token. */
 	function isRefreshable(provider: string): boolean {
 		const entry = readAuthFile()[provider];
 		return (
@@ -4282,11 +3945,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		| { status: "transient"; error: string }
 		| { status: "unsupported" };
 
-	/**
-	 * Pi normally refreshes OAuth only after the local expiry timestamp. Providers can revoke an
-	 * access token earlier, leaving Pi stuck on a token that looks locally valid. On that explicit
-	 * provider verdict, force one refresh immediately and persist it through Pi's AuthStorage.
-	 */
+	// external: Pi normally refreshes OAuth after the locally recorded expiry.
 	const forcedRefreshes = new Map<string, Promise<ForcedRefreshResult>>();
 	async function forceRefreshProvider(ctx: any, provider: string): Promise<ForcedRefreshResult> {
 		const existing = forcedRefreshes.get(provider);
@@ -4312,12 +3971,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 
 		const authStorage = ctx?.modelRegistry?.authStorage;
-		// Test harnesses and future Pi versions can provide a first-class forced refresh operation.
 		if (typeof authStorage?.forceRefreshProvider === "function") {
 			return authStorage.forceRefreshProvider(provider);
 		}
-		// Refuse to refresh at all if the result has nowhere to go: the refresh itself
-		// revokes the token currently on disk.
+		// external: Anthropic invalidates the old refresh token as soon as it issues a new one.
 		if (!canPersistRefreshedCredentials(authStorage)) {
 			return { status: "unsupported" };
 		}
@@ -4422,8 +4079,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					...refreshed,
 				}));
 			if (!persisted) {
-				// The refresh already rotated the token server-side, so the old one on
-				// disk is dead either way. Say so instead of pretending it is transient.
+				// external: A successful OAuth refresh may invalidate the old token on the provider server.
 				return {
 					status: "terminal",
 					error:
@@ -4461,8 +4117,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			.filter(
 				(model) =>
 					typeof model?.id === "string" &&
-					// Codex only ever serves OpenAI ids. Guard against a host registry that
-					// lists something else under this provider leaking into a Codex model list.
 					/gpt|codex|^o\d/i.test(model.id),
 			)
 			.map((model) => ({
@@ -4489,29 +4143,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return [...byId.values()].sort(compareCodexModelStrength);
 	}
 
-	/** Publish a credential-free, account-specific model snapshot over Pi's neutral event bus.
-	 * Hidden providers are included, while each Codex account's live catalog overrides any
-	 * base-provider fallback. No extension name, credential, quota or account identity is sent. */
 
 
-	/**
-	 * Offline Codex ordering: everything the HOST (Pi) knows about the Codex provider, merged
-	 * with our static list and sorted strongest-first.
-	 *
-	 * Without this, the built-in `DEFAULT_CODEX_MODELS` list was consulted BEFORE the host
-	 * registry, so a Pi that already shipped a newer flagship (e.g. gpt-5.6) kept failing over
-	 * to the newest model this extension happened to have been released with (gpt-5.5) — a
-	 * silent downgrade that needed a new release for every OpenAI generation. Registry-learned
-	 * models now win by version, so the next generation works with no release at all. The live
-	 * per-account catalog (when reachable) still outranks this.
-	 */
-	/**
-	 * Offline Anthropic ordering: every Claude model the HOST knows, merged with our static list
-	 * and ranked strongest-first. Without this, a new flagship shipped by Pi (claude-opus-5 while
-	 * this extension's list still topped out at claude-opus-4-8) was invisible to failover, which
-	 * silently broke the project's hard rule of always staying on a provider's top model.
-	 */
-	/** Models every numbered Anthropic slot offers: the host-ranked list once known, else the static one. */
 	function anthropicSlotModelIds(): string[] {
 		return registryAnthropicModelOrder.length > 0 ? registryAnthropicModelOrder : DEFAULT_ANTHROPIC_MODELS;
 	}
@@ -4534,8 +4167,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (ranked.length === 0) return;
 		if (ranked.join(",") === registryAnthropicModelOrder.join(",")) return;
 		registryAnthropicModelOrder = ranked;
-		// Alias slots are registered from the static list, so a model only the host knows about
-		// would not be selectable on them even once it is ranked first.
 		for (const provider of registeredSlots) {
 			if (classifyProvider(provider, config.qwenProvider) !== "anthropic") continue;
 			registerAnthropicSlot(
@@ -4555,9 +4186,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const ids = merged.map((model) => model.id);
 		if (ids.join(",") === registryCodexModelOrder.join(",")) return;
 		registryCodexModelOrder = ids;
-		// Alias slots are registered from our static list, so a model only the host knows about
-		// would not be selectable on them. Re-register — but never over a live catalog, which is
-		// authoritative for that specific account.
 		for (const provider of registeredSlots) {
 			if (classifyProvider(provider, config.qwenProvider) !== "openai-codex") continue;
 			if (
@@ -4600,11 +4228,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 	}
 
-	/**
-	 * Pull OpenAI's account-specific catalog and immediately replace every Codex alias model list.
-	 * The backend's priority is authoritative; Pi's built-in registry and our static definitions are
-	 * only an offline fallback. Catalog snapshots are credential-free and safe to persist.
-	 */
+	// external: OpenAI provides an account-specific model catalog.
 	async function syncCodexModelCatalog(ctx: any, force = false) {
 		if (!config.autoDiscoverModels) return;
 		const auth = readAuthFile();
@@ -4668,8 +4292,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					: numberedCodexBaseUrl(provider),
 			);
 		}
-		// Also keep unauthenticated spare login slots current so a newly logged-in account can select
-		// the new flagship before the next restart/session refresh.
 		for (const provider of registeredSlots) {
 			if (classifyProvider(provider, config.qwenProvider) !== "openai-codex") continue;
 			if (providers.includes(provider)) continue;
@@ -4681,18 +4303,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			);
 		}
 		if (changed) persist();
-		// Catalogs just changed while some providers may be hidden by only-active. Re-apply the
-		// filter NOW so the stored hidden copies hold the FRESH lists — otherwise a manual switch
-		// that lands before the next message_start would restore the stale pre-sync models.
 		applyOnlyActiveFilter(ctx);
 	}
 
-	/**
-	 * The full Ollama model id set the base provider and every cloned slot should expose:
-	 * built-in flagship first, then the user's configured `models.json` ids, then the live
-	 * Cloud catalog. Deduped, order-stable. Live ids win visibility without dropping the
-	 * configured ones, so a user-pinned tag is never silently replaced.
-	 */
 	function ollamaRotationModelIds(): string[] {
 		const ids = [...DEFAULT_OLLAMA_MODELS];
 		for (const configured of configuredModelIds(OLLAMA_BASE)) {
@@ -4704,12 +4317,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return ids;
 	}
 
-	/**
-	 * Pull Ollama Cloud's live catalog and re-register the base provider + every cloned slot
-	 * with the merged set. Idempotent and cheap: a fresh fetch is bounded by OLLAMA_MODEL_CATALOG_TTL_MS
-	 * and the TTL sweep only re-registers when the id set actually changed. Mirrors syncCodexModelCatalog
-	 * but simpler — one API key, one account-agnostic catalog.
-	 */
 	async function syncOllamaModelCatalog(ctx: any, force = false) {
 		if (!config.autoDiscoverModels || !config.includeOllama) return;
 		const entry = readAuthFile()[OLLAMA_BASE];
@@ -4717,7 +4324,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			entry && typeof entry.key === "string" && entry.key.length > 0
 				? entry.key
 				: undefined;
-		if (!key) return; // no credential → nothing to discover, configured ids still serve
+		if (!key) return;
 		if (
 			!force &&
 				ollamaCatalogFetchedAt &&
@@ -4737,7 +4344,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			logEvent("ollama_catalog_error", {
 				error: error instanceof Error ? error.message : String(error),
 			});
-			return; // keep the previous (or empty) discovered set; configured ids still serve
+			return;
 		}
 		const models = ollamaRotationModelIds().map((m) => ollamaModelDef(m, OLLAMA_BASE));
 		models.push(...configuredOperationModels(OLLAMA_BASE));
@@ -4764,14 +4371,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				models: ollamaRotationModelIds().map((m) => ollamaModelDef(m, provider)) as any,
 			} as any);
 		}
-		// Same repair as the Codex sync: keep only-active hidden copies fresh immediately.
 		applyOnlyActiveFilter(ctx);
 	}
 
-	/**
-	 * The provider's usage snapshot while its credential is unchanged. A caller that already read the
-	 * credential store passes it as `auth`, so a listing of N accounts reads auth.json once, not N+1 times.
-	 */
 	function cachedUsage(provider: string, auth?: Record<string, AuthEntry>): UsageSnapshot | undefined {
 		const snapshot = usageByProvider.get(provider);
 		if (!snapshot) return undefined;
@@ -4793,10 +4395,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return config.usageRefreshMs;
 	}
 
-	// Qwen/Alibaba publishes NO live quota endpoint (verified: every usage/billing path 404s and no
-	// rate-limit headers come back), so a real "% left" is impossible. The honest, useful thing to
-	// show instead is the account's live operational state from OUR OWN tracking: available now,
-	// rate-limited until a known time (recorded from a caught 429), or needs re-login.
+	// external: Qwen does not expose a live quota endpoint.
 	function qwenLiveStatus(provider: string): string {
 		if (isInvalidated(provider))
 			return "needs re-login (/login → subscription → alibaba)";
@@ -4806,20 +4405,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return "available · Alibaba exposes no quota API";
 	}
 
-	// For display only: Qwen carries no usage windows, so swap its plan text for the live status.
 	function displayUsageSnapshot(snapshot: UsageSnapshot): UsageSnapshot {
 		return snapshot.family === "qwen"
 			? { ...snapshot, plan: qwenLiveStatus(snapshot.provider) }
 			: snapshot;
 	}
 
-	/**
-	 * How many OTHER accounts could take over right now.
-	 *
-	 * "This account is nearly out" is only half the information; the half that decides what to do
-	 * is whether anywhere else is ready. Counted from bookkeeping already in memory — no probes,
-	 * no reconciliation — because this runs on a footer timer, not on a decision.
-	 */
 	function readyElsewhereCount(
 		ctx: any,
 		current: string | undefined,
@@ -4837,7 +4428,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 
 	function publishUsageSnapshot(snapshot: UsageSnapshot | undefined) {
 		if (!snapshot) return;
-		// A proxy placeholder cannot authenticate a usage-endpoint request. Share quota only.
 		pi.events.emit("pi:usage:snapshot:v1", {
 			provider: snapshot.provider,
 			family: snapshot.family,
@@ -4866,7 +4456,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 						? "warning"
 						: "success"
 				: usageColor(display);
-		// Theme API drift must not hide a usable plain-text status.
 		let rendered: string = text;
 		try {
 			if (ctx.ui.theme?.fg) rendered = ctx.ui.theme.fg(color, text);
@@ -4876,25 +4465,17 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		ctx.ui.setStatus("multi-account-quota", rendered);
 	}
 
-	/** `auth` is the credential store when the caller has already read it, so it is not read again here. */
 	function updateUsageStatus(
 		ctx: any,
 		provider = ctx?.model?.provider,
 		auth?: Record<string, AuthEntry>,
 	) {
 		if (typeof ctx?.ui?.setStatus !== "function") return;
-		// Footer rendering touches host UI + formatting helpers; never let a render hiccup
-		// (theme shape change, formatter edge case) bubble up and break the turn it runs in.
 		try {
 			if (!provider || !usageFamily(provider)) {
 				ctx.ui.setStatus("multi-account-quota", undefined);
 				return;
 			}
-			// Prefer the hash-verified snapshot, but for DISPLAY fall back to the last stored one even
-			// if the OAuth token has since rotated (hash mismatch) — a slightly stale "% left" beats a
-			// blank footer, which is what the user saw when Codex's token rotated between usage fetches.
-			// Qwen may have no snapshot at all (nothing to fetch) — synthesize a bare one so its live
-			// availability/rate-limit status still shows.
 			const snapshot: UsageSnapshot | undefined =
 				cachedUsage(provider, auth) ??
 				usageByProvider.get(provider) ??
@@ -4913,7 +4494,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			}
 			renderUsageStatus(ctx, provider, snapshot, auth);
 		} catch {
-			/* footer is cosmetic — a render error must not affect failover */
 		}
 	}
 
@@ -4932,7 +4512,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return !!entry && (!snapshot.credentialHash || snapshot.credentialHash === credentialHash(entry));
 	}
 
-	/** Writes a usage reading that so far only this process holds. */
 	function flushUsageTelemetry() {
 		if (usageTelemetryUnsaved) persist();
 	}
@@ -4948,31 +4527,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		usageByProvider.set(snapshot.provider, snapshot);
 		usageTelemetryUnsaved = true;
 		usageErrors.delete(snapshot.provider);
-		// AUTHORITATIVE PROACTIVE BENCH. If the account's own usage endpoint reports a hard block (a
-		// window at >=100% with a future reset), record the cooldown NOW — even if the account never
-		// threw a limit error and had no prior cooldown. Without this, a known-spent account (a
-		// free-tier Codex slot maxed on its monthly window) stayed fully "available" for selection
-		// until it was actively tried and failed, so failover kept landing on dead accounts one after
-		// another instead of jumping straight to a live one. markExhausted caps the STORED value at the
-		// live ceiling and fans it out to sibling slots on the same account; providerRecoveryAt still
-		// reports the real reset from the live snapshot. Never benches an account with headroom
-		// (cooldownMsFromUsage returns 0 while the primary window is < 100%).
 		const blockMs = cooldownMsFromUsage(snapshot);
 		if (blockMs !== undefined && blockMs > 0) {
 			markExhausted(snapshot.provider, blockMs);
 		} else if (blockMs === 0) {
-			// A live account probe is allowed to contradict an older reset estimate. Plans can be
-			// upgraded, credits can be purchased, and providers can restore capacity before the
-			// previously advertised resetAt. Fresh headroom therefore clears the old cooldown; the
-			// usage-untrusted guard inside applyUsageToCooldown still protects session limits that
-			// the quota endpoint is known not to see.
 			applyUsageToCooldown(snapshot.provider, snapshot, Date.now());
 		}
-		// Response headers repeat the account's reading on every LLM response. One that says what the
-		// last one said changes nothing a reader of the shared state decides on, so it waits in memory
-		// for the next write or run boundary (flushUsageTelemetry) instead of taking the cross-process
-		// state lock and rewriting the file once per response. A reading that differs in anything but
-		// the instant it was taken is written now: other processes act on percentage lines of their own.
 		if (options.fromResponseHeaders && blockMs === 0 && sameUsageReading(previous, snapshot)) {
 			updateUsageStatus(ctx, undefined, options.auth);
 			return true;
@@ -5063,16 +4623,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 	}
 
-	/**
-	 * Refresh every authenticated account independently, not just the account currently selected
-	 * in the session. This is what detects an early quota restoration, a purchased credit balance,
-	 * or a Free -> Plus/Pro plan upgrade while the account is benched by an older 100% snapshot.
-	 *
-	 * refreshUsage() already applies a per-family TTL and deduplicates in-flight requests, so calling
-	 * this from the status timer is cheap: network traffic occurs only when an account's own snapshot
-	 * is stale. Qwen keeps an honest capability-only snapshot (its plans expose no quota API);
-	 * Cursor reads its three Pro+ pools from the dashboard service.
-	 */
 	const AGY_QUOTA_REFRESH_MS = 15 * 60_000;
 	const AGY_QUOTA_HOME = join(tmpdir(), "agy-quota-home");
 	let agyQuotaFetch: Promise<UsageSnapshot | undefined> | undefined;
@@ -5090,8 +4640,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					encoding: "utf8",
 					windowsHide: true,
 					timeout: 30_000,
-					// Login lives in the OS credential store; a home without ~/.gemini/antigravity/mcp_config.json
-					// keeps agy from starting every MCP server (consoles flash on screen) just to print quota.
+					// external: Antigravity login uses the OS credential store.
 					env: { ...process.env, MSYS_NO_PATHCONV: "1", USERPROFILE: AGY_QUOTA_HOME, HOME: AGY_QUOTA_HOME, AGY_CLI_DISABLE_AUTO_UPDATE: "true" },
 				},
 				(error, stdout) => {
@@ -5102,11 +4651,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		});
 	}
 
-	/**
-	 * Reads Antigravity CLI (`agy`) quota at most once every 15 minutes and persists it under
-	 * `usageByProvider.agy` for external observers (OptChat footer, `/cota`, `/multi-account accounts`).
-	 * Not routed through `storeUsage` because `agy` has no Pi credential in `auth.json`.
-	 */
 	async function refreshAgyQuota(force = false): Promise<UsageSnapshot | undefined> {
 		const previous = usageByProvider.get("agy");
 		const configuredBin = process.env.AGY_BIN?.trim();
@@ -5175,11 +4719,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		updateUsageStatus(ctx);
 	}
 
-	/**
-	 * Usage snapshots and both live model catalogs are independent network reads, and each writes only its
-	 * own cache, so they run together: startup and /reload wait for the slowest read instead of their sum.
-	 * A failure in one does not stop the others; the first failure is rethrown once they have all settled.
-	 */
 	async function refreshAccountMetadata(ctx: any, options: { usage: boolean; force: boolean }): Promise<void> {
 		const outcomes = await Promise.allSettled([
 			options.usage ? refreshRotationUsage(ctx) : undefined,
@@ -5200,10 +4739,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return `${windowLabel(window, snapshot.family, position)} ${remainingPercent(window)}%/${formatResetDuration(window.resetAt, now)}`;
 	}
 
-	/**
-	 * The live cooldown is only the recheck ceiling (minutes); when the account's own usage forecasts
-	 * a later reset, that reset is when it really returns, so show both.
-	 */
 	function cooldownStatus(snapshot: UsageSnapshot | undefined, recoveryAt: number, now: number) {
 		const recheck = formatResetDuration(recoveryAt, now);
 		const resetMs = snapshot && snapshot.serviceable !== true ? cooldownMsFromUsage(snapshot, now) : undefined;
@@ -5211,7 +4746,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return `spent · resets ${formatResetDuration(now + resetMs, now)} · recheck ${recheck}`;
 	}
 
-	/** Every account the accounts table lists, rotation order first, with its status. */
 	function accountRows(ctx: any, now: number) {
 		const auth = readAuthFile();
 		const ordered = [
@@ -5241,14 +4775,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		});
 	}
 
-	/** Accounts offered by `/multi-account use <Tab>`; runs on every keystroke, so no network. */
 	function accountChoices(): AccountChoice[] {
 		let ctx = completionRouterContext;
 		let current: string | undefined;
 		try {
 			current = ctx?.model?.provider;
 		} catch {
-			// A context from a replaced session throws on access; list accounts without it.
+			// external: A context from a replaced Pi session may throw on access.
 			ctx = undefined;
 		}
 		refreshDiscovery(false);
@@ -5318,8 +4851,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 
 	function startUsageStatusTimer(ctx: any) {
 		clearUsageStatusTimer();
-		// A delegated child neither displays the interactive footer nor owns fleet metadata. One
-		// poller per parallel child would multiply usage/catalog traffic for no routing benefit.
 		if (subagentChild) return;
 		if (!config.showUsage && !config.autoDiscoverModels) {
 			updateUsageStatus(ctx);
@@ -5329,8 +4860,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			runBackground("rotation metadata refresh", ctx, async () => {
 				flushUsageTelemetry();
 				await refreshRotationUsage(ctx);
-				// Re-registering provider models is safe while idle and avoids touching the registry in
-				// the middle of a streaming request. The five-minute catalog TTL keeps this sweep cheap.
 				if (ctx?.isIdle?.() !== false) await syncCodexModelCatalog(ctx);
 				if (ctx?.isIdle?.() !== false) await syncOllamaModelCatalog(ctx);
 			});
@@ -5338,14 +4867,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		(usageStatusTimer as any).unref?.();
 	}
 
-	/** A successful response → this account's auth is fine; clear its 401 streak. */
 	function noteAuthSuccess(provider: string, modelId?: string) {
-		// A real success proves the account works right now → the usage reading was not lying; reset
-		// the limit-error streak and re-trust usage for this provider.
 		limitStreakByProvider.delete(provider);
-		// It answered, so whatever its meter said is beside the point: give it its reprieve back.
-		// Distrust is not permanent: a real success is the only evidence that outranks the refusal
-		// that created it, and it must be written down too or a restart would resurrect the bench.
 		let changed = usageUntrustedUntilByProvider.delete(provider);
 		changed = authFailures.delete(provider) || changed;
 		changed = exhaustedUntilByProvider.delete(provider) || changed;
@@ -5355,26 +4878,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (changed) persist();
 	}
 
-	/**
-	 * Handle a 401/auth failure WITHOUT nuking an account that just needs a token refresh.
-	 * Non-refreshable (API key): historically a 401 was marked fatal at once, but in practice
-	 * Ollama Cloud / Alibaba / OpenRouter return 401 transiently under load, or the key rotates
-	 * on the server side without the client knowing. Only the explicit terminal patterns
-	 * ("invalid api key", "incorrect api key", "revoked") kill the slot now; a bare 401 gets a
-	 * transient cooldown and the same consecutive-failure accounting as OAuth, so a momentary
-	 * blip no longer removes a working key for a year. However, repeated 401s with the SAME key
-	 * (same hash) are not a transient blip for API-key providers — the key is permanently
-	 * invalid. After MAX_SAME_KEY_AUTH_FAILURES consecutive same-key failures, the slot is
-	 * invalidated so the user is told to re-login instead of looping on a 1-minute cooldown
-	 * forever.
-	 * Refreshable (OAuth): only a 401 on a *rotated* token — proof Pi actually refreshed and the NEW
-	 * token still failed — counts toward the kill threshold. Repeated 401s on the SAME token mean the
-	 * refresh isn't reaching the wire (a refresh/config fault, e.g. an alias that dropped the refreshed
-	 * access token), which is NEVER proof the account is revoked; those only re-arm the transient
-	 * cooldown so the next call keeps a chance to refresh. Only after MAX_CONSECUTIVE_AUTH_FAILURES
-	 * distinct refreshed tokens fail do we mark it dead-until-relogin.
-	 * Returns true if the account was permanently invalidated.
-	 */
 	function markAuthFailure(provider: string, reason: string): boolean {
 		if (patternMatch(reason, TERMINAL_AUTH_ERROR_PATTERNS)) {
 			authFailures.delete(provider);
@@ -5385,12 +4888,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const hash = (entry ? credentialHash(entry) : undefined) ?? "";
 		const prev = authFailures.get(provider);
 		if (prev && prev.hash === hash) {
-			// Same token failed again → Pi's refresh never reached the wire, or (for API-key
-			// providers) the same key failed again. For OAuth providers this is likely a refresh
-			// fault (the refresh didn't reach the wire), so we keep the account recoverable.
-			// For non-refreshable (API-key) providers, the same key failing repeatedly is NOT a
-			// transient blip — the key is permanently invalid. Advance toward invalidation so
-			// the user is told to re-login instead of looping on a 1-minute cooldown forever.
 			if (!isRefreshable(provider)) {
 				const distinct = (prev.distinct ?? 0) + 1;
 				if (distinct >= MAX_SAME_KEY_AUTH_FAILURES) {
@@ -5403,7 +4900,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			markExhausted(provider, TRANSIENT_AUTH_COOLDOWN_MS);
 			return false;
 		}
-		// First failure, or the token rotated since the last 401 (Pi refreshed and it STILL failed).
 		const distinct = (prev?.distinct ?? 0) + 1;
 		if (distinct >= MAX_CONSECUTIVE_AUTH_FAILURES) {
 			authFailures.delete(provider);
@@ -5414,12 +4910,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			return true;
 		}
 		authFailures.set(provider, { hash, distinct });
-		// Transient: brief cooldown so selection skips it for a moment; Pi refreshes on next use.
 		markExhausted(provider, TRANSIENT_AUTH_COOLDOWN_MS);
 		return false;
 	}
 
-	// ----- cooldowns --------------------------------------------------------
 
 	function pruneCooldowns() {
 		const now = Date.now();
@@ -5430,9 +4924,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				exhaustedUntilByProvider.delete(provider);
 				changed = true;
 			} else if (until > ceiling) {
-				// A far-future cooldown (mis-parsed long/rolling reset) never gets re-probed on its
-				// own — cooling-down accounts are skipped. Clamp it so the account is retried at the
-				// ceiling and usage reconciliation can free it the moment its short window has headroom.
 				exhaustedUntilByProvider.set(provider, ceiling);
 				changed = true;
 			}
@@ -5450,8 +4941,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return reason.startsWith(TRANSIENT_PENDING_PREFIX);
 	}
 
-	// A "still busy" auto-retry is a timing issue, not a model failure: resume the SAME model,
-	// never rotate to a sibling model/account (which would silently downgrade it).
 	function isBusyRetryPendingReason(reason: string) {
 		return reason === BUSY_RETRY_REASON;
 	}
@@ -5460,8 +4949,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return reason.startsWith(SELECTED_FALLBACK_PENDING_PREFIX);
 	}
 
-	// Reasons where the source model is healthy and must be resumed as-is — never downgraded
-	// or rotated back to the route it just replaced.
 	function isSameModelResumeReason(reason: string) {
 		return (
 			isTransientPendingReason(reason) ||
@@ -5480,16 +4967,10 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		);
 	}
 
-	/** When does this provider become usable again? Uses recorded cooldown AND fresh usage. */
-	// True while a provider's usage-% reading is distrusted because a repeat limit error proved it
-	// does not reflect the account's real (session/rate) limit. See LIMIT_STREAK_WINDOW_MS.
 	function usageUntrusted(provider: string, now = Date.now()): boolean {
 		return (usageUntrustedUntilByProvider.get(provider) ?? 0) > now;
 	}
 
-	// Record a limit error for a provider and return the consecutive streak. A second error within
-	// LIMIT_STREAK_WINDOW_MS (no success reset in between) flips the account's usage reading to
-	// "distrusted" so its real cooldown can no longer be cleared by a lying "usage says free".
 	function noteLimitError(provider: string, now = Date.now()): number {
 		const prev = limitStreakByProvider.get(provider);
 		const count =
@@ -5499,14 +4980,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return count;
 	}
 
-	/**
-	 * Stop believing this provider's usage-% reading for a while, and write that down.
-	 *
-	 * The distinction that matters: a used-percentage is a FORECAST about one quota window, and
-	 * that window cannot see a session or plan limit. A refusal is an OBSERVATION that just
-	 * happened. When they disagree, the observation is the one that was actually measured — so it
-	 * wins, and it keeps winning across restarts until the account proves otherwise by succeeding.
-	 */
 	function markUsageUntrusted(provider: string, now = Date.now()) {
 		const until = now + USAGE_UNTRUSTED_MS;
 		if ((usageUntrustedUntilByProvider.get(provider) ?? 0) >= until) return;
@@ -5514,7 +4987,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		persist();
 	}
 
-	/** True when a fresh snapshot carries the provider's own "usable right now" verdict. */
 	function isConfirmedAvailable(provider: string, now = Date.now()): boolean {
 		const cached = usageByProvider.get(provider);
 		return (
@@ -5529,20 +5001,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		now = Date.now(),
 		options: { ignoreCeiling?: boolean } = {},
 	): number {
-		// Nothing may push the next attempt beyond the recheck ceiling. Providers refresh quota
-		// windows early and unannounced, AND resize the windows themselves — so a reset timestamp
-		// is a forecast and a used-percentage is a fraction whose denominator can change under us.
-		// Neither is evidence about the future. Capping here is what converts this extension from
-		// predicting availability to verifying it: worst case we ask again in `maxRecheckIntervalMs`
-		// and the account itself answers. A refusal costs no tokens, so asking is close to free.
-		//
-		// Applied to the usage FORECAST only. A cooldown we recorded ourselves was already capped
-		// when it was written (see markExhausted).
-		//
-		// The ceiling is anchored to when the snapshot was TAKEN, never to `now`: an offset from
-		// `now` is recomputed on every call, so it stays permanently in the future and never
-		// elapses. Anchoring says what we actually mean — this reading is worth believing for
-		// maxRecheckIntervalMs after we took it, and then the account itself gets asked again.
 		const capped = (at: number, takenAt: number) =>
 			options.ignoreCeiling
 				? at
@@ -5551,17 +5009,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const cached = usageByProvider.get(provider);
 		if (cached) {
 			const fresh = now - cached.fetchedAt < usageCacheTtl(provider);
-			// The provider's OWN verdict, when it states one, outranks every derived number here —
-			// including a cooldown we recorded ourselves and the distrust we place on a meter that
-			// once lied. Those exist precisely because a percentage is a forecast; `serviceable` is
-			// not a forecast, it is the account answering "can I be used right now". Ignoring it is
-			// what left two accounts benched for hours after ChatGPT had already gone back to
-			// answering `allowed: true` for them, which from the outside looks exactly like an
-			// extension that cannot see accounts that freed up.
-			//
-			// Only while FRESH: a verdict is a statement about the moment it was taken, so a stale
-			// "yes" must not clear a cooldown recorded after it, and a stale "no" must not outlive
-			// the recheck ceiling that governs every other stale reading.
 			if (fresh && cached.serviceable === true) return now;
 			if (fresh && cached.serviceable === false)
 				return capped(
@@ -5569,28 +5016,14 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					cached.fetchedAt,
 				);
 			const usageMs = cooldownMsFromUsage(cached, now);
-			// A HARD BLOCK — a usage window at >=100% whose reset is still in the future — is
-			// authoritative ground truth REGARDLESS of snapshot age: a maxed 30-day (or 5h) window
-			// cannot have "un-maxed" itself in the minutes since we last probed, and cooldownMsFromUsage
-			// already drops any window whose reset has passed. So we trust it even when stale. This is
-			// the fix for the real failure mode: a genuinely-spent account (e.g. a free-tier Codex slot
-			// maxed on its monthly window) that never threw an error yet and had no recorded cooldown
-			// was treated as "available" and selected as the failover target — so failover kept landing
-			// on dead accounts instead of advancing to a live Qwen/Ollama one.
 			if (usageMs !== undefined && usageMs > 0)
 				return capped(now + usageMs, cached.fetchedAt);
-			// "Available now" (usageMs === 0) is only trusted while FRESH — a stale pre-limit reading
-			// must never clear a real cooldown early — AND only while usage is still trusted for this
-			// provider. A session/rate-limited account keeps 429ing while its quota window shows
-			// headroom; once that has been proven (usageUntrusted), we respect the recorded cooldown
-			// (`at`) instead of falsely reporting "recovered now" and hot-looping a ~1s retry.
 			if (fresh && usageMs === 0)
 				return usageUntrusted(provider, now) ? at : now;
 		}
 		return at;
 	}
 
-	/** Human-readable summary for /multi-account status — earliest account to recover. */
 	function nextRecoveryStatus(ctx: any): string {
 		const now = Date.now();
 		reconcileCooldownsFromUsage(ctx);
@@ -5635,24 +5068,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		errorText: string,
 	): Promise<number> {
 		const now = Date.now();
-		// Count this limit error. The streak still drives longer-horizon behaviour; the immediate
-		// decision below no longer waits for it.
 		noteLimitError(provider, now);
 		const statedMs = cooldownFromErrorText(errorText);
-		// The provider named a concrete recovery horizon while our usage reading for this account
-		// claims it is free right now. Those cannot both be true, and only one of them was
-		// measured: the stated horizon came from the account being refused just now, the
-		// percentage is a forecast about a quota window that cannot see a session or plan limit.
-		// So the reading is wrong for this account and must stop being able to wipe the bench we
-		// are about to set — that clearing is exactly what walked rotation back onto a spent
-		// account seconds after it refused.
-		//
-		// Deliberately narrow. A bare throttle with no stated horizon ("429 rate limit") still
-		// defers to the meter, because there the meter really is the better evidence and the
-		// account may well be usable again immediately. Only an explicit horizon longer than the
-		// floor counts as the provider contradicting the reading. Checked against the CACHED
-		// snapshot because the live refresh below is best-effort, while the reconciliation pass
-		// that did the clearing runs off the cache.
 		const knownUsage = usageByProvider.get(provider);
 		if (
 			typeof statedMs === "number" &&
@@ -5672,19 +5089,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (snapshot) {
 			applyUsageToCooldown(provider, snapshot, now);
 			const usageMs = cooldownMsFromUsage(snapshot);
-			// Fresh usage is normally ground truth: a maxed long/rolling window must not evict an
-			// account whose short window has already freed.
-			//
-			// But here the account has JUST REFUSED while the meter claims headroom
-			// (usageMs === 0). That contradiction is itself the evidence — this account's real
-			// limit is invisible to the quota window, so the reading is wrong for it right now.
-			// Returning 0 on that reading is what put the user straight back onto a spent account:
-			// the meter read 98%, the cooldown was wiped, rotation walked back in, and the same
-			// refusal came again. Believing it once was already once too many, so the first
-			// contradiction distrusts the meter and records a short real floor instead.
-			//
-			// The floor is deliberately small: if the short window truly had freed, the account
-			// simply returns a few minutes later rather than being benched on a forecast.
 			if (usageMs === 0) {
 				markUsageUntrusted(provider, now);
 				hintedCooldowns.push(SESSION_LIMIT_FLOOR_MS);
@@ -5693,7 +5097,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			}
 		}
 		if (hintedCooldowns.length === 0) return config.cooldownMs;
-		// Backstop: never let a single live estimate lock an account beyond the ceiling.
 		return Math.min(Math.max(...hintedCooldowns), MAX_LIVE_COOLDOWN_MS);
 	}
 
@@ -5710,14 +5113,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return shared.length > 0 ? shared : [provider];
 	}
 
-	/**
-	 * Whether this account's availability can be checked WITHOUT spending a user turn.
-	 *
-	 * Codex, Anthropic, Ollama, Cursor and xAI subscription OAuth all publish something we can poll
-	 * in the background. Kimi, Qwen and xAI API keys publish nothing, so their only "probe" is a
-	 * real request that costs the user the turn it lands on. An Anthropic API key is in that second
-	 * group: its probe reports only "api-key", because Console credit is not exposed to the key.
-	 */
 	function hasCheapAvailabilityProbe(provider: string): boolean {
 		const family = usageFamily(provider);
 		if (family === "xai" || family === "anthropic")
@@ -5731,23 +5126,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	}
 
 	function markExhausted(provider: string, cooldownMs: number) {
-		if (cooldownMs <= 0) return; // killed accounts are in invalidatedByProvider, not cooldowns
-		// This is the moment the account was last actually asked, and it is what the recheck
-		// ceiling is measured from. Without it the ceiling has no anchor and can never elapse.
+		if (cooldownMs <= 0) return;
 		setLastProbe(provider);
-		// Invariant backstop: no LIVE cooldown may exceed the recheck ceiling, regardless of what
-		// the provider predicted. A reset timestamp is a forecast — providers refresh windows early
-		// and unannounced and resize the windows themselves — so it may order the queue but must
-		// never bench an account for hours or weeks. At the ceiling we simply ask again; a refusal
-		// costs no tokens, and only the account itself can prove it is still spent.
-		//
-		// "Costs no tokens" is true only where asking is a background usage probe. For an account
-		// with NO usage endpoint — Kimi answers 404 on every documented path, Qwen exposes none —
-		// the only way to ask is to spend a real user turn: the message lands on the spent account,
-		// is refused, and is bounced onward. Re-asking that way every ten minutes, of an account
-		// that has just said its quota returns in the next billing cycle, is precisely the
-		// thrashing the ceiling exists to prevent. So the ceiling applies where re-probing is
-		// cheap, and the recorded cooldown stands where it is not.
 		const until =
 			Date.now() +
 			Math.min(
@@ -5777,27 +5157,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		persist();
 	}
 
-	/** Snap a recorded cooldown to what fresh usage actually reports for the account. */
 	function applyUsageToCooldown(
 		provider: string,
 		snapshot: UsageSnapshot,
 		now: number,
 	) {
-		// The account's own verdict settles it in both directions, before any arithmetic on
-		// windows. "Usable" retires the bench AND the distrust: that distrust was recorded about
-		// the METER after a refusal contradicted it, and the account has now answered for itself,
-		// which is the evidence the distrust was waiting for. Leaving the record in place while
-		// merely bypassing it at selection time keeps the account looking spent in `status` and
-		// keeps the resume timer waiting on a bench that no longer means anything.
 		if (snapshot.serviceable === true) {
-			// A verdict observed BEFORE the refusal it would contradict is not evidence. The meter
-			// commonly reads "serviceable" while the account is actively refusing with a concrete
-			// horizon ("Try again in ~289 min"). Retiring the bench on that stale reading put the
-			// account straight back into rotation, where it was refused again by the same limit, and
-			// the loop ran until the hop cap stopped the session — the recorded "after a few rotations
-			// everything stops". Only a verdict fetched AFTER the refusal has answered for the account;
-			// that is what keeps the deliberate "usable clears the bench" contract below true without
-			// letting an older reading erase a newer refusal.
 			const refusedAt = limitStreakByProvider.get(provider)?.lastAt;
 			if (typeof refusedAt === "number" && snapshot.fetchedAt < refusedAt) return;
 			let changed = exhaustedUntilByProvider.delete(provider);
@@ -5805,38 +5170,22 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			if (changed) persist();
 			return;
 		}
-		// "Blocked" is the account refusing outright; a window with headroom does not overrule it.
 		if (snapshot.serviceable === false) return;
 		const realMs = cooldownMsFromUsage(snapshot, now);
 		if (realMs === undefined) return;
 		const recorded = exhaustedUntilByProvider.get(provider) ?? 0;
 		if (realMs <= 0) {
-			// Usage says the account is free again — drop the cooldown so resume can pick it up,
-			// even if our original estimate hasn't expired yet. But NOT when usage has been proven
-			// unreliable for this account (a session/rate limit the quota window can't see): clearing
-			// there would immediately re-select a still-maxed account and loop.
 			if (usageUntrusted(provider, now)) return;
 			if (exhaustedUntilByProvider.delete(provider)) persist();
 			return;
 		}
 		const realUntil = now + realMs;
-		// Only ever SHORTEN here: error-derived cooldowns may be more pessimistic than reality,
-		// but never extend a cooldown from a usage probe.
 		if (recorded > now && realUntil < recorded) {
 			exhaustedUntilByProvider.set(provider, realUntil);
 			persist();
 		}
 	}
 
-	/**
-	 * While paused, re-derive the real recovery time of every cooling account from its usage
-	 * endpoint. This is what makes the FIRST account to actually recover resume the work, instead
-	 * of waiting on a recorded estimate that may be longer than the server's true reset.
-	 *
-	 * Non-blocking by design: it kicks a background usage refresh (a no-op unless usage display is
-	 * enabled) and acts only on a FRESH cached snapshot, so resume is never stalled on a slow probe
-	 * and a stale pre-limit reading can never clear a cooldown prematurely.
-	 */
 	function reconcileCooldownsFromUsage(
 		ctx: any,
 		options: { allowWhenHidden?: boolean } = {},
@@ -5852,9 +5201,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					true,
 					options.allowWhenHidden ?? false,
 				);
-				// A provider's fresh "usable now" verdict should shorten an already-armed
-				// multi-hour timer immediately. Schedule through the single owned timer rather
-				// than calling the resume body concurrently for every recovered account.
 				if (
 					snapshot &&
 					pendingResume?.mode === "quota-recovery" &&
@@ -5869,7 +5215,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 	}
 
-	// ----- discovery & dynamic rotation -------------------------------------
 
 	function discoverRotation(auth: Record<string, AuthEntry>): string[] {
 		const byFamily: Record<ProviderFamily, string[]> = {
@@ -5890,7 +5235,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			if (isInvalidated(id)) continue;
 			byFamily[family].push(id);
 		}
-		// Sort each family base-first, then account-2,3,... and dedupe real accounts.
 		const order = config.providerOrder.length
 			? config.providerOrder
 			: DEFAULT_PROVIDER_ORDER;
@@ -5900,20 +5244,11 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			const ids = byFamily[family].sort((a, b) => slotIndex(a) - slotIndex(b));
 			for (const id of ids) {
 				const identity = accountIdentity(auth[id]);
-				if (identity && seenIdentity.has(identity)) continue; // same account in two slots
+				if (identity && seenIdentity.has(identity)) continue;
 				if (identity) seenIdentity.add(identity);
 				result.push(id);
 			}
 		}
-		// Everything else the user is logged in to. Recognising five families by name and dropping
-		// the rest meant a machine with fourteen accounts rotated across eight and silently left
-		// six — several hundred models — unused, with nothing anywhere saying so. A provider does
-		// not need to be understood in detail to be usable: if Pi can call it, it can carry work.
-		//
-		// They go LAST, after every managed family. A managed account has quota telemetry, OAuth
-		// refresh and a live catalogue; an unmanaged one is a blind spend, so it is the account of
-		// last resort rather than a peer. A provider Pi exposes no model for contributes no
-		// candidate at selection time and is skipped there, so nothing is routed into a void.
 		if (config.includeOtherProviders) {
 			for (const [id, entry] of Object.entries(auth)) {
 				if (classifyProvider(id, config.qwenProvider)) continue;
@@ -5927,38 +5262,23 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return result;
 	}
 
-	/** Rotation members this extension carries but cannot measure — no quota endpoint, no OAuth. */
 	function unmanagedRotationMembers(): string[] {
 		return rotation.filter(
 			(id) => !classifyProvider(id, config.qwenProvider),
 		);
 	}
 
-	/** Unmanaged members that are a vendor's own pay-per-token API (billed in money, not quota). */
 	function meteredNativeMembers(): string[] {
 		return unmanagedRotationMembers().filter((id) =>
 			METERED_NATIVE_PROVIDERS.has(id.replace(/-account-\d+$/, "")),
 		);
 	}
 
-	/** Unmanaged members that are not a first-party metered API — resellers and unknowns. */
 	function resellerRotationMembers(): string[] {
 		const metered = new Set(meteredNativeMembers());
 		return unmanagedRotationMembers().filter((id) => !metered.has(id));
 	}
 
-	/**
-	 * Rotation members the host knows no model for.
-	 *
-	 * Being in the rotation is not the same as being usable: selection asks the host registry for
-	 * this provider's models and skips an account that yields none. Such an account was listed
-	 * beside working ones with nothing to distinguish it, so it read as in service while being
-	 * unreachable — the fix is to name it as needing configuration, not to hide it, because
-	 * hiding it is how the original silent drop looked from the outside.
-	 *
-	 * Specially-managed families are exempt: this extension registers their slots itself, so a
-	 * momentarily empty registry says nothing about whether they work.
-	 */
 	function unconfiguredRotationMembers(ctx: any): string[] {
 		if (!ctx?.modelRegistry?.getAll) return [];
 		return rotation.filter((id) => {
@@ -5984,12 +5304,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return duplicates;
 	}
 
-	/**
-	 * `explicit` = the user asked for Cursor by name (`/multi-account add cursor`), which is
-	 * the ONLY case where a missing provider clone is worth a warning. On the automatic path
-	 * a not-installed Cursor provider is a silent no-op: `includeCursor` defaults to true, so
-	 * warning there nagged every user who never wanted Cursor at all.
-	 */
 	async function refreshCursorSlots(
 		auth: Record<string, AuthEntry>,
 		ctx?: any,
@@ -6010,12 +5324,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				),
 			]),
 		].sort((a, b) => slotIndex(a) - slotIndex(b));
-		// Cursor lives in a separate repo we do not control, on whatever Node the user runs.
-		// A version-incompatible clone (e.g. a JSON import that newer Node rejects) must never
-		// escape as a rejected promise: on the automatic path this is fire-and-forget, so it
-		// would surface as an unhandled rejection, and inside session_start it aborted the rest
-		// of the handler — skipping the pending-resume reset that must run on every session.
-		// Cursor is optional; nothing else may be lost because it failed.
 		try {
 			await setupCursorSubscription(pi, {
 				readAuth: readAuthFile,
@@ -6024,21 +5332,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				notify: (message, level) => ctx?.ui?.notify?.(message, level),
 				log: (kind, data) => logEvent(kind, data),
 				onProvision: async (slots, port, models) => {
-					// Registration above is process-local and remains useful in a delegated child. The
-					// files below are shared with its parent and only the canonical publisher may touch
-					// them; otherwise a short-lived child leaves a dead Cursor route behind.
 					if (!ownsSharedChildPublication()) return;
-					// models.json entries point at the running proxy, so a bare child
-					// `pi -p` resolves cursor/* while any parent Pi process is alive.
-					//
-					// The placeholder key is what makes that resolution USABLE. Pi refuses a
-					// provider it has no credential for, and Cursor's credential is an OAuth
-					// token this extension holds — a child cannot read it. The proxy already
-					// treats this exact value as "no token on the request" and falls back to
-					// the base slot's stored credential, so the child authenticates to a
-					// LOCAL socket with a non-secret string and the real token never leaves
-					// the parent. Without it a provisioned slot reports
-					// `credentials_not_configured` and every child call dies at auth.
 					for (const slot of slots) {
 						await publishNativeSlot(slot, {
 							api: "openai-completions",
@@ -6047,20 +5341,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 							models,
 						});
 					}
-					// Same trap as numbered Anthropic/Codex: Pi ignores a models.json placeholder
-					// while an OAuth blob sits under the same key. Measured 2026-08-30 after restart:
-					// `pi -p --no-extensions --model cursor/cursor-grok-4.6` → "No API key found for cursor".
+					// external: Pi may ignore a models.json placeholder when a stored OAuth credential takes precedence.
 					if (!sessionClosed && ownsSharedChildPublication()) shadowChildFacingAuth(slots);
 				},
 			});
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
 			logEvent("cursor_setup_failed", { reason });
-			// Once per process: the user cloned it deliberately, so silence would be wrong —
-			// but repeating it on every discovery pass would be nagging. The flag is set only
-			// once a notice was really delivered: the first attempt runs from discovery, which
-			// has no ctx and therefore no UI to notify, and marking it "notified" there would
-			// swallow the message for the session_start attempt that can actually show it.
 			if (!cursorSetupFailureNotified && typeof ctx?.ui?.notify === "function") {
 				cursorSetupFailureNotified = true;
 				ctx.ui.notify(
@@ -6071,13 +5358,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 	}
 
-	/** Register authed alias slots plus one spare per family for the next interactive /login. */
 	function syncRegisteredSlots(auth: Record<string, AuthEntry>, ctx?: any) {
-		// Cursor is the one family whose provider lives in a separate, optional repo. Unlike
-		// anthropic/codex/qwen/ollama — which only ever create slots backed by a real auth
-		// entry — cursor used to conjure a spare `cursor-account-2` out of nothing, so /login
-		// offered a slot no provider could serve. Only offer cursor slots once the provider
-		// is actually on disk.
 		const cursorAvailable = config.includeCursor && isCursorProviderInstalled();
 		const families: ProviderFamily[] = [
 			"anthropic",
@@ -6096,10 +5377,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				)
 				.map(slotIndex);
 			const wanted = new Set<number>(authedIndexes);
-			// For OAuth families, add the next free slot (>=2) so the user can select it
-			// from /login. API-key families (ollama/qwen) have no interactive login, so a
-			// spare slot with no key would just produce a Pi error ("apiKey or oauth
-			// required when defining models") — skip the spare for those families.
 			if (
 				family === "anthropic" ||
 				family === "openai-codex" ||
@@ -6118,10 +5395,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					if (!registeredSlots.has(id)) registeredSlots.add(id);
 					continue;
 				}
-				if (index <= 1) continue; // base provider is native
-				// An api-key slot registered before a ctx existed carries only the built-in tag.
-				// Once the host registry is reachable its models must be folded in, so those slots
-				// are re-registered whenever the host set changes rather than skipped forever.
+				if (index <= 1) continue;
 				if (registeredSlots.has(id)) {
 					if (!ctx || (family !== "ollama" && family !== "qwen")) continue;
 					const base = family === "ollama" ? OLLAMA_BASE : config.qwenProvider;
@@ -6151,8 +5425,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 						...new Set([...DEFAULT_KIMI_MODELS, ...hostModelIdsFor(ctx, KIMI_BASE)]),
 					];
 					registerKimiSlot(pi, id, kimiModels);
-					// An in-memory OAuth spare belongs in /login, not in models.json. Kimi has
-					// no child OAuth proxy, so only a real API-key slot is usable by a bare child.
 					if (ownsSharedChildPublication() && auth[id]?.type === "api_key" && isEntryUsable(auth[id])) {
 						void publishNativeSlot(id, {
 							api: "anthropic-messages",
@@ -6169,13 +5441,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (cursorAvailable) cursorReady = refreshCursorSlots(auth);
 	}
 
-	/**
-	 * Publish deterministic non-proxied aliases only after this process has proved that it owns
-	 * the shared models.json publication boundary. During factory construction the canonical
-	 * proxy port has not been claimed yet, so syncRegisteredSlots deliberately cannot write these
-	 * entries there. Replaying the Kimi publication here also repairs legacy string-only model
-	 * arrays once ownership is known.
-	 */
 	async function publishOwnedNativeAliases(ctx?: any): Promise<void> {
 		if (!ownsSharedChildPublication()) return;
 		const auth = readAuthFile();
@@ -6197,7 +5462,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		try {
 			ctx?.modelRegistry?.authStorage?.reload?.();
 		} catch {
-			// A malformed or concurrently replaced auth file is handled by the next poll.
 		}
 	}
 
@@ -6218,21 +5482,13 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			const previousHash = credentialHashes.get(provider);
 			const nextIdentity = entry ? stableAccountFingerprint(entry) : undefined;
 			const previousIdentity = credentialIdentities.get(provider);
-			// A routine OAuth refresh rotates the access token (hash changes) but the real account
-			// is unchanged, so its rate-limit cooldown MUST survive. Only drop the cooldown when the
-			// slot is re-logged into a DIFFERENT real account (stable fingerprint changed) — a token
-			// rotation never lifts a server-side limit.
 			if (
 				previousIdentity &&
 				nextIdentity &&
 				nextIdentity !== previousIdentity
 			) {
 				if (exhaustedUntilByProvider.delete(provider)) cooldownsCleared = true;
-				// Model availability is account/plan-specific. Never let a newly logged-in account
-				// inherit the previous account's five-minute catalog snapshot for this slot.
 				if (codexModelCatalogByProvider.delete(provider)) cooldownsCleared = true;
-				// A different real account also clears any stale 401-streak tracking: the new
-				// account's credentials are unrelated to the old failures.
 				authFailures.delete(provider);
 				exhaustedUntilByModel.forEach((_until, key) => {
 					if (key.startsWith(`${provider}/`)) {
@@ -6241,14 +5497,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					}
 				});
 			}
-			// The usage snapshot is tied to the token, so refresh it whenever the credential blob
-			// changes (cheap to re-fetch, and never used to gate availability).
-			// For non-refreshable (API-key) providers, a credential change means the user manually
-			// replaced the key (re-login) — stale 401-streak tracking is irrelevant and must be
-			// cleared so the new key gets a fresh start. For OAuth providers, a hash change is a
-			// routine token refresh by Pi; the 401 streak MUST survive so rotated-token failures
-			// can still accumulate toward the kill threshold. Rate-limit cooldowns are NOT
-			// cleared here (they are server-side limits tied to the account, not the token).
 			if (previousHash && nextHash !== previousHash) {
 				usageByProvider.delete(provider);
 				usageErrors.delete(provider);
@@ -6266,8 +5514,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		if (cooldownsCleared) persist();
 		clearReauthedInvalidations(auth);
 		syncRegisteredSlots(auth, ctx);
-		// After the slots exist: learn the host's Codex model list, so a flagship that shipped
-		// with Pi (and not with this extension) is selectable and preferred on every slot.
 		if (ctx) {
 			refreshRegistryCodexModels(ctx);
 			refreshRegistryAnthropicModels(ctx);
@@ -6304,7 +5550,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return result;
 	}
 
-	// ----- fallback selection ----------------------------------------------
 
 	function providerHasUsableAuth(
 		ctx: any,
@@ -6325,8 +5570,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	}
 
 
-	// Newest-first preferred model list for a family. A per-family config override
-	// (preferredModels) wins so a new flagship can be pinned without a code change.
 	function familyPreferredModels(family: string | undefined): string[] {
 		if (!family) return [];
 		const configured = config.preferredModels[family];
@@ -6380,15 +5623,12 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		return pin ? [pin, ...order.filter(id => !sameModelIdentity(id, pin))] : order;
 	}
 
-	// Rank includes an explicit pin, but a pin is not evidence of a quality upgrade.
-	// Unknown models sort last; identity/liveness/quality constraints still apply first.
 	function modelRecencyRank(model: any): number {
 		const order = preferredModelsForProvider(String(model?.provider ?? ""));
 		const idx = order.findIndex((id) => sameModelIdentity(id, model?.id));
 		return idx < 0 ? Number.MAX_SAFE_INTEGER : idx;
 	}
 
-	// Virtual and non-chat operations belong to Pi, not account chat rotation.
 	function isAccountChatModel(model: any): boolean {
 		return !!model && model.api !== "pi-virtual" &&
 			(!model.type || model.type === "chat");
@@ -6408,7 +5648,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			return isAccountChatModel(model) ? [model] : [];
 		}
 
-		// A saved user default is a choice, not a hint to upgrade to the catalog flagship.
 		const selected = !ignoreSavedDefault && !pinnedModelForProvider(parsed.provider) && savedDefaultForProvider(parsed.provider);
 		if (selected) {
 			const model = findModelIncludingHidden(ctx, parsed.provider, selected);
@@ -6420,14 +5659,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			? classifyProvider(currentModel.provider, config.qwenProvider)
 			: undefined;
 		const sameFamily = !!family && !!currentFamily && family === currentFamily;
-		// A pin leads this account's model order without synthesizing a model or losing the
-		// underlying preferredModels/catalog order when that pin is missing or ineligible.
 		const preferred = preferredModelsForProvider(parsed.provider);
 		const keepCurrent = sameFamily && currentModel?.id ? [currentModel.id] : [];
-		// `preferredOnly` means "take this family's flagship, not an arbitrary model". A provider
-		// outside the managed families has no flagship list at all, so honouring it literally
-		// yields no candidate and the switch fails — which is what made an unmanaged account
-		// unreachable by name. Fall back to what Pi knows for it.
 		const usePreferredOnly = preferredOnly && preferred.length > 0 && !pinnedModelForProvider(parsed.provider);
 		const registryModels = usePreferredOnly
 			? []
@@ -6437,10 +5670,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 						.filter((model: any) => model.provider === parsed.provider),
 					...(hiddenProviderModels.get(parsed.provider) ?? []),
 				].map((model: any) => model.id);
-		// preferLatestModel (default): try the newest preferred model FIRST, so a turn that was
-		// once downgraded (e.g. gpt-5.4 after a momentary limit on gpt-5.5) is upgraded back to
-		// the latest the moment it is available again — instead of carrying the old model forever.
-		// Legacy mode keeps the current model first (never changes the model unless it has to).
 		const modelIds = config.preferLatestModel || pinnedModelForProvider(parsed.provider)
 			? [...preferred, ...keepCurrent, ...registryModels]
 			: [...keepCurrent, ...preferred, ...registryModels];
@@ -6465,8 +5694,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const provider = String(model?.provider ?? "");
 		const base = baseProviderId(provider);
 		if (base !== "openai" && base !== "openrouter") return true;
-		// Manually selecting a paid provider is authority for that provider in this session, but not
-		// for a different billing pool. A configured fallback target is the persistent opt-in path.
 		if (provider === currentModel?.provider) return true;
 		return configuredFallbacks.some((target) => {
 			const parsed = parseTarget(target);
@@ -6475,10 +5702,6 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		});
 	}
 
-	/**
-	 * Return fallback models in deterministic rotation order.
-	 * Immediate failover only receives accounts whose known cooldown has expired.
-	 */
 	function findFallbackModels(
 		ctx: any,
 		currentModel: any,
@@ -6487,18 +5710,8 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			includeCurrent?: boolean;
 			manualRoundRobin?: boolean;
 			excludeProviders?: Set<string>;
-			/** Keep the source model's product tier across accounts and provider families. */
 			preserveQualityBand?: boolean;
-			/**
-			 * The source model is someone else's choice (a subagent's), so the session's saved default
-			 * is no consent to change its tier: only the source band qualifies.
-			 */
 			ignoreSavedDefault?: boolean;
-			/**
-			 * Automatic failover: try another account that still has THIS model (and family)
-			 * before jumping to a different model. `best` turns this off so confirmation still
-			 * outranks an unmeasurable sibling.
-			 */
 			preferSameIdentity?: boolean;
 		} = {},
 	) {

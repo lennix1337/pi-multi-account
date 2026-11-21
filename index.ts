@@ -342,6 +342,7 @@ type ProviderFailoverConfig = {
 	includeOtherProviders?: boolean;
 	includeCursor?: boolean;
 	childProxy?: boolean;
+	// external: Pi merges provider registrations, preserving auth and OAuth configuration.
 	onlyActive?: boolean;
 	neverFailoverProviders?: string[];
 	providerOrder?: ProviderFamily[];
@@ -372,6 +373,7 @@ type ProviderFailoverConfig = {
 	contextGuard?: boolean | Partial<ContextGuardSettings>;
 	// external: Pi queues continuation for overflow compaction but not threshold compaction.
 	continueAfterCompaction?: boolean;
+	// external: pi-ai drops interrupted assistant messages before the next request.
 	preserveInterruptedContext?: boolean;
 	routeCompactionToHealthyAccount?: boolean;
 	compactionWatchdogMs?: number;

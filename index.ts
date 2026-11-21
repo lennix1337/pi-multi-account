@@ -1,29 +1,4 @@
-/**
- * pi-multi-account — automatic multi-account failover & rotation for Pi.
- *
- * What it does
- * ------------
- * - Auto-discovers every authenticated account from ~/.pi/agent/auth.json
- *   (Anthropic Claude Pro/Max, OpenAI/ChatGPT Codex, and Qwen/Alibaba) and
- *   builds the failover rotation dynamically — no manual config editing.
- * - Pre-registers a pool of login slots so `/login` can offer numbered account
- *   targets such as `anthropic-account-3` and `openai-codex-account-5`.
- * - Drops an account from the rotation the moment its token is expired or its
- *   authorization is revoked, and restores it automatically once you re-login.
- * - On a quota/rate-limit (429/402/403) it marks the account on cooldown and
- *   transparently switches to the next available account/model, optionally
- *   queuing a safe continuation prompt.
- *
- * Anthropic OAuth (Claude Pro/Max) works out of the box: this package enables
- * OAuth login on the base `anthropic` provider and on every `anthropic-account-*`
- * alias, and shapes the outgoing requests itself (billing header + system-prompt
- * normalization, vendored from gotgenes/pi-anthropic-auth, MIT). No separate
- * pi-anthropic-auth install is needed; if you have one, both coexist (idempotent).
- *
- * Config:  ~/.pi/agent/provider-failover.json
- * State:   ~/.pi/agent/provider-failover-state.json
- */
-
+// MIT license: Anthropic OAuth request shaping is vendored from gotgenes/pi-anthropic-auth.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { createPayloadStream } from "./provider-payload-stream.ts";
@@ -134,12 +109,8 @@ import {
 	type OverheadTracker,
 } from "./context-guard.ts";
 
-// Pi's extension loader binds these public imports to the running host SDK.
-// Never probe a private SDK copy: its provider catalog/auth may differ from Pi's.
-// Supported Pi versions use provider factories; legacy callbacks are adapted below.
-/** Normalized OAuth surface — identical for every supported pi-ai version. */
+// external: Pi binds public imports to the host SDK; a private copy can have a different catalog and auth.
 type PiAiOauthBridge = {
-	/** pi-ai release line this was adapted from, for the debug log. */
 	era: "provider-factories";
 	anthropic: {
 		login: (callbacks: any) => Promise<any>;
@@ -151,16 +122,11 @@ type PiAiOauthBridge = {
 		refresh: (credentials: any, signal: AbortSignal) => Promise<any>;
 		getApiKey: (credentials: any) => string;
 	};
-	/**
-	 * Optional: Kimi exists only in pi-ai's provider-factories era, never in the
-	 * legacy oauth.js entry. Absence must not disqualify an otherwise usable bridge.
-	 */
 	kimi?: {
 		login: (callbacks: any) => Promise<any>;
 		refresh: (credentials: any, signal: AbortSignal) => Promise<any>;
 		getApiKey: (credentials: any) => string;
 	};
-	/** xAI subscription OAuth exists only in pi-ai's provider-factories era. */
 	xai?: {
 		refresh: (credentials: any, signal: AbortSignal) => Promise<any>;
 	};
@@ -169,12 +135,7 @@ type PiAiOauthBridge = {
 let piAiOauthBridge: PiAiOauthBridge | undefined;
 let piAiOauthLoadError: string | undefined;
 
-/**
- * Bridge Pi's legacy extension OAuth callbacks (`onAuth`/`onDeviceCode`/`onPrompt`/
- * `onSelect`) to pi-ai 0.80+'s `AuthInteraction` (`notify(event)`/`prompt(prompt)`).
- * Pi still hands us the legacy callbacks, so without this the browser login throws
- * `interaction.notify is not a function`.
- */
+// external: Pi passes legacy callbacks while pi-ai OAuth expects AuthInteraction.
 function toAuthInteraction(callbacks: any) {
 	return {
 		signal: callbacks?.signal,
@@ -196,7 +157,6 @@ function toAuthInteraction(callbacks: any) {
 				});
 				return;
 			}
-			// "info" and "progress" both carry a human-readable message.
 			callbacks?.onProgress?.(
 				typeof event.message === "string" ? event.message : JSON.stringify(event),
 			);
@@ -216,7 +176,6 @@ function toAuthInteraction(callbacks: any) {
 }
 
 
-/** pi-ai >= 0.80: OAuth lives behind provider factories, with an AuthInteraction API. */
 function adaptProviderFactories(): PiAiOauthBridge | undefined {
 	const providers = builtinProviders();
 	const oauth = (id: string): any => providers.find((provider) => provider.id === id)?.auth?.oauth;
@@ -239,12 +198,10 @@ function adaptProviderFactories(): PiAiOauthBridge | undefined {
 			refresh: (credentials, signal) => anthropicOauth.refresh(credentials, signal),
 		},
 		codex: {
-			// The flag is gone from the new shape; both eras of pi-ai's Codex flow use a
-			// local callback server, and Pi only reads this to decide how to present login.
+			// external: pi-ai's Codex OAuth uses a local callback server without exposing this flag.
 			usesCallbackServer: true,
 			login: (callbacks) => codexOauth.login(toAuthInteraction(callbacks)),
 			refresh: (credentials, signal) => codexOauth.refresh(credentials, signal),
-			// Identical to what pi-ai <= 0.79's getApiKey did (verified in its source).
 			getApiKey: (credentials) => credentials.access,
 		},
 		kimi:
@@ -265,7 +222,6 @@ function adaptProviderFactories(): PiAiOauthBridge | undefined {
 	};
 }
 
-/** Adapt the running host's public factories without loading another SDK instance. */
 function tryLoadPiAiOauth(): PiAiOauthBridge | undefined {
 	if (piAiOauthBridge) return piAiOauthBridge;
 	try {
@@ -279,7 +235,6 @@ function tryLoadPiAiOauth(): PiAiOauthBridge | undefined {
 	return piAiOauthBridge;
 }
 
-/** Load reason, or undefined when OAuth is available. */
 function piAiOauthUnavailableReason(): string | undefined {
 	tryLoadPiAiOauth();
 	return piAiOauthBridge ? undefined : piAiOauthLoadError;
@@ -295,7 +250,6 @@ function requirePiAiOauth(): PiAiOauthBridge {
 	return bridge;
 }
 
-/** Canonical chat metadata comes from the same SDK catalog as the running host. */
 function piAiGetModel(provider: string, id: string): any {
 	try {
 		return getHostModel(provider as any, id as any);

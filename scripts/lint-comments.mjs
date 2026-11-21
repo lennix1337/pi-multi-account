@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const SOURCE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const SKIPPED = /(?:^|\/)(?:node_modules|vendor|dist|fixtures?)\/|\.d\.ts$|\.min\.js$/;
-const DIRECTIVE = /^(?:\/\/\/\s*<reference|\/[/*]\s*(?:prettier-ignore|eslint-disable(?:-next-line|-line)?\s+[\w@/-]+|eslint-enable|@ts-expect-error\s+\S|biome-ignore|c8 ignore|istanbul ignore|node:coverage|@vitest-environment|[#@]__PURE__)|\/\*\*?\s*@jsx(?:ImportSource|Runtime|Frag)?\s)/;
+const DIRECTIVE = /^(?:\/\/\/\s*<reference|\/[/*]\s*(?:prettier-ignore|eslint-disable(?:-next-line|-line)?\s+[\w@/-]+|eslint-enable|@ts-expect-error\s+\S|@ts-nocheck\s+\S|biome-ignore|c8 ignore|istanbul ignore|node:coverage|@vitest-environment|[#@]__PURE__)|\/\*\*?\s*@jsx(?:ImportSource|Runtime|Frag)?\s)/;
 const LICENSE = /\b(?:license|copyright|spdx-license-identifier)\b/i;
 const LINK = /https?:\/\/\S*(?:\/issues\/\d+|\/pull\/\d+|rfc-editor\.org|datatracker\.ietf\.org|\/rfc\d+)/i;
 const EXTERNAL = /^\/[/*]\s*external:\s*\S/;
@@ -93,11 +93,26 @@ export function findComments(text) {
   return comments;
 }
 
+const EXPORTED_BLOCK = /^export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:class|interface|type|enum|namespace|const|function)\b/;
+
+function insideExport(text, start) {
+  const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+  if (!/^\s+$/.test(text.slice(lineStart, start))) return false;
+  const lines = text.slice(0, lineStart).split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line || /^[\s/*]/.test(line)) continue;
+    return EXPORTED_BLOCK.test(line);
+  }
+  return false;
+}
+
 export function isAllowed(text, comment, isFirst) {
   const body = text.slice(comment.start, comment.end);
   if (DIRECTIVE.test(body) || EXTERNAL.test(body) || LINK.test(body)) return true;
   if (isFirst && LICENSE.test(body)) return true;
-  return body.startsWith('/**') && PUBLIC_DOC.test(text.slice(comment.end, comment.end + 200));
+  if (!body.startsWith('/**')) return false;
+  return PUBLIC_DOC.test(text.slice(comment.end, comment.end + 200)) || insideExport(text, comment.start);
 }
 
 export function lintText(text) {

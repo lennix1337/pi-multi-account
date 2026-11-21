@@ -459,10 +459,6 @@ type ProviderFailoverState = {
 	exhaustedUntilByModel?: Record<string, number>;
 	lastProbeAtByProvider?: Record<string, number>;
 	invalidatedByProvider?: Record<string, InvalidationRecord>;
-	// Providers whose usage-% reading has been PROVEN not to reflect the real limit, because the
-	// account refused while the meter still claimed headroom. Persisted so a restart cannot go
-	// back to believing a meter already caught lying — that amnesia re-opened the retry loop once
-	// per session.
 	usageUntrustedUntilByProvider?: Record<string, number>;
 	usageByProvider?: Record<string, UsageSnapshot>;
 	codexModelCatalogByProvider?: Record<string, CodexCatalogSnapshot>;
@@ -470,14 +466,11 @@ type ProviderFailoverState = {
 	pendingFrom?: ModelRef;
 	pendingSince?: number;
 	pendingReason?: string;
-	/** Session instance that owns this pending wake; prevents another Pi window's stale timer from clearing it. */
 	pendingOwner?: string;
 	lastSwitches?: SwitchRecord[];
-	/** Last model the user was actually on (failover destination included). Restored after catalogs load. */
 	lastUserModel?: { provider: string; id: string };
-	/** Thinking level the session ran at (high/max/…). Pi clamps it to the fallback model's caps at restore time, so persist and re-assert after the model is back. */
+	// external: Pi clamps thinking level to the fallback model's capabilities during restore.
 	lastUserThinkingLevel?: string;
-	/** Last chosen model id per family, so /next into that family does not land on the baked-in fallback. */
 	lastModelByFamily?: Record<string, string>;
 };
 
@@ -503,13 +496,6 @@ function readPiHostVersion(packageJsonPath: string): string | undefined {
 	}
 }
 
-/**
- * Read the host version without a runtime import of Pi. ExtensionAPI is a peer type, not a
- * load-bearing runtime dependency: OAuth bridge fixtures and degraded installs must still load
- * far enough to report what is unavailable. Prefer the peer package beside this extension, then
- * the real CLI entrypoint (following a Homebrew/npm symlink). Unknown stays unknown so the
- * optional <=0.84.2 saved-default diagnostic remains off rather than making a false claim.
- */
 function resolvePiHostVersion(): string {
 	const candidates: string[] = [];
 	let extensionDir = dirname(fileURLToPath(import.meta.url));
@@ -528,7 +514,6 @@ function resolvePiHostVersion(): string {
 		try {
 			resolvedEntry = realpathSync(cliEntry);
 		} catch {
-			// A test harness or embedder may not expose a filesystem CLI entry.
 		}
 		let cliDir = dirname(resolvedEntry);
 		for (let depth = 0; depth < 16; depth++) {
@@ -548,14 +533,6 @@ function resolvePiHostVersion(): string {
 
 const PI_HOST_VERSION = resolvePiHostVersion();
 
-/**
- * Model ids the user configured for a provider in Pi's own models.json.
- *
- * This is the user's list, not ours. The API-key base registration below exists only because a
- * placeholder apiKey can stop Pi exposing a provider at all — it was never meant to decide which
- * models that provider has, and replacing a configured six-model provider with one built-in tag
- * is a silent downgrade of the user's own configuration.
- */
 function configuredModelIds(provider: string): string[] {
 	try {
 		const parsed = JSON.parse(readFileSync(MODELS_CONFIG_PATH, "utf8"));
@@ -573,8 +550,7 @@ function configuredModelIds(provider: string): string[] {
 	}
 }
 
-// Pi 0.99's provider composer replaces a supplied models array in full. Preserve
-// non-chat definitions verbatim; they must never become account chat aliases.
+// external: Pi's provider composer replaces the supplied model array, including non-chat models.
 function configuredOperationModels(provider: string): any[] {
 	try {
 		const parsed = JSON.parse(readFileSync(MODELS_CONFIG_PATH, "utf8"));
@@ -602,20 +578,10 @@ function readHostDefaultModel(): { provider: string; id: string } | undefined {
 			return { provider, id };
 		}
 	} catch {
-		/* settings.json is optional */
 	}
 	return undefined;
 }
 
-/**
- * The three files Pi publishes, read the only way this extension is allowed to read them: parse,
- * never write, and treat absence as normal rather than as a fault.
- *
- * `undefined` means "no such file" — a fresh install has no models.json and no custom providers,
- * and reporting that as drift would be pure noise. A file that exists but will not parse is a
- * different thing entirely and is reported, because a corrupt models.json is exactly how every
- * custom provider a user has disappears at once.
- */
 function readPublishedJson(path: string): { present: boolean; value?: unknown; unreadable?: string } {
 	let text: string;
 	try {
@@ -633,13 +599,6 @@ function readPublishedJson(path: string): { present: boolean; value?: unknown; u
 	}
 }
 
-/**
- * Check the published files against the shapes this extension depends on.
- *
- * `active` is supplied only once a model switch has happened in the session: before that,
- * settings.json legitimately still names the previous session's choice, and checking it would
- * report a mismatch that means nothing.
- */
 function inspectPiContract(active?: { provider: string; id: string }): ShapeVerdict[] {
 	const verdicts: ShapeVerdict[] = [];
 	const checks: Array<[string, string, (raw: unknown) => ShapeVerdict]> = [
@@ -669,14 +628,6 @@ function inspectPiContract(active?: { provider: string; id: string }): ShapeVerd
 	return verdicts;
 }
 
-/**
- * What a rotation slot looks like to something that does NOT load this extension.
- *
- * Read from disk rather than from our own in-memory registry on purpose: the child sees the files,
- * not our objects, so the files are what has to be judged. A provider that is neither one of our
- * numbered slots nor present in models.json is one Pi defines itself, and Pi then owns its auth
- * flow — which is the only case where an OAuth credential works for a child at all.
- */
 function slotsAsAChildSeesThem(
 	slotIds: readonly string[],
 	auth: Record<string, { type?: string }>,
@@ -728,21 +679,11 @@ type NativeProviderEntry = {
 	baseUrl: string;
 	models: unknown[];
 	compat?: Record<string, unknown>;
-	/**
-	 * Key written into models.json for this slot. Pi refuses to use a provider it has
-	 * no credential for — `credentials_not_configured` — so a slot we publish without
-	 * one resolves the model and then cannot call it. Only ever a non-secret
-	 * placeholder for a LOCAL proxy that supplies the real token itself; a real
-	 * credential must never be copied into models.json.
-	 */
+	// external: Pi requires a credential for a registered provider.
 	apiKey?: string;
 };
 
-/**
- * Pi's models.json schema is `models: ModelDefinition[]` — each entry MUST be an
- * object with `id`. A string id (`"k3"`) fails validation, and Pi then discards
- * the *entire* file (every custom provider, not just the bad slot).
- */
+// external: Pi rejects string model entries and discards the entire models.json file.
 function nativeModelEntry(model: unknown): NativeModelEntry | undefined {
 	if (typeof model === "string") {
 		return model.length > 0 ? { id: model } : undefined;

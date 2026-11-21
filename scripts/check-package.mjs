@@ -4,15 +4,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { containsPackageSecret } from "../package-secret-scan.ts";
 
-// fileURLToPath, not .pathname: on Windows .pathname is "/C:/...", an invalid cwd.
+// external: On Windows URL.pathname begins /C:/ and is not a valid filesystem path.
 const root = fileURLToPath(new URL("..", import.meta.url));
-// A fixed command through the shell: Node refuses to spawn Windows' npm.cmd shim without one (CVE-2024-27980).
+// external: Node requires shell execution for Windows npm.cmd shims.
 const output = JSON.parse(execSync("npm pack --dry-run --json", {
 	cwd: root,
 	encoding: "utf8",
 	stdio: ["ignore", "pipe", "inherit"],
 }));
-// npm <=11 prints an array of manifests; npm 12 prints an object keyed by package name.
+// external: npm through 11 prints a manifest array; npm 12 prints an object keyed by package name.
 const packed = Array.isArray(output) ? output : Object.values(output ?? {});
 if (packed.length !== 1 || !Array.isArray(packed[0]?.files)) {
 	throw new Error("npm pack did not return one package manifest");
@@ -27,15 +27,8 @@ for (const required of ["package.json", "README.md", "CHANGELOG.md", "LICENSE", 
 if (!Number.isSafeInteger(packed[0].unpackedSize) || packed[0].unpackedSize > 2 * 1024 * 1024) {
 	throw new Error(`npm package is unexpectedly large: ${packed[0].unpackedSize}`);
 }
-// `const VERSION` in index.ts is what the runtime reports — startup notices, the
-// host_capabilities debug entry, `/multi-account status`. It silently drifted from
-// package.json through the 1.14.4 and 1.14.5 releases, so every debug log from those
-// versions blamed 1.14.3. publish.yml already pins the git tag to package.json; this
-// pins the source constant to it as well, and fails the release instead of shipping a
-// build that misreports itself.
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-// Pi binds SDK imports to the running host. Shipping another SDK creates split
-// catalogs/auth implementations and must never be required by a managed install.
+// external: Pi binds SDK imports to the running host.
 for (const name of ["pi-ai", "pi-agent-core", "pi-coding-agent", "pi-tui"]) {
 	if (manifest.dependencies?.[`@earendil-works/${name}`]) {
 		throw new Error(`${name} must not be an extension runtime dependency`);

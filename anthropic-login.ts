@@ -3,7 +3,7 @@ import type { AuthBlob } from "./slot-proxy-auth.ts";
 
 export type ReadLoginCredential = (id: string) => AuthBlob | undefined;
 
-// New hosts include non-chat operations; older hosts expose only getModels.
+// external: New Pi hosts include non-chat operations; older hosts expose only getModels.
 type AllModelsGetter = Provider extends { getAllModels?: () => infer Models }
 	? () => Models
 	: Provider["getModels"];
@@ -27,7 +27,6 @@ export function protectAnthropicLogin<T extends unknown[], R>(
 	return async (...args) => {
 		check();
 		const credential = await login(...args);
-		// A different process may have filled the spare while the dialog was open.
 		check();
 		return credential;
 	};
@@ -48,7 +47,7 @@ export function anthropicLoginProvider(
 		id,
 		name: `Anthropic (${id})`,
 		getModels: () => (models?.() ?? base.getModels()).map((model) => ({ ...model, provider: id })),
-		// Pi 1.x reads this catalog before getModels; never inherit the base slot identity.
+		// external: Pi 1.x reads this catalog before getModels.
 		getAllModels: () => (models?.() ?? catalog.getAllModels?.() ?? base.getModels())
 			.map((model) => ({ ...model, provider: id })),
 		auth: {

@@ -1,9 +1,3 @@
-/**
- * Argument completions for `/multi-account`: the subcommand first, then the account for
- * `use`/`switch`. Typing an exact provider id from memory was the only way to reach a chosen
- * account, so the list shows every account with what the accounts table knows about it, ready
- * ones first.
- */
 
 /** Same shape as Pi's `AutocompleteItem`; declared here so the module stays free of host imports. */
 export interface CompletionItem {
@@ -77,7 +71,6 @@ export function multiAccountCompletions(
 				choice.provider.toLowerCase().includes(needle) ||
 				choice.account?.toLowerCase().includes(needle),
 		)
-		// Stable sort: within a rank the rotation order is kept.
 		.sort((left, right) => rank(left) - rank(right))
 		.map((choice) => ({
 			value: `${command} ${choice.provider}`,

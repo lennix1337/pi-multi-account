@@ -142,8 +142,6 @@ export function parseCodexUsageBody(
 		credentialHash,
 		plan: typeof source.plan_type === "string" ? source.plan_type : undefined,
 		account: typeof source.email === "string" && source.email.trim() ? source.email : undefined,
-		// `limit_reached` is the negative statement and `allowed` the positive one; either alone
-		// is enough. Read both so a response that carries only one of them still answers.
 		serviceable:
 			typeof rateLimit.limit_reached === "boolean"
 				? !rateLimit.limit_reached
@@ -314,9 +312,7 @@ export function parseOllamaMeBody(
 			: typeof source.plan === "string"
 				? source.plan
 				: undefined;
-	// Ollama's /api/me carries the plan tier, billing-period end and suspended flag. Current cloud
-	// quota windows come from /api/usage, but retain support for windows here in case Ollama folds
-	// them into the documented account response later.
+	// external: Ollama account metadata comes from /api/me and quota windows from /api/usage.
 	const nullableTime = (value: unknown): string | undefined => {
 		if (!value || typeof value !== "object") return undefined;
 		const v = value as { Time?: unknown; Valid?: unknown };
@@ -357,7 +353,7 @@ export function parseOllamaMeBody(
 
 const OLLAMA_SESSION_SECONDS = 5 * 60 * 60;
 const OLLAMA_WEEK_SECONDS = 7 * 24 * 60 * 60;
-const OLLAMA_WEEK_ANCHOR_MS = 4 * 24 * 60 * 60_000; // Monday 00:00 UTC after Unix epoch.
+const OLLAMA_WEEK_ANCHOR_MS = 4 * 24 * 60 * 60_000;
 
 function nextBoundary(now: number, windowMs: number, anchorMs = 0): number {
 	return anchorMs + (Math.floor((now - anchorMs) / windowMs) + 1) * windowMs;
@@ -372,8 +368,7 @@ function ollamaFractionWindow(
 	const rawUsage = record(value).usage;
 	if (rawUsage === null || rawUsage === undefined || rawUsage === "") return undefined;
 	const usage = finiteNumber(rawUsage);
-	// Ollama documents this only through its live response today. Be strict about the observed
-	// fractional shape so a future percentage-valued response cannot silently turn 50% into 100%.
+	// external: Ollama usage currently reports fractional quota values.
 	if (usage === undefined || usage < 0 || usage > 1) return undefined;
 	return {
 		usedPercent: usage * 100,
@@ -460,8 +455,7 @@ async function fetchOllamaUsageSnapshot(
 			Date.now(),
 			options.credentialHash,
 		);
-		// /api/usage is not yet a stable documented contract. Its failure must never erase the
-		// useful /api/me account status or make a healthy Ollama key look invalid.
+		// external: Ollama /api/usage is not a stable documented contract.
 		try {
 			const usageResponse = await fetchImpl("https://ollama.com/api/usage", {
 				method: "GET",
@@ -485,7 +479,6 @@ async function fetchOllamaUsageSnapshot(
 				}
 			}
 		} catch {
-			// Best-effort endpoint: preserve the plan-only account snapshot.
 		}
 		return account;
 	} catch (error) {
@@ -501,10 +494,7 @@ async function fetchOllamaUsageSnapshot(
 	}
 }
 
-// Cursor's own dashboard usage lives in the aiserver.v1.DashboardService Connect-RPC service.
-// The methods are undocumented; they were read out of Cursor's own clients (the editor and the
-// Grok Bot app) and verified live on 2026-09-12 — the same OAuth session token the bridge already
-// holds answers both, and the numbers match the dashboard exactly (97% / 35% / weekly 0%).
+// external: Cursor dashboard quota uses undocumented aiserver.v1.DashboardService Connect-RPC methods.
 const CURSOR_DASHBOARD_RPC_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService";
 
 /** The monthly pools: included models (`auto`) and third-party models (`api`). */
@@ -575,9 +565,6 @@ async function fetchCursorUsageSnapshot(
 		throw new UsageFetchError(`${provider} has no OAuth access token`);
 	}
 	const fetchedAt = Date.now();
-	// The plan-only snapshot is the old, always-honest answer. Quota numbers are an enrichment
-	// on top of it: a network hiccup must not blank the footer or report a healthy account as
-	// "usage unavailable", so every failure except 401 falls back to it.
 	const fallback = (): UsageSnapshot => ({
 		provider,
 		family: "cursor",
@@ -605,7 +592,6 @@ async function fetchCursorUsageSnapshot(
 			call("GetCurrentPeriodUsage"),
 			call("GetSandUsageStatus"),
 		]);
-		// A 401 is the one failure worth surfacing: the caller refreshes the token and retries.
 		for (const result of [period, sand]) {
 			if (result.status === "fulfilled" && result.value.status === 401) {
 				throw new UsageFetchError(
@@ -783,8 +769,6 @@ export function parseXaiUsageBody(
 				)
 			: undefined;
 	}
-	// A period alone is not evidence of unused quota. Private endpoint schema
-	// drift must never manufacture headroom and clear a real cooldown.
 	if (config.currentPeriod !== undefined) return undefined;
 
 	const legacyPeriod = xaiUsagePeriod(
@@ -817,8 +801,7 @@ async function fetchXaiUsageSnapshot(
 	} = {},
 ): Promise<UsageSnapshot> {
 	if (credential.type !== "oauth" || !credential.access) {
-		// XAI_API_KEY shares the `xai` provider id. It has no SuperGrok billing session,
-		// so do not fall through to a doomed OAuth probe that blanks the footer.
+		// external: XAI_API_KEY uses the xai provider id but has no SuperGrok billing session.
 		return {
 			provider,
 			family: "xai",
@@ -897,7 +880,6 @@ export function parseZaiCodingCnUsageBody(
 		const resetAt = epochMs(item.nextResetTime);
 		if (!seconds || usedPercent === undefined || resetAt === undefined || resetAt <= fetchedAt) continue;
 		const key = seconds === 5 * 3600 ? "primary" : "secondary";
-		// Duplicate windows cannot make a depleted account appear healthier.
 		if (!snapshot[key] || usedPercent > snapshot[key]!.usedPercent)
 			snapshot[key] = { usedPercent, resetAt, windowSeconds: seconds };
 	}
@@ -921,7 +903,6 @@ async function fetchZaiCodingCnUsageSnapshot(
 		return snapshot;
 	} catch (error) {
 		if (error instanceof UsageFetchError) throw error;
-		// Never echo provider bodies or fetch errors that could embed a credential.
 		throw new UsageFetchError(`${provider} usage request failed or timed out`);
 	}
 }
@@ -945,10 +926,7 @@ export async function fetchUsageSnapshot(
 		return fetchCursorUsageSnapshot(provider, credential, options);
 	}
 	if (family === "kimi-coding") {
-		// Kimi For Coding is a subscription behind an API key, and it publishes no quota endpoint —
-		// /usage, /quota, /me, /subscription and the Moonshot balance path all 404 against
-		// api.kimi.com/coding. Falling through to the OAuth branch made every probe throw
-		// "has no OAuth access token" for a healthy key, blanking the footer and filling the log.
+		// external: Kimi Coding publishes no quota endpoint.
 		return {
 			provider,
 			family: "kimi-coding",
@@ -958,9 +936,7 @@ export async function fetchUsageSnapshot(
 		};
 	}
 	if (family === "qwen") {
-		// Qwen/Alibaba exposes no usage/quota endpoint over its API-key plans, so we
-		// report the plan honestly instead of attempting (and failing) an OAuth usage
-		// fetch. Keeps `limits` from throwing "not supported".
+		// external: Qwen API-key plans expose no usage or quota endpoint.
 		return {
 			provider,
 			family: "qwen",
@@ -972,7 +948,7 @@ export async function fetchUsageSnapshot(
 	if (family === "xai") return fetchXaiUsageSnapshot(provider, credential, options);
 	if (family === "zai-coding-cn") return fetchZaiCodingCnUsageSnapshot(provider, credential, options);
 	if (family === "anthropic" && credential.type === "api_key" && credential.key?.trim()) {
-		// OAuth quota windows belong to Claude subscriptions, not Console API credits.
+		// external: Anthropic OAuth quota windows do not represent Console API credits.
 		return {
 			provider,
 			family,
@@ -1075,8 +1051,7 @@ export function windowLabel(
 	family: UsageFamily,
 	position: UsageWindowPosition,
 ): string {
-	// Cursor's pools are products, not durations: included models, the third-party pool, and the
-	// Grok Bot weekly bucket.
+	// external: Cursor quota pools distinguish included models, third-party models and Grok Bot weekly usage.
 	if (family === "cursor") {
 		if (position === "primary") return "models";
 		if (position === "secondary") return "other";
@@ -1142,15 +1117,9 @@ export function formatUsageCompact(
 			? `${providerUsageLabel(snapshot.provider)} · ${who}`
 			: providerUsageLabel(snapshot.provider),
 	];
-	// The plan is what decides how much quota those percentages are a percentage OF — a free slot
-	// at 60% left and a Plus slot at 60% left are not comparable amounts of work.
 	if (snapshot.plan && (snapshot.primary || snapshot.secondary || snapshot.tertiary)) parts.push(snapshot.plan);
-	// The account's own answer, when it gave one. A percentage is arithmetic on one window and can
-	// disagree with reality in both directions — an account reading 0% left was answering
-	// `allowed: true`, and showing only the 0% is what makes a working account look dead.
 	if (snapshot.serviceable === true) parts.push("ok");
 	else if (snapshot.serviceable === false) parts.push("spent");
-	// Without windows the line keeps who/plan/verdict; another footer may already show the percentages.
 	if (!windows) return parts.join(" | ");
 	if (snapshot.primary) {
 		parts.push(

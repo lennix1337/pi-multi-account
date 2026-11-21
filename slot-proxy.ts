@@ -1,31 +1,3 @@
-/**
- * A parent-owned loopback route that lets a child run on the account the rotation chose.
- *
- * ## The problem this exists for
- *
- * A process spawned without this extension — a memory consolidation, external CLI, or bare
- * `pi -p --no-extensions` call — either receives an explicit model or inherits Pi's saved global
- * default. Since Pi 0.84.3 that saved value intentionally does not track every live session
- * switch. In either case, publishing a rotation slot's *name* into `models.json` is not enough:
- * measured 2026-08-24, a
- * published slot carrying an OAuth credential fails with `No API key found`, because Pi honours
- * an OAuth credential only for a provider definition that declares the flow, and a `models.json`
- * entry declares none. The child then falls through to Pi's own first-available provider — a
- * different account, usually a different vendor, silently.
- *
- * The Cursor slots already solve this, and the shape is the answer for every OAuth family:
- * publish the slot against a route the parent serves on `127.0.0.1`, with a deliberately
- * non-secret placeholder as its `apiKey`. Pi sees a credential and admits the provider; the child
- * authenticates to this machine with a string worth nothing; the parent swaps in the real token
- * and adds whatever the family needs. The credential never leaves the parent.
- *
- * ## What lives here
- *
- * Only the decisions — routing, admission, and the exact shape of the upstream request. No
- * socket, no credential store, no file. That keeps the security-relevant rules (the placeholder is
- * never forwarded, an unknown caller is never served, a token never reaches a diagnostic) testable
- * exhaustively and without a network.
- */
 
 /**
  * The `apiKey` published into `models.json` for a proxied slot.
@@ -114,13 +86,6 @@ export interface ProxyCredential {
 	accountId?: string;
 }
 
-/**
- * Headers a proxy must never copy from the incoming request to the outgoing one.
- *
- * The hop-by-hop set is per RFC 9110; `host` and `content-length` are recomputed by the client;
- * `authorization`/`x-api-key` are dropped because replacing them is the entire point of this
- * proxy and forwarding the placeholder would authenticate nothing.
- */
 const DROPPED_HEADERS = new Set([
 	"authorization",
 	"x-api-key",
@@ -155,8 +120,6 @@ export function parseProxyPath(
 	).split("?")[0];
 	if (!slotId || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slotId)) return undefined;
 	const rest = separator === -1 ? "/" : pathname.slice(separator);
-	// `..` in any form is refused rather than normalised: there is no legitimate caller that needs
-	// it, and normalising is where path-traversal bugs live.
 	if (rest.includes("..") || rest.includes("%2e%2e") || rest.includes("%2E%2E")) {
 		return undefined;
 	}
@@ -208,7 +171,6 @@ export function admitRequest(args: {
 		isPublishedPlaceholder(presented) ||
 		(!!presented && !!args.acceptedSecrets?.includes(presented));
 	if (!accepted) {
-		// Never echo what was presented: it may be a real credential belonging to whoever called.
 		return { ok: false, status: 401, message: "this route serves published slots only" };
 	}
 	return { ok: true, route, rest: parsed.rest };
@@ -270,20 +232,17 @@ export function shapeUpstreamRequest(args: {
 		}
 		headers.authorization = `Bearer ${credential.access}`;
 		if (route.family === "anthropic") {
-			// The header Anthropic requires before it will accept a subscription token at all.
+			// external: Anthropic requires this beta header for subscription tokens.
 			headers["anthropic-beta"] = mergeBeta(headers["anthropic-beta"], "oauth-2025-04-20");
 		} else if (route.family === "codex") {
-			// Codex routes a subscription request by account. Pi fills this header in from the
-			// placeholder it was given, so it must be overwritten here — not defaulted — or the
-			// request goes upstream naming an account that does not exist.
+			// external: Pi fills chatgpt-account-id from its placeholder credential.
 			if (credential.accountId) headers["chatgpt-account-id"] = credential.accountId;
 			else delete headers["chatgpt-account-id"];
 			headers.originator = headers.originator ?? "pi";
 		}
 	}
 
-	// Image tools append these endpoints directly to the slot base; chat already sends /codex.
-	// Leave all other paths and families intact, including usage requests.
+	// external: Image tools append endpoints directly to the base URL; chat includes /codex.
 	const upstreamRest =
 		route.family === "codex" && /^\/images\/(?:generations|edits)(?:\?.*)?$/.test(rest)
 			? `/codex${rest}`
@@ -292,7 +251,6 @@ export function shapeUpstreamRequest(args: {
 	return { ok: true, url: `${base}${upstreamRest}`, headers };
 }
 
-/** Keep any beta flags the caller asked for, and add ours once. */
 function mergeBeta(existing: string | undefined, required: string): string {
 	if (!existing) return required;
 	const parts = existing

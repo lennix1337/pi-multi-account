@@ -118,7 +118,6 @@ export class AutomaticRecoveryArbiter {
 		this.#policyRefusalStopped = true;
 		const active = this.#active;
 		if (active) {
-			// One terminal phase per incident: a repeated refusal names the incident already stopped.
 			if (active.stopped) return active.incidentId;
 			active.category = "policy_refusal";
 			active.provider = metadata.provider ?? active.provider;
@@ -183,7 +182,6 @@ export class AutomaticRecoveryArbiter {
 		try {
 			this.#emit(metadata);
 		} catch {
-			// Observability listeners must not change recovery behavior.
 		}
 	}
 }

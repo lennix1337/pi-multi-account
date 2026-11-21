@@ -59,21 +59,11 @@ let proxyPort: number | undefined;
 let loadAttempt = 0;
 
 function loadSpecifier(entry: string): string {
-	// Always a file URL: Node's ESM loader rejects a bare Windows path (`C:\...`) as a URL scheme.
+	// external: Node ESM rejects bare Windows paths as module URLs.
 	const url = pathToFileURL(entry).href;
 	return loadAttempt === 0 ? url : `${url}?pi-multi-account-retry=${loadAttempt}`;
 }
 
-/**
- * Cache the in-flight PROMISE, not the settled module.
- *
- * Discovery fires this without awaiting while `session_start` awaits its own call, so both
- * used to reach the import at once. A second concurrent import of the same module observes it
- * mid-initialization: hoisted functions are already callable while its `let` state is still in
- * the temporal dead zone, which surfaced as "Cannot access 'tokenResolver' before
- * initialization" and cost the session every Cursor account. One shared promise means the
- * module is imported exactly once, no matter how many callers race.
- */
 async function loadCursorModules(): Promise<CursorShared | undefined> {
 	sharedModPromise ??= (async () => {
 		const entry = join(getCursorProviderRoot(), "cursor-shared.ts");
@@ -115,12 +105,6 @@ export async function setupCursorSubscription(
 		slotIds: string[];
 		notify?: (message: string, level: "info" | "warning") => void;
 		log?: (kind: string, data: Record<string, unknown>) => void;
-		/**
-		 * Host hook: provision each Cursor slot into Pi's static models.json so a
-		 * bare `pi -p` child (no extensions) resolves cursor/* through the running
-		 * proxy. Called after the proxy is up and again when the real catalog lands.
-		 * Pass model objects (or ids); the host writes Pi-schema objects, never strings.
-		 */
 		onProvision?: (slotIds: string[], port: number, models: unknown[]) => void | Promise<void>;
 	},
 ): Promise<number | undefined> {
@@ -202,16 +186,6 @@ export async function setupCursorSubscription(
 }
 
 /**
- * Refresh a Cursor OAuth credential through the VENDORED provider.
- *
- * This used to `import()` `~/.pi/agent/git/github.com/ndraiman/pi-cursor-provider/auth.ts`
- * — a path that no longer exists for anyone (the provider is vendored into this
- * extension, and upstream's repo never contained the file layout we expected).
- * Every forced Cursor refresh therefore threw before it could refresh anything.
- * Resolving through {@link getCursorProviderRoot} keeps the `PI_CURSOR_PROVIDER_ROOT`
- * test seam working.
- */
-/**
  * Controller tasks are not Pi sessions, so the normal session_shutdown hook cannot clean their
  * Cursor conversation state. The native controller provider calls this after each task request;
  * the callback is deliberately a no-op when the optional Cursor provider is absent.
@@ -220,7 +194,6 @@ export function cleanupCursorControllerSession(sessionId: string): void {
 	try {
 		indexMod?.cleanupControllerSession?.(sessionId);
 	} catch {
-		// Cleanup is best effort; it must not turn a settled provider result into a host error.
 	}
 }
 

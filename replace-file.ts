@@ -1,4 +1,3 @@
-/** Atomic temp-file publication that survives Windows' transient sharing violations. */
 import { renameSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -16,7 +15,7 @@ function tryReplaceFile(temp: string, target: string, deadline: number): boolean
 	}
 }
 
-// Async readers in this process need the event loop to close their Windows handles.
+// external: Windows readers must release open handles before replacement can succeed.
 export async function replaceFile(temp: string, target: string, canCommit: () => boolean): Promise<void> {
 	const deadline = Date.now() + RETRY_BUDGET_MS;
 	for (let delay = 10; ; delay = Math.min(delay * 2, 100)) {
@@ -26,7 +25,6 @@ export async function replaceFile(temp: string, target: string, canCommit: () =>
 	}
 }
 
-// Kept for synchronous auth/state callers; startup model publication uses replaceFile.
 export function replaceFileSync(temp: string, target: string): void {
 	const deadline = Date.now() + RETRY_BUDGET_MS;
 	for (let delay = 10; !tryReplaceFile(temp, target, deadline); delay = Math.min(delay * 2, 100)) {

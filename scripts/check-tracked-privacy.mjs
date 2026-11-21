@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// fileURLToPath, not .pathname: on Windows .pathname is "/C:/...", an invalid cwd.
+// external: On Windows URL.pathname begins /C:/ and is not a valid filesystem path.
 const root = fileURLToPath(new URL("..", import.meta.url));
 const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: root })
 	.toString("utf8")

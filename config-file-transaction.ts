@@ -1,4 +1,3 @@
-/** Shared read-latest/field-scoped transaction for every extension config writer. */
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -22,7 +21,7 @@ function stageConfigUpdate(target: string, temp: string, patch: ConfigPatch, can
 	return { value: next, changed: true };
 }
 
-// Startup model publication must yield while Pi's async model refresh holds the file.
+// external: Pi async model refresh can hold the configuration file lock.
 export async function mutateConfigFileAsync(
 	path: string,
 	patch: ConfigPatch,
@@ -44,12 +43,11 @@ export async function mutateConfigFileAsync(
 
 export function mutateConfigFile(
 	path: string,
-	// Return undefined when the file already holds the wanted value: nothing is rewritten.
 	patch: ConfigPatch,
 	canCommit: () => boolean = () => true,
 	indent: string | number = "\t",
 ): Record<string, any> {
-	// Preserve config symlinks and make aliases coordinate on the same target lock.
+	// external: Symlinks must resolve to the same lock target.
 	const target = realpathSync(path);
 	const lockfile = require("proper-lockfile") as { lockSync(path: string, options: object): () => void };
 	let release: (() => void) | undefined;

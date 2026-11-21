@@ -1,39 +1,3 @@
-/**
- * What this extension assumes about Pi, written down — and checked.
- *
- * ## Why a ledger, and why it distinguishes two kinds of assumption
- *
- * A Pi update has broken this extension before, and the two cases were not the same shape:
- *
- * - **A method disappeared.** `AuthStorage` dropped `set()` on pi 0.84.x, which is what this
- *   extension persisted a refreshed Anthropic token with. The file format never changed; the way
- *   to write it did. Symptom: a fresh `/login anthropic` roughly once a day.
- * - **A file schema was stricter than we wrote.** Slot catalogues were written into `models.json`
- *   as bare id strings where Pi requires each model to be an object. Pi then rejected the
- *   **entire file**, so every custom provider the user had disappeared at once.
- *
- * Both were silent from the outside and expensive to trace. The defence is not to guess better;
- * it is to state the dependency, mark whether Pi actually promised it, and notice when it stops
- * being true.
- *
- * ## Three rules this module exists to hold
- *
- * 1. **Read only the published files.** Pi hands the outside world exactly three:
- *    `auth.json`, `models.json`, `settings.json`. A bare `pi -p --no-extensions` child reads
- *    those and nothing else — verified by experiment on 2026-08-24. Anything we need from
- *    deeper inside Pi is a design smell, not a dependency to formalise.
- * 2. **Never write those files directly.** Writing goes through Pi, which owns locking,
- *    concurrent access and migrations. The `AuthStorage` incident is what happens when the
- *    write path is treated as ours.
- * 3. **Check the shape, because nothing else will.** `auth.json` and `models.json` carry **no
- *    schema version** (checked: neither has a version field; only `settings.json` records a Pi
- *    version, which is the app's, not the format's). So a format change cannot announce itself.
- *    The only way to notice is to look, and to say so out loud rather than fail later somewhere
- *    unrelated.
- *
- * Pure by construction: this module reads nothing and writes nothing. It is handed already-parsed
- * values and returns verdicts, so the whole ledger can be tested without a filesystem.
- */
 
 /** Whether Pi actually promises a thing, or we merely observed it holding. */
 export type AssumptionKind = "documented" | "observed";
@@ -125,7 +89,6 @@ const SESSION_SCOPED_MODEL_SELECTION_SINCE = Object.freeze([0, 84, 3] as const);
 const CONTEXT_WITH_SYSTEM_SINCE = Object.freeze([0, 87, 0] as const);
 const ABORT_STOPS_AGENT_RETRY_SINCE = Object.freeze([0, 86, 0] as const);
 
-/** Sign of `version` - `since` (negative, 0, positive); undefined for a non-semver host. */
 function compareVersion(version: string, since: readonly number[]): number | undefined {
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version.trim());
   if (!match) return undefined;
@@ -186,8 +149,6 @@ export function checkAuthShape(raw: unknown): ShapeVerdict {
     }
     const type = entry.type;
     if (type !== "oauth" && type !== "api_key") {
-      // A new credential kind is not necessarily a break — but it is exactly the kind of quiet
-      // change that makes account discovery skip an account without saying why.
       problems.push(`${provider}: unfamiliar credential type ${JSON.stringify(type)}`);
     }
   }
@@ -207,7 +168,6 @@ export function checkModelsShape(raw: unknown): ShapeVerdict {
   }
   const providers = raw.providers;
   if (providers === undefined) {
-    // An absent registry is legitimate — the user may have no custom providers at all.
     return { file: "models.json", ok: true, problems: [] };
   }
   if (!isPlainObject(providers)) {

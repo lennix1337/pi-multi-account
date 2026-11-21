@@ -1,69 +1,3 @@
-/**
- * Can an extension-free Pi child actually use this rotation slot?
- *
- * ## Why this exists
- *
- * Pi keeps an optional saved global default in `settings.json`. On Pi <=0.84.2 every model
- * switch rewrites it; since Pi 0.84.3 ordinary model selection is session-scoped and only an
- * explicit persistent choice rewrites it. Anything that later spawns a bare
- * `pi -p --no-extensions` child without `--model` inherits that saved default — which may
- * intentionally differ from whichever rotation slot is active in this session. Brokered and
- * subagent children pass an explicit provider/model and do not use this fallback.
- *
- * A child launched that way does not load this extension, so a slot named `openai-codex-account-4`
- * exists for it only if we published it into Pi's own `models.json`. Publishing the *name*,
- * however, is not the same as publishing a usable route, and the difference is invisible until
- * something fails far away from here.
- *
- * ## What was measured (2026-08-24), not assumed
- *
- * In an isolated agent directory containing one `models.json` provider entry mirroring the
- * built-in Codex definition plus the matching **OAuth** credential under the same key:
- *
- *     pi -p --no-extensions --no-session --model openai-codex-account-4/gpt-5.6-sol …
- *     → exit 1: "No API key found for openai-codex-account-4."
- *
- * The same child, pointed at the **built-in** `openai-codex` provider with its OAuth credential,
- * got past authentication (it reached the network instead of refusing).
- *
- * The reason is in Pi: `checkProviderAuth` honours an OAuth credential only when the *provider
- * definition* declares an OAuth flow. A `models.json` entry declares none, so an OAuth token
- * sitting in `auth.json` under exactly that key is never consulted. An API key is different —
- * it resolves through the credential store and works.
- *
- * ## What was measured again (2026-08-30), and what it corrected
- *
- * The row below claiming a built-in provider is usable whatever its credential turned out to be
- * true of authentication and false of the request. On the account the parent session was itself
- * using successfully at that moment:
- *
- *     pi -p --no-extensions --no-session --model anthropic/claude-opus-5 …
- *     → 400 invalid_request_error: "Third-party apps now draw from your extra usage, not your
- *       plan limits."
- *
- * Pi resolved the built-in provider and its OAuth credential correctly; Anthropic then refused,
- * because a subscription token is only honoured for a request carrying the client identity the
- * parent adds and a bare child does not. So for that family being built-in is not sufficient,
- * and the same parent-owned loopback route the alias slots use is what makes it usable. Codex
- * is unaffected — the 2026-08-24 measurement of a bare child on built-in `openai-codex` reached
- * the network and was served.
- *
- * | slot shape | child outcome |
- * |---|---|
- * | built-in provider, credential the vendor serves any client (API key, Codex OAuth) | usable — Pi owns the auth flow |
- * | **built-in Anthropic on a subscription OAuth token** | **authenticates, then refused as a third-party app** |
- * | alias slot published with a real or placeholder `apiKey` | usable — Pi sees a credential |
- * | **alias slot with an OAuth credential and no `apiKey`** | **resolves by name, then fails at auth** |
- *
- * The third row is what we do today for Kimi slots, under a comment promising that
- * "extension-free children resolve it". True of the name; false of the credential. The Cursor
- * slots avoid it by publishing a non-secret placeholder that points at a parent-owned local
- * proxy, so the child authenticates to `127.0.0.1` while the real token stays in the parent.
- *
- * This module is deliberately pure: it decides and explains, and it touches no file, no socket
- * and no credential. Wiring and the proxy itself are separate, reviewable pieces — this one can
- * be tested exhaustively without any of them.
- */
 
 /** How a slot's credential is stored, as far as `auth.json` is concerned. */
 export type SlotCredentialKind = "oauth" | "api_key" | "none";
@@ -87,26 +21,19 @@ export type ChildUsability =
   /** A bare child cannot use it; `remedy` says what would change that. */
   | { usable: false; slotId: string; reason: string; remedy: string };
 
-/**
- * Families whose subscription refuses a request that does not carry the parent's client
- * identity, even when Pi resolved the credential. Being built-in does not help here: the
- * failure is the vendor's answer, not Pi's auth lookup.
- */
 function vendorRefusesBareChild(
   slotId: string,
   credential: SlotCredentialKind,
   builtin: boolean,
 ): boolean {
-  // Numbered alias slots never get this far: Pi does not consult their OAuth blob at all.
-  // The 400 is specific to a built-in Anthropic provider, which does resolve the credential.
+  // external: Pi does not consult OAuth blobs for numbered alias slots.
   return builtin && credential === "oauth" && /^anthropic(?:-account-\d+)?$/.test(slotId);
 }
 
-/** Loopback-only, so a published route can never send a child off this machine. */
 function isLoopback(baseUrl?: string): boolean {
   if (!baseUrl) return false;
   try {
-    // `URL` reports an IPv6 host bracketed (`[::1]`), so compare against the unwrapped form.
+    // external: URL.hostname encloses IPv6 hosts in brackets.
     const hostname = new URL(baseUrl).hostname.replace(/^\[|\]$/g, "");
     return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
   } catch {
@@ -128,9 +55,7 @@ export function classifyChildUsability(facts: SlotChildFacts): ChildUsability {
 
   const vendorRefuses = vendorRefusesBareChild(slotId, credential, builtin);
 
-  // A built-in provider is resolved by Pi without us — but resolution is not service. When the
-  // vendor refuses a bare client, a loopback baseUrl is what actually redirects the request;
-  // the published apiKey is not what Pi sends, because the stored credential is still OAuth.
+  // external: Pi sends stored OAuth credentials instead of a models.json apiKey for built-in providers.
   if (builtin && !vendorRefuses) {
     return {
       usable: true,

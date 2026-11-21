@@ -72,7 +72,7 @@
     "CONTRIBUTING.md"
   ],
   "scripts": {
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && npm run lint:comments",
     "lint:comments": "node scripts/lint-comments.mjs",
     "test": "node --test test/*.test.ts",
     "verify": "npm run check && npm test && npm run mutations && npm run pack:check",

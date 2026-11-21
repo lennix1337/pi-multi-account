@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const SOURCE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const SKIPPED = /(?:^|\/)(?:node_modules|vendor|dist|fixtures?)\/|\.d\.ts$|\.min\.js$/;
-const DIRECTIVE = /^(?:\/\/\/\s*<reference|\/[/*]\s*(?:prettier-ignore|eslint-disable(?:-next-line|-line)?\s+[\w@/-]+|eslint-enable|@ts-expect-error\s+\S|@ts-nocheck\s+\S|biome-ignore|c8 ignore|istanbul ignore|node:coverage|@vitest-environment|[#@]__PURE__)|\/\*\*?\s*@jsx(?:ImportSource|Runtime|Frag)?\s)/;
+const DIRECTIVE = /^(?:\/\/\/\s*<reference|\/[/*]\s*(?:prettier-ignore|eslint-disable(?:-next-line|-line)?\s+[\w@/-]+|eslint-enable|oxlint-(?:disable(?:-next-line|-line)?|enable)\s+[\w@/-]+|@vite-ignore\s*\*\/|@ts-expect-error\s+\S|@ts-nocheck\s+\S|biome-ignore|c8 ignore|istanbul ignore|node:coverage|@vitest-environment|[#@]__PURE__)|\/\*\*?\s*@jsx(?:ImportSource|Runtime|Frag)?\s)/;
 const LICENSE = /\b(?:license|copyright|spdx-license-identifier)\b/i;
 const LINK = /https?:\/\/\S*(?:\/issues\/\d+|\/pull\/\d+|rfc-editor\.org|datatracker\.ietf\.org|\/rfc\d+)/i;
 const EXTERNAL = /^\/[/*]\s*external:\s*\S/;

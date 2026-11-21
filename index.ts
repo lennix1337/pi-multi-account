@@ -743,14 +743,6 @@ function nativeModelEntries(models: unknown[]): NativeModelEntry[] {
 	return out;
 }
 
-/**
- * Provision a rotation slot into Pi's OWN static provider registry (models.json)
- * so any bare `pi -p` child resolves `kimi-coding-account-2/k3` or
- * `cursor/cursor-grok-4.6` WITHOUT this extension loaded. Written ONLY here:
- * at slot login/discovery — never on failover, rotation, or limit events.
- * Failover state lives in provider-failover-state.json, our own file.
- * Merge-only: existing user entries and unrelated keys are preserved verbatim.
- */
 async function provisionNativeSlot(provider: string, entry: NativeProviderEntry, canCommit: () => boolean): Promise<void> {
 	try {
 		if (!canCommit()) return;
@@ -760,8 +752,6 @@ async function provisionNativeSlot(provider: string, entry: NativeProviderEntry,
 		} catch (error: any) {
 			if (error?.code !== "EEXIST") throw error;
 		}
-		// Locked, read-latest, per-process temp file: concurrent Pi sessions publishing slots can
-		// neither clobber each other's entries nor race on one shared temp path.
 		await mutateConfigFileAsync(
 			MODELS_CONFIG_PATH,
 			(parsed) => {
@@ -785,7 +775,7 @@ async function provisionNativeSlot(provider: string, entry: NativeProviderEntry,
 					existing?.apiKey === normalized.apiKey &&
 					JSON.stringify(existing?.models ?? []) === JSON.stringify(models)
 				) {
-					return undefined; // already provisioned — do not touch the file
+					return undefined;
 				}
 				return { providers: { ...providers, [provider]: normalized } };
 			},
@@ -793,13 +783,10 @@ async function provisionNativeSlot(provider: string, entry: NativeProviderEntry,
 			2,
 		);
 	} catch (error: any) {
-		// The extension registry still works, but Pi's own model list (and so every switch to this
-		// slot) will not see it until the next publish: never fail silently.
 		logEvent("models_json_publish_failed", { provider, code: error?.code ?? String(error?.message ?? error) });
 	}
 }
 
-/** Remove loopback publications we wrote, never a user's own models.json entry. */
 function unprovisionOwnLoopbacks(slotIds?: readonly string[]): void {
 	try {
 		if (!existsSync(MODELS_CONFIG_PATH)) return;
@@ -828,23 +815,16 @@ function unprovisionOwnLoopbacks(slotIds?: readonly string[]): void {
 			2,
 		);
 	} catch (error: any) {
-		/* leaving a stale loopback is worse than a failed write; next publish retries */
 		logEvent("models_json_unpublish_failed", { code: error?.code ?? String(error?.message ?? error) });
 	}
 }
 
-// "Black box" flight recorder: a structured, append-only log of every decision the
-// extension makes (switches, errors, watchdog actions, breaker trips, compaction
-// routing). When something misbehaves, this file is the exact reproduction trail —
-// no guessing from screenshots. It NEVER contains tokens/credentials (only provider
-// ids, model ids, truncated reasons). Bounded size with one rotation so it can never
-// fill the disk.
 const DEBUG_LOG_PATH = join(AGENT_DIR, "provider-failover-debug.log");
-const DEBUG_LOG_MAX_BYTES = 4 * 1024 * 1024; // rotate to .log.1 past this
+const DEBUG_LOG_MAX_BYTES = 4 * 1024 * 1024;
 const STATE_VERSION = 5;
 const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_PROBE_COOLDOWN_MS = 5 * 60 * 1000;
-const DEFAULT_INVALID_COOLDOWN_MS = 365 * 24 * 60 * 60 * 1000; // effectively "until re-login"
+const DEFAULT_INVALID_COOLDOWN_MS = 365 * 24 * 60 * 60 * 1000;
 const DEFAULT_TRANSIENT_COOLDOWN_MS = 60 * 1000;
 const DEFAULT_USAGE_REFRESH_MS = 5 * 60 * 1000;
 const DEFAULT_USAGE_STATUS_REFRESH_MS = 60 * 1000;
@@ -852,53 +832,19 @@ const CODEX_MODEL_CATALOG_TTL_MS = 5 * 60 * 1000;
 const OLLAMA_MODEL_CATALOG_TTL_MS = 30 * 60 * 1000;
 const MIN_ANTHROPIC_USAGE_REFRESH_MS = 10 * 60 * 1000;
 const MAX_MIGRATED_COOLDOWN_MS = 8 * 24 * 60 * 60 * 1000;
-// v1.13.7 — Hard ceiling on any LIVE-parsed cooldown. Codex/usage error bodies can report the
-// reset of a long ROLLING window (weekly/monthly) as `resets_at`, which — taken literally — evicts
-// an account from rotation for weeks even though its short (primary) window has already freed. Any
-// single estimate is capped here so a mis-parsed or long-window reset can never lock a live account
-// for more than this; the account is re-probed at the cap and cooldownMsFromUsage self-corrects the
-// moment the primary window has headroom. Cooling-down accounts are otherwise never probed, so
-// without this cap the far-future estimate is a dead end (the "bogus cooldown" bug, open since v1.13.1).
+// external: Codex may report a long rolling-window reset while its short window has already recovered.
 const MAX_LIVE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
-// Default ceiling on any predicted unavailability. Every number a provider gives us about the
-// FUTURE — reset timestamps, "try again in N min", used-percentage against a quota size the
-// provider can resize at will — is a forecast that goes stale silently the moment the provider
-// refreshes a window early. Rather than trying to predict better, we cap how long any forecast
-// may prevent us from simply asking the account again. A rejected request costs no tokens, so
-// re-asking is close to free; only a successful one proves availability.
+// external: Provider quota reset forecasts can change when windows refresh early.
 const MAX_RECHECK_INTERVAL_MS = 10 * 60 * 1000;
 const MIN_PENDING_WAKE_MS = 1000;
-// The usage-% endpoint tracks an account's QUOTA window; it does NOT reflect session/rate limits.
-// So a session-limited account keeps 429ing "usage limit reached" while usage still reports
-// headroom. Trusting usage as ground truth then reports the account "free now", schedules a ~1s
-// retry, gets 429 again, and loops. Once a provider limit-errors TWICE within this window (no
-// success in between), the usage reading is proven a liar for this account and is distrusted.
+// external: Provider usage endpoints can report quota headroom while a session is rate-limited.
 const LIMIT_STREAK_WINDOW_MS = 15 * 60 * 1000;
-// How long to ignore "usage says free" for a provider after usage has been proven wrong, so the
-// recorded cooldown from the real error sticks instead of being cleared on the next poll.
 const USAGE_UNTRUSTED_MS = 30 * 60 * 1000;
-// Minimum backoff to record for a session/rate limit the usage window cannot see, so the wake
-// timer polls (every PENDING_POLL_MS) instead of hot-retrying a maxed account every second.
 const SESSION_LIMIT_FLOOR_MS = 5 * 60 * 1000;
 const AUTH_CHANGE_POLL_MS = 5000;
-// While a session is paused waiting for ANY account to recover, never sleep longer than this
-// between availability checks. A single multi-hour timer would miss an account that recovers
-// earlier than its recorded estimate (or a fresh /login in a parallel session); polling lets the
-// first account that is ACTUALLY free pick the work back up.
 const PENDING_POLL_MS = 60 * 1000;
-// A held user message is only worth delaying a compaction for if it is about to be sent.
 const QUEUE_FLUSH_SOON_MS = 10 * 1000;
-// Runaway-loop guards (added). Without these, when every account is rate-limited the
-// failover bounces between accounts every 1-9s forever, growing the session history
-// until the machine swaps itself to death.
-const ANTI_PINGPONG_MS = 60 * 1000; // don't switch straight back to the account we just left
-// A 401 on an OAuth account usually just means "access token expired, refresh it" — Pi refreshes
-// on the next call. So a single 401 must NOT permanently kill a refreshable account (that was the
-// "it dropped me off an account that still had tokens" bug). Only kill it after this many 401s in a
-// row with no successful response in between. Non-refreshable (API-key) 401 is fatal immediately.
-// Bumped on every release. Printed at startup and in `/multi-account status` so you can verify
-// which version Pi actually loaded (a running Pi keeps the version it started with — /login and
-// /reload do NOT reload extension code; only a full restart does).
+const ANTI_PINGPONG_MS = 60 * 1000;
 const VERSION = "1.24.0";
 function sourceFingerprint(): string {
 	try {
@@ -907,10 +853,6 @@ function sourceFingerprint(): string {
 		const files = (manifest.files as string[]).filter((name) => name.endsWith(".ts")).sort();
 		const hash = createHash("sha256");
 		for (const name of files) hash.update(name).update(readFileSync(join(root, name)));
-		// package.json lists the vendored `cursor` directory as a whole, so a `.ts`
-		// suffix filter previously ignored every proxy/lifecycle change. Hash the
-		// TypeScript next to the proxy (not generated protobuf) so `/multi-account status`
-		// can tell a running Pi that Cursor source changed.
 		const cursorDir = join(root, "cursor");
 		if (existsSync(cursorDir)) {
 			for (const child of readdirSync(cursorDir).sort()) {
@@ -925,63 +867,21 @@ function sourceFingerprint(): string {
 const LOADED_SOURCE_FINGERPRINT = sourceFingerprint();
 const TRANSIENT_PENDING_PREFIX = "temporary provider failure:";
 const SELECTED_FALLBACK_PENDING_PREFIX = "selected fallback:";
-// Pending reason for a turn that was NOT a model/account failure — the prior turn simply had
-// not gone idle in time, so we re-arm to resume the SAME model. This must never be treated as
-// a failure of the current model (doing so would downgrade it to an older sibling on the same
-// account, which shares the same quota pool and gains nothing).
 const BUSY_RETRY_REASON = "previous turn was still busy; auto-retry";
-// Raised from 3 → 8. A single transient 401 burst from OpenAI Codex (one physical event
-// that Pi surfaces as 3 error hooks: response/message/agent) hit the old threshold instantly
-// and permanently killed a live account. The threshold now tolerates a retry burst plus a
-// few genuinely distinct failures. Dedup in markAuthFailure (same-hash repeats do not count)
-// is the other half of this fix.
+// external: Pi may surface one Codex 401 as response, message and agent error hooks.
 const MAX_CONSECUTIVE_AUTH_FAILURES = 8;
-const TRANSIENT_AUTH_COOLDOWN_MS = 60 * 1000; // brief skip after a 401 so the next call can refresh
+const TRANSIENT_AUTH_COOLDOWN_MS = 60 * 1000;
 
-// For non-refreshable (API-key) providers, repeated 401s with the SAME key are not a
-// transient blip — the key is permanently invalid. After this many consecutive same-key
-// failures, invalidate the account so the user is told to re-login instead of looping
-// on a 1-minute cooldown forever.
 const MAX_SAME_KEY_AUTH_FAILURES = 3;
 
-// --- Forward-progress watchdogs (v1.12.0) ----------------------------------
-// A resumed/rotated turn must NEVER be able to hang the session forever. The old
-// code awaited pi.continueAgent() and busy-waited on ctx.isIdle() with no upper
-// bound, so any stall (a wedged compaction, a provider socket that never returns,
-// an account that quietly accepts the request but never streams) showed the user a
-// spinning "working" animation with zero progress and no way to tell it was dead.
-// These bounds turn whole CLASSES of "it just hangs" — including ones never
-// individually enumerated — into a visible, recoverable state.
-const RESUME_IDLE_TIMEOUT_MS = 90 * 1000; // max wait for the prior turn to go idle before we stop blocking
-const STUCK_WATCHDOG_MS = 180 * 1000; // total silence (no stream/tool/response) on a resumed turn ⇒ "stuck"
-const STUCK_REMINDER_MS = 120 * 1000; // re-surface the stuck notice this often while it stays stuck
-// A host that never reports the watchdog's own abort gets this many silent windows to do so.
+const RESUME_IDLE_TIMEOUT_MS = 90 * 1000;
+const STUCK_WATCHDOG_MS = 180 * 1000;
+const STUCK_REMINDER_MS = 120 * 1000;
 const ABORT_REPORT_GRACE_WINDOWS = 4;
-// Hang bound for a routed summary, not a success SLA. Large sessions on Opus routinely
-// take more than 2–3 minutes; the old 150s cap aborted a live summary and then handed
-// compaction to the spent account, which is how "Compacting context…" never ended.
+// external: large Opus summaries can take more than three minutes.
 const COMPACTION_WATCHDOG_MS = 8 * 60 * 1000;
-// How many accounts a single routed compaction may actually ask.
-//
-// The candidate list is the whole rotation, which on a fully-populated machine is nine accounts
-// across seven vendors — including the per-token ones that are in the list precisely because
-// nothing measures them. Walking all of them turned one compaction into nine sequential provider
-// calls (observed: 98 failures in a row, "insufficient balance", "requires a subscription",
-// "no endpoints found", "does not exist or you do not have access"), and the user watched
-// "Compacting context…" the whole time. Two spares after the first choice is enough: if three
-// accounts in a row cannot summarize, the tenth will not either.
 const COMPACTION_MAX_ATTEMPTS = 3;
-// How long an account that refused for a reason needing a human — no balance, no access to the
-// model, a model that is gone — is skipped as a summariser, so the next compaction does not
-// re-discover the same wall of refusals it just walked.
 const COMPACTION_UNFIT_MS = 30 * 60 * 1000;
-/**
- * Refusals that are about the ACCOUNT, not about this attempt.
- *
- * Deliberately narrow: a 500, a timeout, or an overload is a bad moment and must not bench an
- * account that will work again in a minute. Everything listed here needs a human to buy, upgrade
- * or re-login before it can change, so re-asking within the half hour only costs time.
- */
 const COMPACTION_UNFIT_PATTERNS = [
 	"insufficient balance",
 	"insufficient_quota",
@@ -998,16 +898,8 @@ const COMPACTION_UNFIT_PATTERNS = [
 	"quota",
 ];
 
-// --- Circuit breaker (v1.13.0) ---------------------------------------------
-// The reliability FLOOR. If automatic recovery keeps failing (resume wedges, switch
-// makes no progress) the extension stops trying to be clever and drops to "advisory
-// mode": it still flags rate limits and tells you which account to switch to, but it
-// no longer attempts the auto-continue that was hanging. Guarantee: the extension can
-// never make the experience WORSE than switching accounts by hand. Closes again on any
-// real forward progress, a new user prompt, /multi-account reset, or after a cooldown.
-const BREAKER_FAILURE_THRESHOLD = 3; // consecutive failed recoveries before tripping
-const BREAKER_COOLDOWN_MS = 10 * 60 * 1000; // how long advisory mode lasts once tripped
-// Longest gap between automatic retries of a route that keeps failing temporarily.
+const BREAKER_FAILURE_THRESHOLD = 3;
+const BREAKER_COOLDOWN_MS = 10 * 60 * 1000;
 const TRANSIENT_RETRY_MAX_DELAY_MS = 15 * 60 * 1000;
 
 const ANTHROPIC_BASE = "anthropic";
@@ -1015,14 +907,6 @@ const CODEX_BASE = "openai-codex";
 const OLLAMA_BASE = "ollama";
 const DEFAULT_QWEN_PROVIDER = "alibaba";
 
-/**
- * Vendors that sell their own models directly, pay-per-token, with no subscription bundle.
- * Recognising them lets `/multi-account status` split the unmanaged rotation into "metered
- * native" (real money per token, still the manufacturer's own API) and genuinely unknown
- * resellers. This is a billing/provenance policy list, not a model list — it does not need
- * updating when a vendor ships a model. Mirrors FIRST_PARTY_DIRECT_APIS in
- * pi-delegation-broker's provenance policy; keep the two in step.
- */
 const METERED_NATIVE_PROVIDERS = new Set(["deepseek", "openai"]);
 
 const DEFAULT_LIMIT_PATTERNS = [
@@ -1041,12 +925,6 @@ const DEFAULT_LIMIT_PATTERNS = [
 	"monthly usage limit",
 	"freeusagelimiterror",
 	"gousagelimiterror",
-	// "Payment required" — the account's credits or free allowance no longer cover the request.
-	// This is a limit like any other: the account cannot serve work until it is topped up, so it
-	// must cool down and rotation must move on. Left unrecognised, a session parked on such an
-	// account produced the same refusal for every user message forever, because nothing
-	// classified the error and therefore nothing switched away. Matched on prose rather than the
-	// bare status code: `402` as a substring also occurs inside token counts ("38402 tokens").
 	"payment required",
 	"limit_source",
 	"remaining balance",
@@ -1057,10 +935,7 @@ const DEFAULT_LIMIT_PATTERNS = [
 	"credit balance is too low",
 	"add credits",
 	"third-party apps now draw from your extra usage",
-	// gRPC status code for quota exhaustion. Cursor (and other OpenAI-compatible backends
-	// fronted by gRPC) surface a per-account quota wall as `resource_exhausted`, not a 429.
-	// Without this entry the refusal is unclassified → no failover → every turn dies on the
-	// spent account forever. Treated as a limit so the account cools down and rotation moves on.
+	// external: gRPC uses status 8 for resource exhaustion.
 	"resource_exhausted",
 ];
 
@@ -1080,8 +955,6 @@ export function isTemporaryApiThrottle(errorText: string): boolean {
 	}
 }
 
-// Errors that mean "this account's authorization is dead" → drop from rotation
-// until the user re-logs in (not a temporary cooldown).
 const DEFAULT_AUTH_ERROR_PATTERNS = [
 	"401",
 	"unauthorized",
@@ -1131,15 +1004,12 @@ const DEFAULT_TRANSIENT_ERROR_PATTERNS = [
 	"stream disconnected",
 	"websocket error",
 	"server error",
-	// Anthropic SDK connection failure and undici's closed stream: both seen live as "unhandled",
-	// which left the session idle until the user typed.
+	// external: Anthropic SDK and undici report connection failures using these messages.
 	"connection error",
 	"terminated",
-	// Codex could not complete its access check; this is not a permanent access denial.
 	"unable to verify model access right now",
 ];
 
-/** Cursor watchdog text from `cursor/proxy.ts`. A Run failure, never quota evidence. */
 function isCursorUpstreamStall(text: string): boolean {
 	const lower = text.toLowerCase();
 	return (
@@ -1159,8 +1029,6 @@ const DEFAULT_MODEL_ERROR_PATTERNS = [
 	"do not have access to model",
 ];
 
-// These are explicit provider verdicts that reusing or refreshing the current credential cannot
-// repair. Unlike a generic 401, they should remove the account from rotation immediately.
 const TERMINAL_AUTH_ERROR_PATTERNS = [
 	"authentication token has been invalidated",
 	"token has been invalidated",
@@ -1179,11 +1047,6 @@ const FORCE_REFRESH_AUTH_ERROR_PATTERNS = [
 	"token has been invalidated",
 ];
 
-// These are explicit refresh-endpoint verdicts that re-login cannot wait out.
-// IMPORTANT: "refresh_token_invalidated" and "session has ended" were REMOVED from this list in
-// v1.9.0 — OpenAI Codex returns them transiently under load even when the account is alive
-// (a parallel Pi session can refresh the same token moments later). They are now treated as
-// transient: the account gets a short cooldown and the next attempt can still refresh.
 const TERMINAL_REFRESH_ERROR_PATTERNS = [
 	"invalid_grant",
 	"refresh_token_reused",
@@ -1200,19 +1063,12 @@ const DEFAULT_IGNORE_PATTERNS = [
 	"input is too long",
 ];
 
-// The prompt must never point at a record it cannot guarantee. The handoff record is derived from
-// the interrupted assistant message, so it does not exist when that turn stopped before producing
-// anything (a quota rejection at request start), and a host that replaces the transcript in the
-// `context_with_system` phase (OptChat) discards it even when it does. The record therefore travels
-// INSIDE the injected user message (see interruptedTurnNote), which is persisted and cannot be lost.
 const DEFAULT_CONTINUATION_PROMPT = [
 	"Provider failover activated: switched to {to} after {from} hit a quota or rate limit.",
 	"Continue the interrupted task from where it stopped.",
 	"Anything the interrupted turn already did was attempted, so verify the current state instead of redoing it, and do not restart the task from the beginning.",
 ].join(" ");
 
-// The default shipped through 1.x claimed a record that was not always there. Configs written by
-// earlier versions persist that text verbatim, so it is recognised and replaced by the default above.
 const LEGACY_CONTINUATION_PROMPT = [
 	"Provider failover activated: switched to {to} after {from} hit a quota or rate limit.",
 	"Continue the interrupted task from where it stopped.",
@@ -1221,32 +1077,6 @@ const LEGACY_CONTINUATION_PROMPT = [
 	"Anything shown there was already attempted, so verify the current state instead of redoing it, and do not restart the task from the beginning.",
 ].join(" ");
 
-// Two independent pi-ai behaviours combine to erase the interruption point on every
-// cross-provider failover:
-//
-//   1. `transform-messages` skips any assistant message whose stopReason is "error" or
-//      "aborted" — incomplete turns are never replayed. The turn that TRIGGERED the
-//      failover is exactly the turn that gets dropped.
-//   2. The same pass degrades thinking blocks to plain text (and drops redacted ones
-//      outright) whenever the next request runs on a different model — which is exactly
-//      what an account switch does.
-//
-// The account taking over therefore receives a continuation prompt telling it "do not
-// repeat completed work" while the record of that work has just been deleted, and its
-// tool results are left in the transcript with no request to attach them to.
-//
-// The `context` hook runs on AgentMessage[] BEFORE convertToLlm/transformMessages, so it
-// is the last point at which the interrupted turn is still intact. We rewrite it into a
-// `user` message — the one role transform-messages passes through verbatim on every
-// provider — folding its orphaned tool results into the same record.
-//
-// Invariants this rendering must keep:
-//   * Deterministic: identical input produces byte-identical output, so replaying the
-//     hook on every request never invalidates the prompt cache (no timestamps, no rng).
-//   * Orphan-free: every tool result belonging to the dropped turn is folded in and
-//     removed, so no toolResult survives without its originating tool call.
-//   * Bounded: hard caps on every section, so rescuing context can never blow the
-//     context window of the account we just switched to.
 const HANDOFF_MARKER = "[handoff:interrupted-turn]";
 const HANDOFF_MAX_TEXT = 4000;
 const HANDOFF_MAX_THINKING = 3000;
@@ -1255,7 +1085,6 @@ const HANDOFF_MAX_RESULT = 1000;
 const HANDOFF_MAX_TOOL_CALLS = 12;
 const HANDOFF_MAX_ERROR = 400;
 
-/** Head+tail clip: the start says what the turn was doing, the tail says where it died. */
 function clipHandoff(value: string, max: number): string {
 	const text = value.trim();
 	if (text.length <= max) return text;
@@ -1294,8 +1123,7 @@ export function renderHandoffRecord(
 		if (block.type === "text" && typeof block.text === "string") {
 			if (block.text.trim()) texts.push(block.text);
 		} else if (block.type === "thinking") {
-			// Redacted thinking is an opaque provider-encrypted payload: it cannot be
-			// replayed cross-model and has no plain text to preserve.
+			// external: Redacted thinking is an opaque provider-encrypted payload.
 			if (!block.redacted && typeof block.thinking === "string" && block.thinking.trim())
 				thinking.push(block.thinking);
 		} else if (block.type === "toolCall") {
@@ -1385,8 +1213,6 @@ export function preserveInterruptedTurns(messages: any[]): any[] {
 	);
 	if (interrupted.length === 0) return messages;
 
-	// Tool results are addressed by call id, so a single index over the whole transcript
-	// is enough — and it stays correct no matter how the host interleaves them.
 	const resultsByCallId = new Map<string, any>();
 	for (const message of messages) {
 		if (message?.role === "toolResult" && message.toolCallId != null)
@@ -1397,7 +1223,6 @@ export function preserveInterruptedTurns(messages: any[]): any[] {
 	for (const message of interrupted) {
 		const record = renderHandoffRecord(message, resultsByCallId);
 		if (!record) continue;
-		// The continuation prompt carries the same record inline; a second copy is dead weight.
 		const alreadyDelivered = messages
 			.slice(messages.indexOf(message) + 1)
 			.some(
@@ -1415,13 +1240,11 @@ export function preserveInterruptedTurns(messages: any[]): any[] {
 	const out: any[] = [];
 	for (const message of messages) {
 		const record = rendered.get(message);
-		if (record === "") continue; // delivered inline by the continuation prompt
+		if (record === "") continue;
 		if (record) {
 			out.push({
 				role: "user",
 				content: [{ type: "text", text: record }],
-				// Reuse the original timestamp: the record must be byte-identical on every
-				// replay or it would invalidate the prompt cache on each request.
 				timestamp: message.timestamp,
 			});
 			continue;
@@ -1431,7 +1254,7 @@ export function preserveInterruptedTurns(messages: any[]): any[] {
 			message.toolCallId != null &&
 			foldedResultIds.has(String(message.toolCallId))
 		)
-			continue; // folded into the record above; leaving it would orphan it
+			continue;
 		out.push(message);
 	}
 	return out;
@@ -1511,29 +1334,17 @@ const CODEX_MODEL_DEFS: Record<string, Record<string, unknown>> = {
 		maxTokens: 128000,
 	},
 };
-// Deliberately NOT listing the 5.6 family (gpt-5.6-sol / -terra / -luna) or anything newer here.
-// Those come from the host model registry and the live per-account catalog, which carry their real
-// costs, context windows and reasoning levels — and `compareCodexModelStrength` already ranks an
-// unknown generation correctly by version and variant. Hard-coding guessed ids would risk offering
-// a model a given plan cannot serve, and re-introduce the release-per-generation treadmill.
 
-// Offline last resort ONLY — newest first. Both the live per-account catalog and the host
-// model registry outrank this list (see refreshRegistryCodexModels), which is what makes a
-// new generation such as gpt-5.6 win with no release here. Deliberately conservative: it must
-// never *invent* a model the host has never heard of and OpenAI may not serve for this plan.
 const DEFAULT_CODEX_MODELS = [
 	"gpt-5.5",
 	"gpt-5.4",
 	"gpt-5.4-mini",
 	"gpt-5.3-codex-spark",
 ];
-// Newest first. Offline fallback ordering: the host model registry is consulted too (see
-// refreshRegistryAnthropicModels), so a newer flagship wins even before it is listed here.
 const DEFAULT_ANTHROPIC_MODELS = [
 	"claude-opus-5",
 	"claude-opus-4-8",
 	"claude-opus-4-5",
-	// claude-sonnet-4-6 contributed by @RuslanAsadov (PR #1).
 	"claude-sonnet-4-6",
 	"claude-sonnet-4-5",
 	"claude-haiku-4-5",
@@ -1604,7 +1415,7 @@ function ensureDefaultConfig() {
 		writeFileSync(CONFIG_PATH, `${JSON.stringify(DEFAULT_CONFIG, null, "\t")}\n`,
 			{ encoding: "utf8", mode: 0o600, flag: "wx" });
 	} catch (error: any) {
-		if (error?.code !== "EEXIST") throw error; // Another root initialized it first.
+		if (error?.code !== "EEXIST") throw error;
 	}
 }
 
@@ -1614,11 +1425,6 @@ function positiveOr(value: unknown, fallback: number) {
 		: fallback;
 }
 
-/**
- * Resolve the context-guard settings. `true`/absent takes the defaults, `false` turns the guard
- * off, an object overrides individual thresholds. Every number is sanity-checked here rather than
- * trusted, because a mistyped percentage would either trim on every request or never at all.
- */
 function normalizeContextGuard(value: unknown): ContextGuardSettings {
 	const defaults = DEFAULT_CONTEXT_GUARD_SETTINGS;
 	if (value === false) return { ...defaults, enabled: false };
@@ -1643,7 +1449,6 @@ function normalizeContextGuard(value: unknown): ContextGuardSettings {
 				? raw.maxWindowTokens
 				: defaults.maxWindowTokens,
 	};
-	// Trimming down to a point at or above where trimming starts would loop; keep them ordered.
 	if (settings.targetPercent >= settings.softPercent) {
 		settings.targetPercent = Math.max(0.1, settings.softPercent - 0.15);
 	}
@@ -1658,18 +1463,6 @@ function stringArray(value: unknown): string[] {
 		.filter((item) => item.length > 0);
 }
 
-/**
- * The error vocabulary is a dictionary that GROWS with each release, so a user's list is merged
- * with the built-in one rather than replacing it.
- *
- * `/multi-account` writes the full config to disk, defaults included, so nearly every installed
- * config contains a frozen snapshot of the vocabulary that shipped the day it was written. Under
- * replace-semantics that snapshot permanently pinned the classifier: a newly recognised refusal —
- * say a provider that starts answering "payment required" — was understood on a fresh install and
- * invisible on every machine that had ever run the command. That is exactly backwards, because
- * the machines with a config are the ones in use. Anything the user adds still takes effect; they
- * simply cannot silently miss a term added later.
- */
 function patternsWithDefaults(value: unknown, defaults: string[]): string[] {
 	const merged = [...defaults];
 	for (const pattern of stringArray(value)) {
@@ -1680,13 +1473,6 @@ function patternsWithDefaults(value: unknown, defaults: string[]): string[] {
 }
 
 function normalizeConfig(raw: ProviderFailoverConfig): RuntimeConfig {
-	// A saved `providerOrder` states a PREFERENCE about sequence, never a whitelist of which
-	// families may exist. `/multi-account` writes the whole config out, so every installed config
-	// froze the family list as it stood the day it was written — and a family promoted to managed
-	// later then fell through both doors at once: too new for the saved order, no longer eligible
-	// as an "other" provider because it is managed now. The account simply disappeared from the
-	// ring, with `rediscover` unable to help because discovery was working exactly as written.
-	// Families the user never ranked are appended in their default order, after the ones they did.
 	const configured =
 		Array.isArray(raw.providerOrder) && raw.providerOrder.length > 0
 			? raw.providerOrder
@@ -1723,8 +1509,6 @@ function normalizeConfig(raw: ProviderFailoverConfig): RuntimeConfig {
 				f === "qwen" ||
 				f === "ollama",
 		),
-		// An explicitly empty list means "no stated preference" and is honoured as such; only an
-		// absent key falls back to the shipped ladder.
 		providerPriority: Array.isArray(raw.providerPriority)
 			? normalizePriority(raw.providerPriority)
 			: [...DEFAULT_PROVIDER_PRIORITY],
@@ -1794,8 +1578,6 @@ function normalizeConfig(raw: ProviderFailoverConfig): RuntimeConfig {
 		autoRecoverStuck: raw.autoRecoverStuck ?? true,
 		debugLog: raw.debugLog ?? true,
 		preferLatestModel: raw.preferLatestModel ?? true,
-		// Anything unset/invalid means "auto": follow the session's own level. Forcing a level
-		// here would clobber per-agent `--thinking` on every turn (issue #6).
 		reasoningLevel:
 			raw.reasoningLevel === "off" ||
 			raw.reasoningLevel === "minimal" ||
@@ -1855,9 +1637,6 @@ function loadState(): ProviderFailoverState {
 				saveState(migrated);
 				return migrated;
 			}
-			// v3 could turn one physical 401 into three failures (response/message/agent hooks)
-			// and then persist a one-year invalidation. Keep only plausible quota cooldowns;
-			// discard invalidations and pending work produced by that broken state machine.
 			const now = Date.now();
 			const plausibleCooldowns = Object.fromEntries(
 				Object.entries(state.exhaustedUntilByProvider ?? {}).filter(
@@ -1874,7 +1653,6 @@ function loadState(): ProviderFailoverState {
 				lastProbeAtByProvider: state.lastProbeAtByProvider ?? {},
 				invalidatedByProvider: {},
 				lastSwitches: state.lastSwitches ?? [],
-				// A version bump must not forget which model the user was actually on.
 				lastUserModel: state.lastUserModel,
 				lastUserThinkingLevel: state.lastUserThinkingLevel,
 				lastModelByFamily: state.lastModelByFamily,
@@ -1888,8 +1666,6 @@ function loadState(): ProviderFailoverState {
 	}
 }
 
-// A command applied a setting in memory but could not write config.json: say so, or the
-// user believes a preference was saved that will be gone next session.
 function warnConfigNotSaved(ctx: any, error: any) {
 	const code = error?.code ?? String(error?.message ?? error);
 	logEvent("config_write_failed", { code });
@@ -1900,27 +1676,18 @@ function warnConfigNotSaved(ctx: any, error: any) {
 }
 
 function saveState(state: ProviderFailoverState) {
-	// Best-effort: a locked/read-only/full disk must never crash the host. Losing a
-	// state write only costs a cooldown estimate that is re-derived on the next error.
 	try {
 		mutateStateFile(STATE_PATH, () => ({ stateVersion: STATE_VERSION, ...state }));
 	} catch (error: any) {
-		// Persistence is non-critical (in-memory state remains correct), but a lost write
-		// must leave a trace, or a stale state file is undiagnosable.
 		logEvent("state_write_failed", { code: error?.code ?? String(error?.message ?? error) });
 	}
 }
 
 
-// Set from the extension closure once config is known. Module-level so the writer
-// (a plain function) can be called from anywhere without threading config through.
 let debugLogEnabled = false;
 const DEBUG_TOKENISH =
 	/(sk-[\w-]{8,}|ey[A-Za-z0-9._-]{12,}|Bearer\s+\S+|[A-Za-z0-9_-]{40,})/g;
 
-// Redact anything that smells like a token/JWT/api key so the log is always safe to
-// share. We never deliberately log credentials, but error strings from providers can
-// occasionally embed one; this is the belt-and-braces guarantee.
 function redactForLog(text: string): string {
 	return text.replace(DEBUG_TOKENISH, "«redacted»");
 }
@@ -1929,16 +1696,12 @@ function rotateDebugLogIfNeeded() {
 	try {
 		const size = statSync(DEBUG_LOG_PATH).size;
 		if (size >= DEBUG_LOG_MAX_BYTES) {
-			renameSync(DEBUG_LOG_PATH, `${DEBUG_LOG_PATH}.1`); // keep exactly one previous file
+			renameSync(DEBUG_LOG_PATH, `${DEBUG_LOG_PATH}.1`);
 		}
 	} catch {
-		/* no file yet, or rotation failed — non-fatal */
 	}
 }
 
-// Append one structured event. Best-effort and utterly silent on failure: logging must
-// NEVER affect failover behaviour or crash the host. `data` should already be free of
-// secrets; string fields are still redacted defensively.
 function logEvent(kind: string, data: Record<string, unknown> = {}) {
 	if (!debugLogEnabled) return;
 	try {
@@ -1951,7 +1714,6 @@ function logEvent(kind: string, data: Record<string, unknown> = {}) {
 		mkdirSync(dirname(DEBUG_LOG_PATH), { recursive: true, mode: 0o700 });
 		appendFileSync(DEBUG_LOG_PATH, line, { encoding: "utf8", mode: 0o600 });
 	} catch {
-		/* diagnostics are best-effort; never throw */
 	}
 }
 
@@ -2006,10 +1768,6 @@ export function writeProxyOAuthSidecar(data: Record<string, AuthEntry>): void {
 	replaceFileSync(tmp, PROXY_OAUTH_PATH);
 }
 
-/**
- * Parent-facing credentials. While the child proxy is up, numbered OAuth slots are stored as
- * a placeholder in auth.json so a bare child can authenticate; the real blob lives in the sidecar.
- */
 function readAuthFile(): Record<string, AuthEntry> {
 	return mergeParentAuth(readAuthFileRaw(), readProxyOAuthSidecar()) as Record<
 		string,
@@ -2017,7 +1775,6 @@ function readAuthFile(): Record<string, AuthEntry> {
 	>;
 }
 
-/** Atomic replace of auth.json, so a crash mid-write can never truncate credentials. */
 function writeAuthFile(data: Record<string, AuthEntry>): void {
 	const tmp = `${AUTH_PATH}.multi-account.tmp`;
 	writeFileSync(tmp, `${JSON.stringify(data, null, "\t")}\n`, {
@@ -2036,20 +1793,12 @@ function authFileIsWritable(): boolean {
 	}
 }
 
-/**
- * Can a refreshed credential be written back AT ALL?
- *
- * This must be answered BEFORE the network refresh, never after. Anthropic rotates the
- * refresh token on every refresh call and revokes the old one immediately, so a refresh
- * we cannot persist does not "fail" — it DESTROYS the account's credential and throws the
- * replacement away. That is exactly what happened on pi 0.84.x, whose `AuthStorage` dropped
- * the `set()` method this extension used to persist with: the post-refresh guard tripped
- * every time, and the user lost their Claude login roughly once a day.
- */
+/** Whether a refreshed credential can be persisted. */
 export function canPersistRefreshedCredentials(
 	authStorage: any,
 	authWritable: () => boolean = authFileIsWritable,
 ): boolean {
+	// external: Anthropic invalidates the previous refresh token immediately on refresh.
 	return (
 		typeof authStorage?.modify === "function" ||
 		typeof authStorage?.set === "function" ||
@@ -2057,14 +1806,7 @@ export function canPersistRefreshedCredentials(
 	);
 }
 
-/**
- * Write a refreshed OAuth credential back, through whichever path this host actually offers.
- *
- * `modify` is the locked, supported API in current pi and is tried first. `set` covers older
- * hosts (and the test harness). The direct auth.json write is the last resort that exists
- * only so a token we already rotated is never dropped on the floor — losing it means a
- * forced re-login, which is the failure this whole function exists to prevent.
- */
+/** Persist a refreshed OAuth credential using an available storage path. */
 export async function persistRefreshedCredentials(
 	authStorage: any,
 	provider: string,
@@ -2074,7 +1816,6 @@ export async function persistRefreshedCredentials(
 		write?: (data: Record<string, any>) => void;
 	},
 ): Promise<boolean> {
-	// Even legacy/set-only hosts must never unhide a numbered slot while saving a refresh.
 	if (!io && isChildFacingPlaceholderForSlot(readAuthFileRaw()[provider], provider)) {
 		try {
 			let persisted = false;
@@ -2093,7 +1834,6 @@ export async function persistRefreshedCredentials(
 			await authStorage.modify(provider, () => credential);
 			return true;
 		} catch {
-			// Locked or read-only storage — fall through to the remaining paths.
 		}
 	}
 	if (typeof authStorage?.set === "function") {
@@ -2101,12 +1841,9 @@ export async function persistRefreshedCredentials(
 			await authStorage.set(provider, credential);
 			return true;
 		} catch {
-			// Same.
 		}
 	}
 	try {
-		// Child-facing auth.json, not the parent merge: spreading the merged view would dump
-		// sidecar OAuth onto every numbered slot a child still has to see as a placeholder.
 		if (io) {
 			const read = io.read ?? readAuthFileRaw;
 			const write = io.write ?? writeAuthFile;
@@ -2121,13 +1858,7 @@ export async function persistRefreshedCredentials(
 	}
 }
 
-/**
- * Remove one credential through Pi's locked AuthStorage surface.
- *
- * Credential deletion is different from the last-resort refresh write above: a whole-file
- * fallback would race a concurrent Pi login/refresh and can erase an unrelated credential. If a
- * host does not expose the supported deletion method, fail closed and leave auth.json intact.
- */
+/** Remove a credential through Pi's locked AuthStorage surface. */
 export async function removeCredentialFromAuthStorage(
 	authStorage: any,
 	provider: string,
@@ -2137,11 +1868,9 @@ export async function removeCredentialFromAuthStorage(
 			await authStorage.delete(provider);
 			return true;
 		} catch {
-			// An older or read-only host may expose delete but reject it. Fail closed below.
 		}
 	}
-	// AuthStorage.modify treats undefined as "no change", so it cannot safely implement deletion.
-	// Never fall back to a whole-file write: that can erase an unrelated concurrent login/refresh.
+	// external: AuthStorage.modify treats undefined as no change, not deletion.
 	return false;
 }
 
@@ -2172,10 +1901,7 @@ function jwtExpMs(token: string): number | undefined {
 		: undefined;
 }
 
-/**
- * When an OAuth access token expires. Anthropic's `sk-ant-oat…` tokens are opaque, so the JWT
- * `exp` is absent and the stored `expires` (seconds or milliseconds) is the only signal.
- */
+// external: Anthropic access tokens are opaque and do not expose a JWT expiry.
 function oauthExpiryMs(entry: AuthEntry): number | undefined {
 	const fromJwt = typeof entry.access === "string" ? jwtExpMs(entry.access) : undefined;
 	if (fromJwt !== undefined) return fromJwt;
@@ -2211,22 +1937,16 @@ function hash12(input: string) {
 	return createHash("sha256").update(input).digest("hex").slice(0, 12);
 }
 
-/** A stable fingerprint of the current credential, used to detect re-login. */
 function credentialHash(entry: AuthEntry): string | undefined {
 	const secret = entry.access ?? entry.key;
 	return secret ? hash12(secret) : undefined;
 }
 
-/** Stable identity of one user's membership in one selected ChatGPT workspace. */
 function codexWorkspaceMembershipIdentity(entry: AuthEntry): string | undefined {
 	if (!entry.access) return undefined;
-	// Current live access tokens expose this account-scoped membership claim. Prefer it because a
-	// single ChatGPT user may belong to several workspaces with separate quota and entitlements.
 	const accountUserId = getCodexAccountUserIdFromAccessToken(entry.access);
 	if (accountUserId) return `codex-membership:${hash12(accountUserId)}`;
-	// OpenAI Codex documents chatgpt_user_id and chatgpt_account_id. Older tokens that omit the
-	// account-scoped claim remain distinguishable by the composite, without collapsing two users
-	// in one workspace or two workspaces belonging to one user.
+	// external: Codex documents chatgpt_user_id and chatgpt_account_id as membership claims.
 	const userId = getCodexUserIdFromAccessToken(entry.access);
 	const workspaceId =
 		getCodexAccountIdFromAccessToken(entry.access) ??
@@ -2239,17 +1959,6 @@ function codexWorkspaceMembershipIdentity(entry: AuthEntry): string | undefined 
 	return undefined;
 }
 
-/**
- * Identity of the REAL underlying account, used to detect the same account logged into multiple
- * slots. Deterministic where the data allows it:
- *   - `chatgpt_account_user_id` embedded in a Codex JWT → user membership within a workspace.
- *   - else documented `chatgpt_user_id` + workspace id → the same membership identity.
- *   - else `accountId` stored in auth.json / embedded in the JWT (legacy Codex fallback).
- *   - else a hash of the API key (same key = same account).
- *   - else a hash of the opaque access token. Opaque OAuth tokens (Anthropic) change on every login,
- *     so this only catches the literal same-token case. Two separate logins of the same Anthropic
- *     account are not deterministically identifiable from auth.json alone.
- */
 function accountIdentity(entry: AuthEntry): string | undefined {
 	const codexMembership = codexWorkspaceMembershipIdentity(entry);
 	if (codexMembership) return codexMembership;
@@ -2266,14 +1975,6 @@ function accountIdentity(entry: AuthEntry): string | undefined {
 	return undefined;
 }
 
-/**
- * A fingerprint that SURVIVES routine OAuth access-token refreshes and changes only when the
- * slot is genuinely re-logged into a DIFFERENT real account. Used to decide whether a recorded
- * cooldown still applies after auth.json changes. Unlike {@link accountIdentity}, it never falls
- * back to the volatile access token: when auth.json carries no stable signal (opaque OAuth tokens,
- * e.g. Anthropic) it returns undefined, so we keep the cooldown. A server-side rate limit is not
- * lifted by rotating a token anyway, so erring toward "keep the cooldown" is correct.
- */
 function stableAccountFingerprint(entry: AuthEntry): string | undefined {
 	const codexMembership = codexWorkspaceMembershipIdentity(entry);
 	if (codexMembership) return codexMembership;
@@ -2305,14 +2006,12 @@ function rejectDuplicateLogin<T extends AuthEntry>(
 	return credentials;
 }
 
-/** True when the credential is present and not provably dead. */
 function isEntryUsable(entry: AuthEntry | undefined): boolean {
 	if (!entry) return false;
 	if (entry.type === "api_key" || entry.key)
 		return typeof entry.key === "string" && entry.key.length > 0;
 	if (typeof entry.access !== "string" || entry.access.length === 0)
 		return false;
-	// Expired access token with no refresh token → unrecoverable.
 	const expMs = oauthExpiryMs(entry);
 	if (
 		expMs !== undefined &&
@@ -2420,7 +2119,7 @@ function escapeRegex(s: string): string {
 
 function slotIndex(id: string): number {
 	const m = id.match(/-account-(\d+)$/);
-	return m ? Number(m[1]) : 1; // base provider counts as slot 1
+	return m ? Number(m[1]) : 1;
 }
 
 function slotId(
@@ -2461,7 +2160,6 @@ function parseTarget(
 	return { provider, modelId };
 }
 
-/** Effort suffixes some catalogs bake into the model id. Thinking is a session setting. */
 const MODEL_IDENTITY_EFFORTS = new Set([
 	"none",
 	"low",
@@ -2530,8 +2228,6 @@ export function modelQualityBand(modelId: string | undefined, provider?: string)
 		if (exceptional === "fable" && (baseProvider === "anthropic" || baseProvider === "openrouter")) return "apex";
 		return undefined;
 	}
-	// Do not use modelIdentityKey here: a trailing `-max` is an effort suffix for some Cursor
-	// aliases, but it is the actual product tier in `qwen-max`.
 	const id = modelId.trim().toLowerCase().replace(/^cursor-/, "");
 	if (/(^|[-/:])(luna|haiku|mini|spark|flash|nano|lite)([-/:]|$)/i.test(id))
 		return "fast";
@@ -2549,7 +2245,6 @@ export function modelQualityBand(modelId: string | undefined, provider?: string)
 	return undefined;
 }
 
-/** Family when we know one; otherwise the un-numbered provider id (`zai` from `zai-account-2`). */
 function accountGroup(id: string, qwenProvider: string): string {
 	return classifyProvider(id, qwenProvider) ?? id.replace(/-account-\d+$/, "");
 }
@@ -2574,9 +2269,6 @@ function anthropicModelDef(id: string, providerId: string) {
 	if (canonical) return { ...canonical, provider: providerId };
 	const fable = FABLE_MODEL_DEFS[id];
 	if (fable) {
-		// This definition is used only after the host catalog has named the model. It supplies exact
-		// metadata to numbered aliases when this package's older pi-ai peer predates Fable; it never
-		// invents availability or adds Fable to the offline model list.
 		return {
 			id,
 			api: "anthropic-messages",
@@ -2638,30 +2330,13 @@ export function mergeRefreshedCredentials(credentials: any, refreshed: any) {
 	};
 }
 
-/**
- * Refresh an OAuth credential, and survive losing a race for it.
- *
- * Anthropic rotates the refresh token on every use and kills the old one the moment the new one
- * is issued. So any second holder of that credential — another Pi window, a background usage
- * probe that read the file a second earlier, a `/login` in a neighbouring session — presents a
- * token that was valid when it was read and is already dead when it arrives. The server answers
- * `invalid_grant`, which reads identically to a genuinely revoked account, and the slot was
- * dropped from the rotation with a demand to re-login that fixed nothing: the working token had
- * been on disk the whole time, written by whoever won the race.
- *
- * So on a provider verdict that the refresh token was already spent (`invalid_grant` or Codex's
- * `refresh_token_reused`) we re-read what is stored now and try once more. If disk holds the same
- * token that just failed there is nothing new to send, and the account really needs a new login.
- * Any other error (a timeout or 5xx) is not a statement about the token and is never retried, since
- * burning the disk token on a network blip would turn an outage into a lost account.
- *
- * Exported for tests: this is the one piece of logic that decides whether an account survives.
- */
+/** Retry a rejected refresh once with the latest stored token. */
 export async function refreshWithDiskRetry(opts: {
 	credentials: any;
 	refresh: (credentials: any) => Promise<any>;
 	storedRefresh: () => string | undefined;
 }): Promise<any> {
+	// external: Anthropic refresh tokens are invalidated on use.
 	try {
 		return await opts.refresh(opts.credentials);
 	} catch (error) {
@@ -2682,14 +2357,7 @@ function oauthCredentialChanged(before: any, after: any): boolean {
 	);
 }
 
-/**
- * Serialize a refresh through Pi's cross-process AuthStorage lock.
- *
- * The authoritative credential is read only after the lock is held. A waiter that observes a
- * credential written by the winner adopts it instead of spending the same one-use refresh token.
- * Shadowed slots persist into the parent-only sidecar while leaving the child-facing placeholder
- * untouched; both files are protected by the same auth.json lock.
- */
+/** Refresh and persist an OAuth credential under the storage lock. */
 export async function refreshAndPersistWithStorageLock(opts: {
 	provider: string;
 	credentials: any;
@@ -2747,7 +2415,6 @@ export async function refreshAndPersistWithStorageLock(opts: {
 	return resolved;
 }
 
-/** The refresh token currently stored on disk for a slot — whoever wrote it last wins. */
 function storedRefreshToken(providerId: string): string | undefined {
 	const stored = readAuthFile()[providerId] as any;
 	return typeof stored?.refresh === "string" && stored.refresh.trim()
@@ -2755,7 +2422,6 @@ function storedRefreshToken(providerId: string): string | undefined {
 		: undefined;
 }
 
-/** Single source of truth for Anthropic OAuth refresh — used by BOTH the base provider and aliases. */
 function oauthRefreshSignal(signal?: AbortSignal): AbortSignal {
 	return signal instanceof AbortSignal ? signal : AbortSignal.timeout(30_000);
 }
@@ -2767,7 +2433,6 @@ async function refreshAnthropicCredentials(
 ) {
 	const attempt = (creds: any) =>
 		requirePiAiOauth().anthropic.refresh(creds, oauthRefreshSignal(signal));
-	// Without a slot id there is nothing on disk to consult, so this degrades to a plain refresh.
 	if (!providerId)
 		return mergeRefreshedCredentials(credentials, await attempt(credentials));
 	const refreshed = await refreshWithDiskRetry({
@@ -2778,7 +2443,6 @@ async function refreshAnthropicCredentials(
 	return mergeRefreshedCredentials(credentials, refreshed);
 }
 
-/** Bind the refresher to the slot it belongs to, so a lost race can be recovered from disk. */
 function anthropicRefresherFor(providerId: string) {
 	return (credentials: any, signal?: AbortSignal) =>
 		refreshAnthropicCredentials(credentials, signal, providerId);
@@ -2790,7 +2454,7 @@ function registerAnthropicSlot(
 	modelIds: string[] = DEFAULT_ANTHROPIC_MODELS,
 	baseUrl = "https://api.anthropic.com",
 ) {
-	if (id === ANTHROPIC_BASE) return; // base provider: oauth + shaping registered in piMultiAccount()
+	if (id === ANTHROPIC_BASE) return;
 	registerAnthropicLoginMethods(pi, id, modelIds, baseUrl);
 }
 
@@ -2798,10 +2462,7 @@ function codexOAuthOverride(providerId: string, name: string) {
 	const getProvider = () => requirePiAiOauth().codex;
 	return {
 		name,
-		// Read-only flag: Pi reads it while merely LISTING providers, long before any
-		// login. It must never throw — an unresolvable pi-ai here is what used to blow
-		// up the whole extension load. `true` mirrors pi-ai's own Codex provider, and an
-		// actual login attempt still fails loudly with an actionable message.
+		// external: Pi reads this flag while listing providers, before login.
 		get usesCallbackServer() {
 			return tryLoadPiAiOauth()?.codex.usesCallbackServer ?? true;
 		},
@@ -2828,7 +2489,7 @@ function registerCodexSlot(
 	models: Array<Record<string, unknown>> = DEFAULT_CODEX_MODELS.map(codexModelDef),
 	baseUrl: string,
 ) {
-	if (id === CODEX_BASE) return; // base provider is native until live catalog sync enriches it
+	if (id === CODEX_BASE) return;
 	pi.registerProvider(id, {
 		name: `ChatGPT Plus/Pro (Codex ${id})`,
 		baseUrl,
@@ -2839,7 +2500,6 @@ function registerCodexSlot(
 	});
 }
 
-/** Replace one Codex provider's model list while preserving its OAuth behavior. */
 function registerCodexCatalog(
 	pi: ExtensionAPI,
 	id: string,
@@ -2853,7 +2513,7 @@ function registerCodexCatalog(
 	pi.registerProvider(id, {
 		name,
 		baseUrl,
-		// Pi replaces provider registrations; catalog refresh must retain proxy auth.
+		// external: Pi replaces provider registrations during catalog refresh.
 		...(baseUrl.startsWith("http://127.0.0.1:") ? { apiKey: placeholderKeyFor("codex") } : {}),
 		api: "openai-codex-responses" as any,
 		oauth: codexOAuthOverride(id, name),
@@ -2861,12 +2521,10 @@ function registerCodexCatalog(
 	});
 }
 
-// ----- Kimi For Coding (subscription, device-flow OAuth) ---------------------
 
 const KIMI_BASE = "kimi-coding";
 const KIMI_BASE_URL = "https://api.kimi.com/coding";
-// Mirrors pi-ai's bundled kimi-coding catalog; piAiGetModel() enriches each entry
-// with canonical metadata when the installed pi-ai is new enough to have it.
+// external: Pi ships a bundled kimi-coding catalog.
 const DEFAULT_KIMI_MODELS = [
 	"k3",
 	"k3-256k",
@@ -2892,9 +2550,7 @@ function kimiModelDef(id: string, providerId: string) {
 }
 
 function kimiOAuthOverride(providerId: string, name: string) {
-	// kimi exists only in pi-ai's provider-factories era, so the bridge field is
-	// optional — resolve it lazily and fail loudly only on a real login attempt,
-	// never while Pi is merely listing providers.
+	// external: Kimi OAuth requires the pi-ai provider-factories API.
 	const getProvider = () => {
 		const kimi = requirePiAiOauth().kimi;
 		if (!kimi) {
@@ -2924,7 +2580,7 @@ function registerKimiSlot(
 	id: string,
 	modelIds: string[] = DEFAULT_KIMI_MODELS,
 ) {
-	if (id === KIMI_BASE) return; // base provider is native to Pi (pi-ai ships it)
+	if (id === KIMI_BASE) return;
 	pi.registerProvider(id, {
 		name: `Kimi For Coding (${id})`,
 		baseUrl: KIMI_BASE_URL,
@@ -2934,8 +2590,6 @@ function registerKimiSlot(
 	});
 }
 
-// Base URLs and model lists for API-key provider families that support multiple
-// accounts (each account = a separate API key in a numbered slot).
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1";
 
@@ -2963,11 +2617,7 @@ function ollamaModelDef(id: string, providerId: string) {
 	return { ...def, provider: providerId, baseUrl: OLLAMA_CLOUD_BASE_URL };
 }
 
-// Alibaba Model Studio (Qwen), OpenAI-compatible International endpoint. The old default pointed at
-// a `token-plan.*.maas.aliyuncs.com` promo endpoint that ACCEPTS the key on /models but returns
-// 401 invalid_api_key on /chat/completions once the token plan lapses — so a perfectly valid Qwen
-// key looked "invalid" and the account was wrongly dropped from rotation. Verified with a live
-// request: the same key 200s on dashscope-intl for completions.
+// external: Alibaba Model Studio uses a separate OpenAI-compatible international endpoint.
 const QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 const QWEN_MODEL_DEFS: Record<string, Record<string, unknown>> = {
 	"qwen3.8-max": {
@@ -3018,28 +2668,6 @@ function qwenModelDef(id: string, providerId: string) {
 	return { ...def, provider: providerId };
 }
 
-/**
- * Register an API-key provider slot (ollama-account-2, alibaba-account-3, ...).
- * Unlike OAuth slots, these never log in interactively — the user adds them by
- * placing a key in auth.json (type "api_key", key "sk-..."). Discovery then
- * picks the slot up exactly like a Codex/Anthropic alias.
- *
- * Pi requires every provider that defines models to also supply credentials —
- * either `oauth` or `apiKey`. For API-key slots we read the key from auth.json
- * at registration time and pass it straight through. If the key is missing
- * (slot added via `/multi-account add` but not yet filled), we skip model
- * registration so the slot stays dormant until the user adds a real key.
- */
-/**
- * Model tags the HOST already knows for a provider, newest-first as Pi lists them.
- *
- * Anthropic and Codex were taught to learn their model lists from the host registry so a newly
- * released generation works with no release of this extension. Ollama and Qwen never were: their
- * slots carried a hardcoded array, so a user running six Ollama cloud tags could reach exactly the
- * one written down here. This closes that gap without inventing a strength ranking for arbitrary
- * tags — the built-in list still leads, so the known flagship stays the account's representative
- * and nothing is silently downgraded.
- */
 function hostModelIdsFor(ctx: any, baseProvider: string): string[] {
 	try {
 		const all = ctx?.modelRegistry?.getAll?.() ?? [];
@@ -3058,13 +2686,9 @@ function registerApiKeySlot(
 	qwenBase: string = DEFAULT_QWEN_PROVIDER,
 	ctx?: any,
 ) {
-	// The qwen arm read OLLAMA_BASE too, so the "this IS the base provider" guard could never
-	// fire for a qwen slot. Harmless while the value was only compared against; it decides which
-	// provider's host models are inherited now, so it has to be the real base.
 	const baseId = family === "ollama" ? OLLAMA_BASE : qwenBase;
 	if (id === baseId) return;
-	// Read the key from auth.json. No key → no models → Pi won't complain and
-	// the slot simply won't be selectable until the user fills it in.
+	// external: Pi cannot expose models for an API-key slot without a credential.
 	const entry = readAuthFile()[id];
 	const key =
 		entry && typeof entry.key === "string" && entry.key.length > 0
@@ -3074,9 +2698,6 @@ function registerApiKeySlot(
 	const baseUrl = family === "ollama" ? OLLAMA_CLOUD_BASE_URL : QWEN_BASE_URL;
 	const preferred =
 		family === "ollama" ? DEFAULT_OLLAMA_MODELS : DEFAULT_QWEN_MODELS;
-	// Built-in tags first (the flagship this extension knows), then everything the host has for
-	// the base provider — so a tag the user configured, or one the provider shipped after this
-	// release, is selectable instead of invisible.
 	const ids = [...preferred];
 	for (const hostId of hostModelIdsFor(ctx, baseId)) {
 		if (!ids.includes(hostId)) ids.push(hostId);
@@ -3089,7 +2710,6 @@ function registerApiKeySlot(
 		baseUrl,
 		api: "openai-completions" as any,
 		apiKey: key,
-		// No oauth block → no interactive login, no refresh path.
 		...(family === "qwen" ? { streamSimple: qwenPayloadStream } : {}),
 		models: models as any,
 	});
@@ -3186,13 +2806,7 @@ const RETRY_UNIT_MS: Record<string, number> = {
 	days: 86_400_000,
 };
 
-/**
- * Some providers state the recovery horizon in prose rather than in a header or JSON field —
- * Codex free-plan refusals read "You have hit your ChatGPT usage limit (free plan). Try again in
- * ~41615 min." Ignoring it threw away the single most direct statement the provider makes about
- * when the account comes back, leaving only a quota percentage that does not see that limit.
- * Still only a forecast, so callers cap it like any other.
- */
+// external: Some providers state the recovery horizon in response prose.
 function retryPhraseMs(errorText: string): number | undefined {
 	const match = errorText.match(RETRY_PHRASE);
 	if (!match) return undefined;
@@ -3234,8 +2848,6 @@ function cooldownFromErrorText(errorText: string) {
 			errorText.match(/"X-Codex-Secondary-Reset-At"\s*:\s*"?(\d+)/i)?.[1],
 		),
 	]);
-	// Structured fields always win; the prose horizon is the last resort, used only when the
-	// provider gave us nothing machine-readable.
 	const stated = retryPhraseMs(errorText);
 	if ((secondaryUsed ?? 0) >= 100)
 		return secondaryReset ?? primaryReset ?? stated;
@@ -3243,25 +2855,14 @@ function cooldownFromErrorText(errorText: string) {
 	return primaryReset ?? secondaryReset ?? stated;
 }
 
-/**
- * How long (ms) until the account behind this usage snapshot is actually usable again?
- *  - `0`         → no window is maxed out: the account is available right now.
- *  - `> 0`       → soonest reset among the maxed-out (>=100%) windows still in the future.
- *  - `undefined` → the snapshot carries no window data; the caller keeps its own estimate.
- *
- * This is the ground truth used to RECONCILE recorded cooldowns during a wait, so a session
- * resumes the moment an account truly recovers — not when a stale estimate happens to expire.
- */
 function cooldownMsFromUsage(
 	snapshot: UsageSnapshot,
 	now = Date.now(),
 ): number | undefined {
-	// Codex/Claude short windows can still have headroom while a longer rolling window is maxed.
-	// Treat the account as available when the primary window is not exhausted.
+	// external: A longer Codex or Claude rolling window can be exhausted while the short window has headroom.
 	if (snapshot.primary && snapshot.primary.usedPercent < 100) return 0;
 
-	// Cursor's extra Grok Bot bucket is deliberately absent: a maxed extra pool does not make
-	// the account unusable, because the models/other pools can still serve work.
+	// external: Cursor extra Grok Bot quota is separate from the main subscription pool.
 	const windows = [snapshot.primary, snapshot.secondary].filter(
 		(w): w is UsageWindow => !!w,
 	);
@@ -3283,7 +2884,6 @@ function formatUntil(timestamp: number) {
 	return rest ? `${hours}h ${rest}m` : `${hours}h`;
 }
 
-/** Human-readable wait duration: "45s", "12m", "2h 20m" — never the misleading hours-only ceil. */
 function formatDelay(ms: number): string {
 	if (ms < 60_000) return `${Math.ceil(ms / 1000)}s`;
 	const totalMinutes = Math.ceil(ms / 60_000);
@@ -3293,7 +2893,6 @@ function formatDelay(ms: number): string {
 	return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
-/** stopReason of the most recent assistant message — "aborted" means the user pressed Esc. */
 function lastAssistantStopReason(messages: any[]): string | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		if (messages[i]?.role === "assistant")

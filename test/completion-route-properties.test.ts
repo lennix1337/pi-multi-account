@@ -53,9 +53,6 @@ function shuffle<T>(next: () => number, items: readonly T[]): T[] {
 	return out;
 }
 
-// ---------------------------------------------------------------------------
-// Account ranking: rankAutomaticRouteCandidates
-// ---------------------------------------------------------------------------
 
 function genRanking(seed: number): { scored: Candidate[]; options: Options } {
 	const next = rng(seed);
@@ -261,9 +258,6 @@ test("cooldown expiry over time: at every instant the served accounts are exactl
 	}
 });
 
-// ---------------------------------------------------------------------------
-// Failure classification: classifyRouteAttempt
-// ---------------------------------------------------------------------------
 
 const PATTERNS: RouteFailurePatterns = {
 	contextOverflow: ["context_length_exceeded"],
@@ -355,9 +349,6 @@ test("classification pins: a context overflow beats auth, ignored text beats aut
 	assert.equal(classifyRouteAttempt(error("boom"), PATTERNS), "unhandled");
 });
 
-// ---------------------------------------------------------------------------
-// Operation state machine: selectOperationRoute, driven to its end
-// ---------------------------------------------------------------------------
 
 const POOL: RouteModelRef[] = [
 	{ provider: "anthropic", id: "a" },

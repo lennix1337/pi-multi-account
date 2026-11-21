@@ -174,9 +174,6 @@ test("no credential at all is reported as such, not as an auth-flow problem", ()
   assert.match(verdict.reason, /No credential/i);
 });
 
-// ---------------------------------------------------------------------------
-// The warning that connects this to the symptom people actually hit
-// ---------------------------------------------------------------------------
 
 test("an unusable saved global default warns only about bare unpinned children", () => {
   const warning = defaultRouteWarning("openai-codex-account-4", () =>
@@ -201,9 +198,6 @@ test("no saved default, or an unknown one, is silence rather than a guess", () =
   assert.equal(defaultRouteWarning("mystery", () => undefined), undefined);
 });
 
-// ---------------------------------------------------------------------------
-// Reporting
-// ---------------------------------------------------------------------------
 
 test("the report puts unusable slots first and is otherwise stable", () => {
   const verdicts: ChildUsability[] = [

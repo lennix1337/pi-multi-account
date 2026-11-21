@@ -26,9 +26,6 @@ import {
   priorityRank,
 } from "../provider-priority.ts";
 
-// ---------------------------------------------------------------------------
-// Naming
-// ---------------------------------------------------------------------------
 
 test("every rotation slot of one account collapses to a single group", () => {
   // Preferring one numbered slot over its sibling is rotation's job, not the ladder's.
@@ -71,9 +68,6 @@ test("normalizePriority cleans a list without silently reordering it", () => {
   assert.deepEqual(normalizePriority(undefined), []);
 });
 
-// ---------------------------------------------------------------------------
-// Ranking
-// ---------------------------------------------------------------------------
 
 test("the shipped default is the managed families, per-token providers left off the end", () => {
   assert.deepEqual(DEFAULT_PROVIDER_PRIORITY, [...MANAGED_GROUPS]);
@@ -127,9 +121,6 @@ test("ranking reads slot names and nicknames, not just canonical ids", () => {
   assert.equal(priorityRank("openai-codex-account-7/gpt-5.6-terra", ladder), 1);
 });
 
-// ---------------------------------------------------------------------------
-// Telling the user what the ladder is
-// ---------------------------------------------------------------------------
 
 test("the description names the accounts that are not logged in", () => {
   // A typo in a provider name would otherwise look exactly like a ladder that worked.

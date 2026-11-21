@@ -1564,9 +1564,6 @@ test("Cursor background payloads use the host side-channel session identity", as
 	assert.deepEqual(t.rec.setModels, []);
 });
 
-// ---------------------------------------------------------------------------
-// Usage footer
-// ---------------------------------------------------------------------------
 
 test("startup and next can activate a ready Codex slot after catalog sync without rediscover", async () => {
 	const t = setup({
@@ -1950,9 +1947,6 @@ test(
 	},
 );
 
-// ---------------------------------------------------------------------------
-// One final error -> one decision
-// ---------------------------------------------------------------------------
 
 test("HTTP retry responses never switch early; one final 429 switches exactly once", async () => {
 	const t = setup({
@@ -2125,9 +2119,6 @@ test("the same final assistant error is handled only once", async () => {
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Cooldowns, ordering, and duplicate accounts
-// ---------------------------------------------------------------------------
 
 test("picks a fresh account and skips one that is still on cooldown", async () => {
 	const accounts: Account = {
@@ -2459,9 +2450,6 @@ test("re-login clears a persisted invalidation when the slot credential changes"
 	assert.ok(!state.exhaustedUntilByProvider?.[provider]);
 });
 
-// ---------------------------------------------------------------------------
-// Auth failures are counted per final assistant message
-// ---------------------------------------------------------------------------
 
 test("one final 401 is counted once, does not invalidate OAuth, and fails over", async () => {
 	const t = setup({
@@ -3113,9 +3101,6 @@ test("a user prompt arriving during an automatic turn is queued as a follow-up i
 	]);
 });
 
-// ---------------------------------------------------------------------------
-// User control and session-bound automatic resume
-// ---------------------------------------------------------------------------
 
 test("Esc abort stops the chain and clears pending resume", async () => {
 	const t = setup({
@@ -3436,9 +3421,6 @@ test("high reasoning is the baseline and is restored across every provider rotat
 	);
 });
 
-// ---------------------------------------------------------------------------
-// v1.14.2: the session owns the thinking level; the extension only preserves it
-// ---------------------------------------------------------------------------
 
 const THINKING_ACCOUNTS: Account = {
 	anthropic: {
@@ -3954,12 +3936,10 @@ test("a session limit the usage window can't see is not hot-retried every second
 	);
 });
 
-// ---------------------------------------------------------------------------
 // Bogus far-future cooldowns must never evict a live account for weeks (v1.13.7)
 // Regression: a maxed long/rolling limit window (or a mis-parsed reset) recorded a
 // weeks-away cooldown; the account was skipped forever because cooling-down accounts
 // are never re-probed. openai-codex-account-2 was locked until Aug 3 in the wild.
-// ---------------------------------------------------------------------------
 
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 
@@ -4012,9 +3992,6 @@ test("a 429 whose error body carries a weeks-away resets_at is capped at the cei
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Anthropic OAuth request shaping
-// ---------------------------------------------------------------------------
 
 test("OAuth-marked Anthropic payload gets one billing header", () => {
 	const t = setup({
@@ -4105,10 +4082,8 @@ test("non-OAuth Anthropic payload is unchanged", () => {
 	assert.deepEqual(t.beforeReq(payload), payload);
 });
 
-// ---------------------------------------------------------------------------
 // OAuth refresh merge — the base provider and aliases must share this logic so a
 // refreshed access token is never silently dropped (which 401s an account to death).
-// ---------------------------------------------------------------------------
 
 test("a refresh replaces the stale access token (not just the refresh token)", () => {
 	const merged = mergeRefreshedCredentials(
@@ -4137,7 +4112,6 @@ test("a refresh keeps the old refresh token when the provider mints no new one",
 	);
 });
 
-// ---------------------------------------------------------------------------
 // v1.9.0 regressions:
 //  - invalidated accounts no longer carry a 365-day cooldown entry
 //  - /multi-account revive restores an account to rotation
@@ -4145,7 +4119,6 @@ test("a refresh keeps the old refresh token when the provider mints no new one",
 //    killed for a year (only terminal auth patterns invalidate immediately)
 //  - Ollama/Alibaba alias slots (ollama-account-2, alibaba-account-2) are
 //    discovered and join the rotation just like OAuth alias slots.
-// ---------------------------------------------------------------------------
 
 test("invalidation no longer writes a 365-day cooldown entry", async () => {
 	const t = setup({
@@ -5843,9 +5816,6 @@ test("add cursor guides the user through subscription login, not API-key setup",
 	}
 });
 
-// ---------------------------------------------------------------------------
-// Cursor is optional: nothing about it may leak into a session that never asked
-// ---------------------------------------------------------------------------
 
 test(
 	"includeCursor default-on never registers a phantom cursor slot nor warns while the Cursor provider is not installed",
@@ -6451,9 +6421,6 @@ test("pending resume after auth failure does not rotate back to the same provide
 	);
 });
 
-// ---------------------------------------------------------------------------
-// v1.12.0 robustness: no spurious resume, account-aware compaction, watchdog
-// ---------------------------------------------------------------------------
 
 function okAssistant(provider: string, model: string) {
 	return {
@@ -7665,9 +7632,6 @@ test("the watchdog never aborts a resumed turn while a tool (build/test) is runn
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// v1.13.0 circuit breaker: repeated recovery failures drop to safe advisory mode
-// ---------------------------------------------------------------------------
 
 test("after repeated resume failures the breaker opens, pauses auto-continue and keeps a wake for later", async () => {
 	const accounts: Account = {
@@ -7725,9 +7689,6 @@ test("the breaker resets on a genuine new user prompt so auto-continue is restor
 	);
 });
 
-// ---------------------------------------------------------------------------
-// v1.12.0 crash isolation: no handler/timer fault can crash Pi or freeze a turn
-// ---------------------------------------------------------------------------
 
 function faultyAssistantMessage() {
 	return {
@@ -8280,9 +8241,6 @@ test("cursor-grok-4.6-high on one account matches folded grok on a sibling", asy
 	uninstallCursorProvider();
 });
 
-// ---------------------------------------------------------------------------
-// A new OpenAI generation must not require a release of this extension (issue #2)
-// ---------------------------------------------------------------------------
 
 test("a Codex generation only the HOST knows about (gpt-5.6) wins without a release: no silent fallback to gpt-5.5", async () => {
 	const accounts: Account = {
@@ -9179,9 +9137,6 @@ test(
 	},
 );
 
-// ---------------------------------------------------------------------------
-// v1.13.0 black box: every decision is recorded so real bugs become reproducible
-// ---------------------------------------------------------------------------
 
 test("a real failover writes a structured switch + assistant_error to the debug log", async () => {
 	rmSync(DEBUG_LOG, { force: true });
@@ -9339,14 +9294,12 @@ test("/multi-account models states explicitly when no account is in the rotation
 	assert.doesNotMatch(populated.rec.notifies.join("\n"), /no accounts in rotation/);
 });
 
-// ---------------------------------------------------------------------------
 // v1.13.6 regression tests:
 //  - API-key providers: repeated same-key 401s eventually invalidate (was an
 //    infinite 1-minute cooldown loop because same-hash failures never advanced
 //    toward the kill threshold).
 //  - Re-login (credential change) clears stale authFailures tracking for accounts
 //    on transient cooldown (not just invalidated ones).
-// ---------------------------------------------------------------------------
 
 test("api_key provider: repeated same-key 401s eventually invalidate (no infinite loop)", async () => {
 	const accounts = {
@@ -9460,9 +9413,6 @@ test("re-login with new credentials clears stale authFailures for transient-cool
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Interrupted-turn preservation across a real failover
-// ---------------------------------------------------------------------------
 
 test("the turn that triggered the failover survives into the account that takes over", async () => {
 	const t = setup({
@@ -9537,9 +9487,6 @@ test("preserveInterruptedContext: false restores the old drop-everything behavio
 	assert.equal(result, undefined, "opted out: the transcript must pass through untouched");
 });
 
-// ---------------------------------------------------------------------------
-// Auto-continue on hosts without pi.continueAgent (0.80.3+)
-// ---------------------------------------------------------------------------
 
 test("pending same-account resume shares its recovery lease with nested provider failures", async () => {
 	let markContinueStarted!: () => void;
@@ -9904,9 +9851,6 @@ fakeClockTest("a blocked continuation records why, instead of failing silently",
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Verify, don't predict: a provider's forecast never parks an account
-// ---------------------------------------------------------------------------
 
 fakeClockTest("a month-long quota forecast cannot park an account past the recheck ceiling", async () => {
 	// Providers reset quota windows early and unannounced, and resize the windows themselves, so
@@ -10115,9 +10059,6 @@ test("a startup model switch must not adopt the host's clamped level as the user
 });
 
 
-// ---------------------------------------------------------------------------
-// A refusal outranks the quota meter (issue: bounced back onto a spent account)
-// ---------------------------------------------------------------------------
 
 test("the FIRST refusal already benches an account whose usage meter claims headroom", async () => {
 	// Real report: seven Codex accounts, six at 100% and one reading 98%. The 98% account was
@@ -10317,9 +10258,6 @@ test("a bare throttle with no stated horizon still defers to the usage meter", a
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Manual selection: it must hold, and it must say where it put you
-// ---------------------------------------------------------------------------
 
 test("a manually chosen account survives the preflight for one attempt", async () => {
 	// `switch` deliberately ignores cooldowns, because the quota bookkeeping is a guess and trying
@@ -10593,9 +10531,6 @@ test("accounts refresh explicitly loads every supported account while the footer
 	}
 });
 
-// ---------------------------------------------------------------------------
-// Providers outside the five specially-managed families
-// ---------------------------------------------------------------------------
 
 const MIXED_ACCOUNTS: Account = {
 	anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
@@ -10867,9 +10802,6 @@ test("a provider Pi has no models for is marked unconfigured instead of looking 
 	assert.match(said, /zai/, "and name it");
 });
 
-// ---------------------------------------------------------------------------
-// A provider that cannot serve the request at all
-// ---------------------------------------------------------------------------
 
 const OPENROUTER_402 =
 	'402: {"message":"Prompt tokens limit exceeded: 38075 > 16958. To increase, visit ' +
@@ -11095,9 +11027,6 @@ test("header quota refresh preserves identity without reviving an old availabili
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// Codex usage headers: what reaches the shared state file, and when
-// ---------------------------------------------------------------------------
 // Every Codex response carries the account's quota windows. Other processes act on the copy in the
 // shared state file: their own account selection, OptChat's wake routes and 90% warning, the bench's
 // stop lines at 60% (5-hour window) and 50% (weekly). A reading that differs from the last one must
@@ -11538,9 +11467,6 @@ test("a provider verdict of 'usable' clears the recorded bench, it does not mere
 	);
 });
 
-// ---------------------------------------------------------------------------
-// A newly managed family must not fall out of an existing config
-// ---------------------------------------------------------------------------
 
 test("a managed family missing from a saved providerOrder still joins the rotation", async () => {
 	// `/multi-account` writes the whole config to disk, `providerOrder` included, so every
@@ -11657,9 +11583,6 @@ test("the footer says how many other accounts are ready, so 'switch to what?' ha
 	);
 });
 
-// ---------------------------------------------------------------------------
-// OAuth refresh: losing a race must not be reported as a dead account
-// ---------------------------------------------------------------------------
 
 const { refreshWithDiskRetry, refreshAndPersistWithStorageLock } = (await import("../index.ts")) as {
 	refreshWithDiskRetry: (opts: {
@@ -12367,9 +12290,6 @@ test("when nothing is confirmed, best says the choice is a guess", async () => {
 	);
 });
 
-// ---------------------------------------------------------------------------
-// Forced OAuth refresh: a rotated token must never be thrown away (issue #22)
-// ---------------------------------------------------------------------------
 //
 // Anthropic (and Cursor) rotate the refresh token on every refresh call and revoke the old
 // one immediately. So a forced refresh we cannot PERSIST does not merely fail — it destroys
@@ -12541,9 +12461,6 @@ test("a forced Cursor refresh loads the vendored provider, not the retired clone
 	uninstallCursorProvider();
 });
 
-// ---------------------------------------------------------------------------
-// The registry is Pi's, not ours: narrowing /model must not delete models
-// ---------------------------------------------------------------------------
 //
 // Pi's model registry is the single place ANYTHING — Pi itself, a `--models` pattern,
 // another extension pinning a model by reference — asks "does this model exist?".
@@ -12663,14 +12580,12 @@ test("the published placeholder is the one the vendored proxy actually accepts",
 	);
 });
 
-// ---------------------------------------------------------------------------
 // Mid-run context guard — wiring
 //
 // context-guard.test.ts proves the accounting and the elision. These prove the extension
 // actually reaches them: the guard has to fire from inside the `context` hook (the only hook Pi
 // runs before EVERY LLM call, including the hundreds inside one autonomous run) and it has to ask
 // for a real summary only once the agent has settled.
-// ---------------------------------------------------------------------------
 
 /** A conversation shaped like the real 78-minute run: mostly large tool results. */
 function bigConversation(turns: number) {
@@ -13148,7 +13063,6 @@ test("a healthy guarded session says nothing at all", async () => {
 	);
 });
 
-// ---------------------------------------------------------------------------
 // Carrying the task on after an automatic compaction
 //
 // Pi ends the run whenever a threshold compaction fires. The continuation route is Pi's own:
@@ -13156,7 +13070,6 @@ test("a healthy guarded session says nothing at all", async () => {
 // `true` there into `agent.continue()`, which drains the follow-up queue. Pi uses that for
 // overflow recovery but queues nothing on the threshold path. These lock the one queued
 // follow-up, and every case where it must stay silent.
-// ---------------------------------------------------------------------------
 
 /** Fire session_compact the way Pi does mid-run: the run loop is still live. */
 async function fireCompact(t: ReturnType<typeof setup>, over: Record<string, unknown> = {}) {
@@ -13360,14 +13273,12 @@ test("contextGuard and continueAfterCompaction can each be turned off alone", as
 	assert.equal(continuations(on).length, 1, "explicit opt-in is on");
 });
 
-// ---------------------------------------------------------------------------
 // The failover ladder — where work goes once the whole provider is spent
 //
 // Rotation's first step already works: 588 of 602 automatic failovers in the black box stayed
 // inside the same provider family. The other 14 had no policy behind them and scattered across
 // five destinations, and not one of the 602 ever reached a per-token account. These lock the
 // ladder that replaces that, and — just as importantly — the two things it must never override.
-// ---------------------------------------------------------------------------
 
 /** Three live families plus a per-token provider, none of them cooling. */
 const LADDER_ACCOUNTS = {
@@ -13566,13 +13477,11 @@ test("/multi-account priority distinguishes reset from clear", async () => {
 	]);
 });
 
-// ---------------------------------------------------------------------------
 // Pi's published files: the contract this extension actually depends on
 //
 // Two Pi changes have broken this extension without announcing themselves, because neither
 // auth.json nor models.json carries a schema version. These lock the detection: the extension
 // looks at the files, and says so when one stops matching.
-// ---------------------------------------------------------------------------
 
 const contractWarning = (t: ReturnType<typeof setup>) =>
 	t.rec.notifies.find((message) => message.includes("no longer matches what this extension"));
@@ -13692,9 +13601,6 @@ test("after a switch, settings.json naming the live model is silent", async () =
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// What the rotation looks like to something that does NOT load this extension
-// ---------------------------------------------------------------------------
 
 test("with the proxy off, status says which slots an extension-free child cannot authenticate to", async () => {
 	// Measured 2026-08-24: a numbered slot with an OAuth credential resolves by name and then
@@ -14631,7 +14537,6 @@ test("the Codex slot is published with a token-shaped placeholder that carries n
 	}
 });
 
-// ---------------------------------------------------------------------------
 // The rotation that never sent a request
 //
 // Recorded on a real machine: 275 account switches in four minutes, alternating between
@@ -14645,7 +14550,6 @@ test("the Codex slot is published with a token-shaped placeholder that carries n
 // without ever sending it a request — so it never refuses, so it stays admissible for ever. Two
 // such siblings re-admit each other indefinitely, and same-model ranks them above the free
 // account every time.
-// ---------------------------------------------------------------------------
 
 /** Four accounts: three spent Codex slots and one live Anthropic one. */
 const SPENT_CODEX_FLEET: Account = {
@@ -14870,14 +14774,12 @@ test("one /multi-account stop is enough to end a rotation", async () => {
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
 // Compaction that walked the whole fleet
 //
 // Also recorded: 98 consecutive compaction failures — "insufficient balance", "requires a
 // subscription", "no endpoints found", "does not exist or you do not have access" — because the
 // summary was offered to every account in the rotation in turn, each with the full hang bound of
 // its own, while the user watched "Compacting context…".
-// ---------------------------------------------------------------------------
 
 test("a routed compaction asks a few accounts, not the whole fleet", async () => {
 	const asked: string[] = [];
@@ -15130,7 +15032,6 @@ test("an unanswered guard compaction still resumes the interrupted task", async 
 	await t.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
 // The governor
 //
 // Eight separate entries in this changelog fix the same shape: an automatic mechanism that ran
@@ -15144,7 +15045,6 @@ test("an unanswered guard compaction still resumes the interrupted task", async 
 //
 // These tests are deliberately about the INVARIANT rather than any of those paths, because a
 // test per path is what has already been tried eight times.
-// ---------------------------------------------------------------------------
 
 /**
  * A fleet the size of a real one — fifteen accounts across six vendors — so a rotation always has
@@ -15446,9 +15346,6 @@ test("two extension instances retain each other's newly observed account failure
  await b.fire("session_shutdown");
 });
 
-// ---------------------------------------------------------------------------
-// Automatic resume when quota returns (fake clock; no user message ever)
-// ---------------------------------------------------------------------------
 
 /** Run `body` on a fake setTimeout/Date; `tick` also drains the async work each timer starts. */
 async function onFakeClock(body: (tick: (ms: number) => Promise<void>) => Promise<void>) {

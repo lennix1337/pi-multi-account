@@ -27,9 +27,6 @@ import {
   piHasContextWithSystem,
 } from "../pi-contract.ts";
 
-// ---------------------------------------------------------------------------
-// The ledger
-// ---------------------------------------------------------------------------
 
 test("the interface is exactly the three files Pi publishes", () => {
   // A bare child reads these and nothing else — anything deeper is a design smell, not a
@@ -70,9 +67,6 @@ test("model-default persistence is gated at Pi 0.84.3", () => {
   assert.equal(piAutoPersistsSelectedModel("unknown"), false);
 });
 
-// ---------------------------------------------------------------------------
-// auth.json
-// ---------------------------------------------------------------------------
 
 test("auth.json: the ordinary shape passes", () => {
   const verdict = checkAuthShape({
@@ -99,9 +93,6 @@ test("auth.json: the check never carries a secret in its output", () => {
   assert.equal(rendered.includes("ALSO-SECRET"), false);
 });
 
-// ---------------------------------------------------------------------------
-// models.json — the schema that already cost a user every custom provider
-// ---------------------------------------------------------------------------
 
 test("models.json: a bare model id string is caught, and the message says how bad it is", () => {
   const verdict = checkModelsShape({
@@ -129,9 +120,6 @@ test("models.json: structural nonsense is reported rather than thrown", () => {
   assert.equal(checkModelsShape({ providers: { a: { models: "k3" } } }).ok, false);
 });
 
-// ---------------------------------------------------------------------------
-// settings.json — where the one unpromised assumption becomes observable
-// ---------------------------------------------------------------------------
 
 test("settings.json: both keys present is the healthy case", () => {
   const verdict = checkSettingsShape({ defaultProvider: "openai-codex-account-4", defaultModel: "gpt-5.6-sol" });
@@ -154,9 +142,6 @@ test("settings.json: a wrong type is caught even when the key exists", () => {
   assert.equal(checkSettingsShape({ defaultProvider: 42, defaultModel: "m" }).ok, false);
 });
 
-// ---------------------------------------------------------------------------
-// settings.json tracking the LIVE model — legacy Pi <=0.84.2 only
-// ---------------------------------------------------------------------------
 
 const active = { provider: "openai-codex-account-4", id: "gpt-5.6-sol" };
 
@@ -206,9 +191,6 @@ test("a broken settings file reports the shape problem rather than a bogus misma
   assert.deepEqual(verdict.problems, ["not a JSON object"]);
 });
 
-// ---------------------------------------------------------------------------
-// Saying it out loud
-// ---------------------------------------------------------------------------
 
 test("a healthy install says nothing at all", () => {
   const verdicts = [

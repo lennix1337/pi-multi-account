@@ -134,9 +134,6 @@ import {
 	type OverheadTracker,
 } from "./context-guard.ts";
 
-// ---------------------------------------------------------------------------
-// Host-bound pi-ai OAuth bridge
-// ---------------------------------------------------------------------------
 // Pi's extension loader binds these public imports to the running host SDK.
 // Never probe a private SDK copy: its provider catalog/auth may differ from Pi's.
 // Supported Pi versions use provider factories; legacy callbacks are adapted below.
@@ -1416,9 +1413,6 @@ const LEGACY_CONTINUATION_PROMPT = [
 	"Anything shown there was already attempted, so verify the current state instead of redoing it, and do not restart the task from the beginning.",
 ].join(" ");
 
-// ---------------------------------------------------------------------------
-// Interrupted-turn preservation ("black box" handoff record)
-// ---------------------------------------------------------------------------
 // Two independent pi-ai behaviours combine to erase the interruption point on every
 // cross-provider failover:
 //
@@ -1794,9 +1788,6 @@ const DEFAULT_CONFIG: ProviderFailoverConfig = {
 	compactionWatchdogMs: COMPACTION_WATCHDOG_MS,
 };
 
-// ---------------------------------------------------------------------------
-// Config + state persistence
-// ---------------------------------------------------------------------------
 
 function ensureDefaultConfig() {
 	if (existsSync(CONFIG_PATH)) return;
@@ -2112,9 +2103,6 @@ function saveState(state: ProviderFailoverState) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// "Black box" decision log — structured, append-only, credential-free, bounded.
-// ---------------------------------------------------------------------------
 
 // Set from the extension closure once config is known. Module-level so the writer
 // (a plain function) can be called from anywhere without threading config through.
@@ -2169,9 +2157,6 @@ function readDebugLogTail(maxLines: number): string {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// auth.json reading, account identity & token validity
-// ---------------------------------------------------------------------------
 
 type AuthEntry = {
 	type?: string;
@@ -2531,9 +2516,6 @@ function isEntryUsable(entry: AuthEntry | undefined): boolean {
 	return true;
 }
 
-// ---------------------------------------------------------------------------
-// Provider id helpers
-// ---------------------------------------------------------------------------
 
 const FAMILY_KEYWORDS = new Set([
 	"anthropic",
@@ -2764,9 +2746,6 @@ function accountGroup(id: string, qwenProvider: string): string {
 	return classifyProvider(id, qwenProvider) ?? id.replace(/-account-\d+$/, "");
 }
 
-// ---------------------------------------------------------------------------
-// Model definitions for registered alias providers
-// ---------------------------------------------------------------------------
 
 const FABLE_MODEL_DEFS: Record<string, Record<string, unknown>> = {
 	"claude-fable-5": {
@@ -3309,9 +3288,6 @@ function registerApiKeySlot(
 	return ids;
 }
 
-// ---------------------------------------------------------------------------
-// Misc helpers (cooldown parsing from headers / error bodies)
-// ---------------------------------------------------------------------------
 
 function patternMatch(text: string, patterns: string[]) {
 	const lower = text.toLowerCase();
@@ -3518,7 +3494,6 @@ function lastAssistantStopReason(messages: any[]): string | undefined {
 	return undefined;
 }
 
-// ===========================================================================
 // Anthropic OAuth request shaping (vendored)
 //
 // Makes Claude Pro/Max (OAuth) accounts work out of the box — no separate
@@ -3530,7 +3505,6 @@ function lastAssistantStopReason(messages: any[]): string | undefined {
 // CLAUDE_CODE_VERSION must track the current Claude Code release; if it drifts
 // too far Anthropic may reject or miscount OAuth requests. Check `claude
 // --version` or https://github.com/anthropics/claude-code.
-// ===========================================================================
 
 const PI_DEFAULT_PROMPT_PREFIX =
 	"You are an expert coding assistant operating inside pi, a coding agent harness.";
@@ -3841,9 +3815,6 @@ function registerAnthropicLoginMethods(
 	});
 }
 
-// ===========================================================================
-// Extension entry point
-// ===========================================================================
 
 export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
 

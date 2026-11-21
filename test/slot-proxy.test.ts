@@ -31,9 +31,6 @@ const ROUTES = new Map<string, ProxyRoute>([
 ]);
 const withKey = (key = PROXY_PLACEHOLDER_KEY) => ({ authorization: `Bearer ${key}` });
 
-// ---------------------------------------------------------------------------
-// Routing
-// ---------------------------------------------------------------------------
 
 test("a slot route splits into the slot and the path to forward", () => {
 	assert.deepEqual(parseProxyPath("/anthropic-account-2/v1/messages"), {
@@ -64,9 +61,6 @@ test("a path trying to climb out of its slot is refused, not normalised", () => 
 	}
 });
 
-// ---------------------------------------------------------------------------
-// Admission — the two gates
-// ---------------------------------------------------------------------------
 
 test("a published slot presenting the placeholder is admitted", () => {
 	const verdict = admitRequest({
@@ -126,9 +120,6 @@ test("the placeholder is read from either header a Pi provider might use", () =>
 	assert.equal(presentedCredential({}), undefined);
 });
 
-// ---------------------------------------------------------------------------
-// The outgoing request
-// ---------------------------------------------------------------------------
 
 const anthropicRoute: ProxyRoute = { slotId: "anthropic-account-2", family: "anthropic" };
 const codexRoute: ProxyRoute = { slotId: "openai-codex-account-4", family: "codex" };
@@ -324,9 +315,6 @@ test("the published route points at this machine and carries the slot", () => {
 	assert.equal(new URL(url).hostname, "127.0.0.1");
 });
 
-// ---------------------------------------------------------------------------
-// The Codex placeholder has to survive being parsed as a token
-// ---------------------------------------------------------------------------
 
 test("Pi reads an account id out of the Codex key, so that placeholder is token-shaped", () => {
 	// Measured against a real `pi -p --no-extensions` child: a plain placeholder fails before any

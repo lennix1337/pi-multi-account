@@ -73,6 +73,7 @@
   ],
   "scripts": {
     "check": "tsc --noEmit",
+    "lint:comments": "node scripts/lint-comments.mjs",
     "test": "node --test test/*.test.ts",
     "verify": "npm run check && npm test && npm run mutations && npm run pack:check",
     "mutations": "node test/mutations.mjs",

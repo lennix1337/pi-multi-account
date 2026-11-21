@@ -61,9 +61,6 @@ function assistantCall(id: string, argChars: number, timestamp = 1): GuardMessag
   };
 }
 
-// ---------------------------------------------------------------------------
-// Token estimation
-// ---------------------------------------------------------------------------
 
 test("estimateMessageTokens mirrors Pi's own chars/4 accounting per role", () => {
   assert.equal(estimateMessageTokens({ role: "user", content: [{ type: "text", text: "abcd" }] }), 1);
@@ -86,9 +83,6 @@ test("estimateRawTokens counts the system prompt that Pi's own fallback estimate
   assert.equal(withPrompt, 1 + 10_000);
 });
 
-// ---------------------------------------------------------------------------
-// Overhead learning, and the defence against a provider reporting its own bookkeeping
-// ---------------------------------------------------------------------------
 
 test("overhead tracker learns the gap between our estimate and the real prompt", () => {
   const tracker = createOverheadTracker(0);
@@ -118,9 +112,6 @@ test("the adjusted estimate is never smaller than the raw estimate", () => {
   assert.ok(tracker.adjust(200_000) >= 200_000);
 });
 
-// ---------------------------------------------------------------------------
-// Window policy
-// ---------------------------------------------------------------------------
 
 test("effectiveWindow caps an aspirational advertisement", () => {
   const settings = { ...DEFAULT_CONTEXT_GUARD_SETTINGS };
@@ -156,9 +147,6 @@ test("decideGuard trims late and compacts early, and stands down on an unknown w
   assert.equal(decideGuard(900_000, window, { ...settings, enabled: false }).trim, false);
 });
 
-// ---------------------------------------------------------------------------
-// Elision
-// ---------------------------------------------------------------------------
 
 test("elisionKey is stable identity, never the array index", () => {
   assert.equal(elisionKey(toolResult("call-7", 10)), "tr:call-7");
@@ -280,9 +268,6 @@ test("planElision leaves a request that already fits completely alone", () => {
   assert.equal(result.messages, messages, "an untouched list must be the same reference");
 });
 
-// ---------------------------------------------------------------------------
-// The actual defect: an autonomous run that nobody measures
-// ---------------------------------------------------------------------------
 
 /**
  * Rebuilds the shape of the 78-minute run: 222 assistant turns, 360 tool results, ~86 % of the

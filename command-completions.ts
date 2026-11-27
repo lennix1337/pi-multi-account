@@ -8,6 +8,7 @@ export interface CompletionItem {
 
 export interface AccountChoice {
 	provider: string;
+	authType?: "oauth" | "api_key";
 	/** Status as the accounts table shows it, e.g. `ready` or `cooldown 2h 10m`. */
 	status: string;
 	ready: boolean;
@@ -76,6 +77,7 @@ export function multiAccountCompletions(
 			value: `${command} ${choice.provider}`,
 			label: choice.provider,
 			description: [
+				choice.authType,
 				choice.account,
 				choice.current ? `current · ${choice.status}` : choice.status,
 				choice.usage,

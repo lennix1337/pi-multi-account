@@ -7,7 +7,7 @@ import { dirname } from "node:path";
 const require = createRequire(import.meta.url);
 const pause = new Int32Array(new SharedArrayBuffer(4));
 const MAP_FIELDS = ["exhaustedUntilByProvider", "exhaustedUntilByModel", "invalidatedByProvider",
-  "usageUntrustedUntilByProvider", "usageByProvider", "codexModelCatalogByProvider", "lastProbeAtByProvider"];
+  "usageUntrustedUntilByProvider", "usageByProvider", "codexModelCatalogByProvider", "lastProbeAtByProvider", "authTypeByProvider"];
 type State = Record<string, any>;
 
 /** A lock attempt that another process may release within the bound. Windows answers

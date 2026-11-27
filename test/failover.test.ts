@@ -10002,8 +10002,8 @@ test("accounts lists provider identity, quota and routing state without credenti
 
 	await t.command("accounts");
 	const table = t.rec.notifies.at(-1) ?? "";
-	assert.match(table, /Slot\s+Alias\s+Account\s+Plan\s+Primary\s+Secondary\s+Tertiary\s+Status/);
-	assert.match(table, /openai-codex-account-2\s+alice\s+alice@example\.com\s+plus/);
+	assert.match(table, /Slot\s+Auth\s+Alias\s+Account\s+Plan\s+Primary\s+Secondary\s+Tertiary\s+Status/);
+	assert.match(table, /openai-codex-account-2\s+oauth\s+alice\s+alice@example\.com\s+plus/);
 	assert.match(table, /5h 80%/);
 	assert.match(table, /7d 50%/);
 	assert.match(table, /cooldown \d+m/);
@@ -10089,7 +10089,7 @@ test("accounts refresh identifies Anthropic API keys and explains promotional ba
 		});
 		await t.command("accounts refresh");
 		const table = t.rec.notifies.at(-1) ?? "";
-		assert.match(table, /anthropic\s+—\s+—\s+api-key\s+—\s+—\s+—\s+ready/);
+		assert.match(table, /anthropic\s+api_key\s+—\s+—\s+api-key\s+—\s+—\s+—\s+ready/);
 		assert.match(table, /promotional.*balance.*not.*exposed/i);
 		assert.match(table, /https:\/\/platform\.claude\.com\/settings\/billing/);
 		assert.doesNotMatch(table, /usage unavailable|fake-anthropic-key|Max|\$100/);
@@ -14875,5 +14875,32 @@ test("pi:auth:updated:v1 clears invalidation and cooldown once new credentials a
 	t.emitBus("pi:auth:updated:v1", { provider: "anthropic-account-2" });
 	assert.ok(!t.readState().invalidatedByProvider?.["anthropic-account-2"]);
 	assert.ok(!t.readState().exhaustedUntilByProvider?.["anthropic-account-2"]);
+	await t.fire("session_shutdown");
+});
+
+test("accounts, status, and shared state clearly distinguish oauth vs api_key slots", async () => {
+	const t = setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "oa-1", refresh: "or-1" },
+			"anthropic-account-2": { type: "api_key", key: "sk-ant-api-2" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-5-5" },
+		config: { autoContinue: false },
+	});
+	await t.command("accounts");
+	const table = t.rec.notifies.at(-1) ?? "";
+	assert.match(table, /Slot\s+Auth\s+Alias/);
+	assert.match(table, /anthropic\s+oauth\b/);
+	assert.match(table, /anthropic-account-2\s+api_key\b/);
+
+	await t.command("status");
+	const status = t.rec.notifies.at(-1) ?? "";
+	assert.match(status, /Current: anthropic\/claude-opus-5-5 \[oauth\]/);
+	assert.match(status, /anthropic \[oauth\]/);
+	assert.match(status, /anthropic-account-2 \[api_key\]/);
+
+	const persisted = t.readState();
+	assert.equal(persisted.authTypeByProvider?.anthropic, "oauth");
+	assert.equal(persisted.authTypeByProvider?.["anthropic-account-2"], "api_key");
 	await t.fire("session_shutdown");
 });

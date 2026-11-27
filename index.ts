@@ -462,6 +462,7 @@ type ProviderFailoverState = {
 	usageUntrustedUntilByProvider?: Record<string, number>;
 	usageByProvider?: Record<string, UsageSnapshot>;
 	codexModelCatalogByProvider?: Record<string, CodexCatalogSnapshot>;
+	authTypeByProvider?: Record<string, "oauth" | "api_key">;
 	pendingContinuationPrompt?: string;
 	pendingFrom?: ModelRef;
 	pendingSince?: number;
@@ -3436,6 +3437,14 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	const codexModelCatalogByProvider = new Map<string, CodexCatalogSnapshot>(
 		Object.entries(persistedState.codexModelCatalogByProvider ?? {}),
 	);
+	const authTypeByProvider = new Map<string, "oauth" | "api_key">(
+		Object.entries(persistedState.authTypeByProvider ?? {}).filter(
+			(entry): entry is [string, "oauth" | "api_key"] =>
+				entry[1] === "oauth" || entry[1] === "api_key",
+		),
+	);
+	const authTypeOfEntry = (entry: AuthEntry | undefined): "oauth" | "api_key" | undefined =>
+		entry?.type === "oauth" ? "oauth" : entry?.type === "api_key" ? "api_key" : undefined;
 	const usageFetches = new Map<string, Promise<UsageSnapshot>>();
 	const usageErrors = new Map<string, string>();
 	const authFailures = new Map<string, { hash: string; distinct: number }>();
@@ -3779,6 +3788,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			codexModelCatalogByProvider: Object.fromEntries(
 				codexModelCatalogByProvider.entries(),
 			),
+			authTypeByProvider: Object.fromEntries(authTypeByProvider.entries()),
 		};
 		// external: Pi windows and delegated children can share the same state file.
 		try {
@@ -3842,6 +3852,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				[usageUntrustedUntilByProvider, next.usageUntrustedUntilByProvider],
 				[usageByProvider, next.usageByProvider],
 				[codexModelCatalogByProvider, next.codexModelCatalogByProvider],
+				[authTypeByProvider, next.authTypeByProvider],
 			] as Array<[Map<string, any>, Record<string, any> | undefined]>) {
 				map.clear();
 				for (const [key, value] of Object.entries(values ?? {})) map.set(key, value);
@@ -4759,6 +4770,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const unconfigured = new Set(unconfiguredRotationMembers(ctx));
 		return ordered.map((provider) => {
 			const entry = auth[provider];
+			const authType = authTypeOfEntry(entry);
 			const snapshot = cachedUsage(provider, auth);
 			const duplicate = duplicateOf.get(provider);
 			const recoveryAt = providerRecoveryAt(provider, now);
@@ -4770,7 +4782,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			else if (recoveryAt > now) status = cooldownStatus(snapshot, recoveryAt, now);
 			else if (usageErrors.has(provider)) status = "ready · usage unavailable";
 			else status = "ready";
-			return { provider, snapshot, status, ready: status.startsWith("ready") };
+			return { provider, authType, snapshot, status, ready: status.startsWith("ready") };
 		});
 	}
 
@@ -4785,8 +4797,9 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 		refreshDiscovery(false);
 		const now = Date.now();
-		return accountRows(ctx, now).map(({ provider, snapshot, status, ready }) => ({
+		return accountRows(ctx, now).map(({ provider, authType, snapshot, status, ready }) => ({
 			provider,
+			authType,
 			status,
 			ready,
 			current: provider === current,
@@ -4799,7 +4812,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		refreshDiscovery(false, ctx);
 		const now = Date.now();
 		const accounts = accountRows(ctx, now);
-		const rows = accounts.map(({ provider, snapshot, status }) => {
+		const rows = accounts.map(({ provider, authType, snapshot, status }) => {
 			const account = snapshot?.account ?? "—";
 			const alias =
 				snapshot?.account && snapshot.account.includes("@")
@@ -4807,6 +4820,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 					: snapshot?.account ?? "—";
 			return [
 				provider,
+				authType ?? "—",
 				alias,
 				account,
 				snapshot?.plan ?? "—",
@@ -4824,7 +4838,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				...agyLines,
 			].join("\n");
 		}
-		const header = ["Slot", "Alias", "Account", "Plan", "Primary", "Secondary", "Tertiary", "Status"];
+		const header = ["Slot", "Auth", "Alias", "Account", "Plan", "Primary", "Secondary", "Tertiary", "Status"];
 		const widths = header.map((title, column) =>
 			Math.max(title.length, ...rows.map((row) => row[column].length)),
 		);
@@ -5509,6 +5523,21 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			else credentialHashes.delete(provider);
 			if (nextIdentity) credentialIdentities.set(provider, nextIdentity);
 			else credentialIdentities.delete(provider);
+			const nextAuthType = authTypeOfEntry(entry);
+			if (nextAuthType) {
+				if (authTypeByProvider.get(provider) !== nextAuthType) {
+					authTypeByProvider.set(provider, nextAuthType);
+					cooldownsCleared = true;
+				}
+			} else if (authTypeByProvider.delete(provider)) {
+				cooldownsCleared = true;
+			}
+		}
+		for (const provider of [...authTypeByProvider.keys()]) {
+			if (!Object.hasOwn(auth, provider)) {
+				authTypeByProvider.delete(provider);
+				cooldownsCleared = true;
+			}
 		}
 		if (cooldownsCleared) persist();
 		clearReauthedInvalidations(auth);
@@ -8942,8 +8971,13 @@ ${note}` : basePrompt;
 		}
 
 		refreshDiscovery(false, ctx);
+		const authForStatus = readAuthFile();
+		const authTag = (id: string) => {
+			const kind = authTypeByProvider.get(id) ?? authTypeOfEntry(authForStatus[id]);
+			return kind ? ` [${kind}]` : "";
+		};
 		const current = ctx.model
-			? `${ctx.model.provider}/${ctx.model.id}`
+			? `${ctx.model.provider}/${ctx.model.id}${authTag(ctx.model.provider)}`
 			: "none";
 		const childView = slotsAsAChildSeesThem(rotation, readAuthFileRaw());
 		const childUnusable = childView.filter((verdict) => !verdict.usable);
@@ -8972,7 +9006,7 @@ ${note}` : basePrompt;
 							? `${providerUsageLabel(ctx.model.provider)} | ${qwenLiveStatus(ctx.model.provider)}`
 							: "not loaded"
 				}`,
-				`Rotation (${rotation.length}): ${rotation.join(" → ") || "none — log in to an account"}`,
+				`Rotation (${rotation.length}): ${rotation.map((provider) => `${provider}${authTag(provider)}`).join(" → ") || "none — log in to an account"}`,
 				`Metered native providers (pay per token): ${meteredNativeMembers().join(", ") || "none"}`,
 				`Other providers (no quota tracking): ${resellerRotationMembers().join(", ") || (config.includeOtherProviders ? "none" : "disabled by includeOtherProviders")}`,
 				`Needs models configured (in rotation but unusable): ${unconfiguredRotationMembers(ctx).join(", ") || "none"}`,
@@ -11142,13 +11176,15 @@ ${note}` : basePrompt;
 				killed = markAuthFailure(provider, errorText);
 			}
 			if (killed) {
+				const isApiKey = authTypeOfEntry(readAuthFile()[provider]) === "api_key";
 				const sharedClientHint =
+					!isApiKey &&
 					classifyProvider(provider, config.qwenProvider) === "anthropic" &&
 					/invalid_grant|revoked/i.test(reason)
 						? ' Its refresh token was revoked server-side. Claude Pro/Max logins from every CLI share one client id and Anthropic keeps a single live refresh token per account, so signing this same account into another tool (Claude Code, another machine, or a second slot here) revokes this one. Use a different Claude account per slot, and keep the account another tool is signed into out of this rotation.'
 						: "";
 				ctx.ui.notify(
-					`Provider failover: ${provider} authorization is invalid. Run /login, choose "Use a subscription", then select ${provider}.${sharedClientHint}`,
+					`Provider failover: ${provider} (${isApiKey ? "api_key" : "oauth"}) authorization is invalid. Run /login, choose ${isApiKey ? '"Use an API key"' : '"Use a subscription"'}, then select ${provider}.${sharedClientHint}`,
 					"warning",
 				);
 			}

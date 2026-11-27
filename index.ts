@@ -1043,6 +1043,9 @@ const TERMINAL_AUTH_ERROR_PATTERNS = [
 const FORCE_REFRESH_AUTH_ERROR_PATTERNS = [
 	"authentication token has been invalidated",
 	"token has been invalidated",
+	"token has expired",
+	"token expired",
+	"expired token",
 ];
 
 const TERMINAL_REFRESH_ERROR_PATTERNS = [
@@ -3882,12 +3885,23 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	function markInvalid(provider: string, reason: string) {
 		const entry = readAuthFile()[provider];
 		const tokenHash = entry ? (credentialHash(entry) ?? "") : "";
+		const trimmedReason = reason.slice(0, 500);
+		const prev = invalidatedByProvider.get(provider);
+		const at = Date.now();
 		invalidatedByProvider.set(provider, {
 			tokenHash,
-			at: Date.now(),
-			reason: reason.slice(0, 500),
+			at,
+			reason: trimmedReason,
 		});
 		persist();
+		if (!prev || prev.tokenHash !== tokenHash || prev.reason !== trimmedReason) {
+			pi.events?.emit?.("pi:auth:invalidated:v1", {
+				provider,
+				family: classifyProvider(provider, config.qwenProvider),
+				reason: trimmedReason,
+				at,
+			});
+		}
 	}
 
 	function isInvalidated(provider: string) {
@@ -4462,6 +4476,29 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 	pi.events.on("pi:usage:request:v1", (request: any) => {
 		if (request?.provider === completionRouterContext?.model?.provider) {
 			updateUsageStatus(completionRouterContext);
+		}
+	});
+
+	pi.events.on("pi:auth:updated:v1", (event: any) => {
+		const provider = typeof event?.provider === "string" ? event.provider : undefined;
+		if (!provider) return;
+		if (
+			ownsSharedChildPublication() &&
+			needsAuthShadow(provider) &&
+			(isCursorProviderId(provider) || slotProxyPort !== undefined)
+		) {
+			shadowChildFacingAuth([provider]);
+		}
+		const auth = readAuthFile();
+		clearReauthedInvalidations(auth);
+		noteAuthSuccess(provider);
+		const ctx = completionRouterContext ?? slotProxyContext;
+		if (ctx) reloadHostAuth(ctx);
+		refreshDiscovery(true, ctx);
+		if (event?.skipPendingResume) {
+			if (hasPendingResume()) clearPendingContinuation();
+		} else if (ctx && hasPendingResume()) {
+			void attemptPendingResume(ctx);
 		}
 	});
 
@@ -9772,9 +9809,27 @@ ${note}` : basePrompt;
 		if (entry.type !== "oauth" || typeof entry.access !== "string") return entry;
 		const expiry = oauthExpiryMs(entry);
 		if (expiry !== undefined && expiry - 60_000 <= Date.now()) {
+			clearReauthedInvalidations(readAuthFile());
+			if (isInvalidated(slotId)) return entry;
 			try {
-				await forceRefreshProvider(slotProxyContext, slotId);
-				entry = readAuthFile()[slotId] ?? entry;
+				const refresh = await forceRefreshProvider(slotProxyContext, slotId);
+				if (refresh.status === "refreshed") {
+					entry = readAuthFile()[slotId] ?? entry;
+				} else if (refresh.status === "terminal") {
+					const reason = `OAuth refresh failed permanently: ${refresh.error}`;
+					logEvent("slot_proxy_refresh_failed", {
+						slot: slotId,
+						status: refresh.status,
+						reason: refresh.error,
+					});
+					markInvalid(slotId, reason);
+				} else {
+					logEvent("slot_proxy_refresh_failed", {
+						slot: slotId,
+						status: refresh.status,
+						reason: refresh.status === "transient" ? refresh.error : "unsupported",
+					});
+				}
 			} catch (error) {
 				logEvent("slot_proxy_refresh_failed", {
 					slot: slotId,

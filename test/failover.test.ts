@@ -869,6 +869,7 @@ function setup(opts: {
 		providerDefinitions,
 		completionRouter: () => rec.completionRouters.at(-1),
 		emitBus: (name: string, payload: any) => pi.events.emit(name, payload),
+		onBus: (name: string, handler: (payload: any) => void) => pi.events.on(name, handler),
 		hasHandler: (event: string) => (events[event]?.length ?? 0) > 0,
 		prependHandler: (event: string, handler: any) => (events[event] ??= []).unshift(handler),
 	};
@@ -14759,5 +14760,120 @@ test("quota auto-resume: with two accounts the first to recover resumes, once", 
 		await tick(900_000);
 		assert.equal(t.rec.continueCalls.length + t.rec.sent.length, 1);
 	});
+	await t.fire("session_shutdown");
+});
+
+test("expired OAuth access token triggers forced refresh and retries on the same account when refresh succeeds", async () => {
+	const accounts: Account = {
+		"anthropic-account-2": {
+			type: "oauth",
+			access: "expired-access",
+			refresh: "working-refresh",
+		},
+		"openai-codex": {
+			type: "oauth",
+			access: "live-codex",
+			refresh: "codex-refresh",
+			accountId: "c1",
+		},
+	};
+	const t = setup({
+		accounts,
+		current: { provider: "anthropic-account-2", id: "claude-opus-5-5" },
+		forceRefreshResults: { "anthropic-account-2": { status: "refreshed" } },
+	});
+	await finishError(
+		t,
+		"anthropic-account-2",
+		"claude-opus-5-5",
+		'401 {"type":"error","error":{"type":"authentication_error","message":"OAuth access token has expired. Re-authenticate to continue."}}',
+	);
+	assert.deepEqual(t.rec.setModels, []);
+	assert.equal(t.rec.continueCalls.length, 1);
+	assert.ok(!t.readState().invalidatedByProvider?.["anthropic-account-2"]);
+	await t.fire("session_shutdown");
+});
+
+test("expired OAuth access token with terminal refresh error invalidates immediately and emits pi:auth:invalidated:v1", async () => {
+	const accounts: Account = {
+		"anthropic-account-2": {
+			type: "oauth",
+			access: "expired-access",
+			refresh: "dead-refresh",
+		},
+		"openai-codex": {
+			type: "oauth",
+			access: "live-codex",
+			refresh: "codex-refresh",
+			accountId: "c1",
+		},
+	};
+	const t = setup({
+		accounts,
+		current: { provider: "anthropic-account-2", id: "claude-opus-5-5" },
+		config: { autoContinue: false },
+		forceRefreshResults: {
+			"anthropic-account-2": {
+				status: "terminal",
+				error: "invalid_grant: refresh token revoked",
+			},
+		},
+	});
+	const invalidated: any[] = [];
+	t.onBus("pi:auth:invalidated:v1", (payload) => invalidated.push(payload));
+	await finishError(
+		t,
+		"anthropic-account-2",
+		"claude-opus-5-5",
+		'401 {"type":"error","error":{"type":"authentication_error","message":"OAuth access token has expired. Re-authenticate to continue."}}',
+	);
+	assert.ok(t.readState().invalidatedByProvider?.["anthropic-account-2"]);
+	assert.equal(invalidated.length, 1);
+	assert.equal(invalidated[0].provider, "anthropic-account-2");
+	assert.equal(invalidated[0].family, "anthropic");
+	assert.match(invalidated[0].reason, /invalid_grant/);
+	await t.fire("session_shutdown");
+});
+
+test("pi:auth:updated:v1 clears invalidation and cooldown once new credentials are persisted", async () => {
+	const accounts: Account = {
+		"anthropic-account-2": {
+			type: "oauth",
+			access: "expired-access",
+			refresh: "dead-refresh",
+		},
+	};
+	const t = setup({
+		accounts,
+		current: { provider: "anthropic-account-2", id: "claude-opus-5-5" },
+		config: { autoContinue: false },
+		forceRefreshResults: {
+			"anthropic-account-2": {
+				status: "terminal",
+				error: "invalid_grant",
+			},
+		},
+	});
+	await finishError(
+		t,
+		"anthropic-account-2",
+		"claude-opus-5-5",
+		'401 {"type":"error","error":{"type":"authentication_error","message":"OAuth access token has expired. Re-authenticate to continue."}}',
+	);
+	assert.ok(t.readState().invalidatedByProvider?.["anthropic-account-2"]);
+	writeFileSync(
+		AUTH,
+		JSON.stringify({
+			"anthropic-account-2": {
+				type: "oauth",
+				access: "fresh-access",
+				refresh: "fresh-refresh",
+				expires: Date.now() + 3_600_000,
+			},
+		}),
+	);
+	t.emitBus("pi:auth:updated:v1", { provider: "anthropic-account-2" });
+	assert.ok(!t.readState().invalidatedByProvider?.["anthropic-account-2"]);
+	assert.ok(!t.readState().exhaustedUntilByProvider?.["anthropic-account-2"]);
 	await t.fire("session_shutdown");
 });

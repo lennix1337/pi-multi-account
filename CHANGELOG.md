@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Expired OAuth tokens and remote re-login coordination
+
+- `OAuth access token has expired` errors now trigger forced OAuth refresh before failing over or cooling down. A working refresh token recovers on the same account; a permanently rejected refresh token (`invalid_grant`, `revoked`, `refresh_token_reused`) immediately invalidates the slot instead of looping every minute.
+- The slot proxy now inspects the result of `forceRefreshProvider`: terminal refresh failures log `slot_proxy_refresh_failed`, mark the slot invalid, and stop repeating refresh attempts until new credentials arrive.
+- `markInvalid` emits `pi:auth:invalidated:v1` once per invalidation, and `pi:auth:updated:v1` clears invalidation and cooldowns, re-shadows if needed, reloads host auth, and resumes pending continuations when another extension completes OAuth login.
+
 ### Codex usage headers and the shared state file
 
 - A Codex response whose usage headers repeat the account's last reading no longer rewrites `provider-failover-state.json`. Every response used to take the cross-process state lock, rewrite the whole file and append a log line, synchronously; while another Pi process held the lock, each response waited out the 250 ms lock bound and then dropped the write. A reading that differs from the last one in anything but the instant it was taken (a window's percentage or reset, the plan, the provider's own verdict) is still written at once, and so is every block and cooldown. A repeated reading is written at the end of the agent run, on the status refresh tick and at session shutdown, so its `fetchedAt` on disk can lag; the footer and `pi:usage:snapshot:v1` still update on every response.

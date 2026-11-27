@@ -3913,6 +3913,15 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 				at,
 			});
 		}
+		const activeCtx = completionRouterContext;
+		if (
+			!subagentChild &&
+			!sessionClosed &&
+			activeCtx?.isIdle?.() &&
+			activeCtx.model?.provider === provider
+		) {
+			void ensureReadyModel(activeCtx, `active account invalidated: ${provider}`);
+		}
 	}
 
 	function isInvalidated(provider: string) {
@@ -4490,6 +4499,32 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		}
 	});
 
+	async function activateProviderOnIdle(
+		ctx: any,
+		provider: string,
+		reason: string,
+	): Promise<boolean> {
+		if (subagentChild || sessionClosed || !ctx?.isIdle?.()) return false;
+		if (ctx.model?.provider === provider && isCurrentModelReady(ctx)) return true;
+		refreshRegistryCodexModels(ctx);
+		refreshRegistryAnthropicModels(ctx);
+		const targets = resolveTargets(ctx, provider, ctx.model, false).filter(
+			(model: any) => !isInvalidated(model.provider) && providerHasUsableAuth(ctx, model.provider),
+		);
+		if (targets.length === 0) return false;
+		const switched = await activateFallback(ctx, ctx.model ?? targets[0], targets, reason, {
+			armContinuation: false,
+			manual: true,
+		});
+		if (switched) {
+			logEvent("auth_updated_model_activated", {
+				provider,
+				model: ctx.model?.id ?? targets[0].id,
+			});
+		}
+		return switched;
+	}
+
 	pi.events.on("pi:auth:updated:v1", (event: any) => {
 		const provider = typeof event?.provider === "string" ? event.provider : undefined;
 		if (!provider) return;
@@ -4506,11 +4541,24 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 		const ctx = completionRouterContext ?? slotProxyContext;
 		if (ctx) reloadHostAuth(ctx);
 		refreshDiscovery(true, ctx);
-		if (event?.skipPendingResume) {
-			if (hasPendingResume()) clearPendingContinuation();
-		} else if (ctx && hasPendingResume()) {
-			void attemptPendingResume(ctx);
-		}
+		const shouldActivate =
+			!subagentChild &&
+			!!ctx?.isIdle?.() &&
+			ctx.model?.provider !== provider &&
+			(event?.activate === true ||
+				!isCurrentModelReady(ctx) ||
+				provider === readHostDefaultModel()?.provider);
+		const run = async () => {
+			if (shouldActivate && ctx) {
+				await activateProviderOnIdle(ctx, provider, `re-authenticated ${provider}`);
+			}
+			if (event?.skipPendingResume) {
+				if (hasPendingResume()) clearPendingContinuation();
+			} else if (ctx && hasPendingResume()) {
+				await attemptPendingResume(ctx);
+			}
+		};
+		void run();
 	});
 
 	function usageSnapshotIsCurrent(

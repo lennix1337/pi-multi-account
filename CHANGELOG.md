@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `OAuth access token has expired` errors now trigger forced OAuth refresh before failing over or cooling down. A working refresh token recovers on the same account; a permanently rejected refresh token (`invalid_grant`, `revoked`, `refresh_token_reused`) immediately invalidates the slot instead of looping every minute.
 - The slot proxy now inspects the result of `forceRefreshProvider`: terminal refresh failures log `slot_proxy_refresh_failed`, mark the slot invalid, and stop repeating refresh attempts until new credentials arrive.
-- `markInvalid` emits `pi:auth:invalidated:v1` once per invalidation, and `pi:auth:updated:v1` clears invalidation and cooldowns, re-shadows if needed, reloads host auth, and resumes pending continuations when another extension completes OAuth login.
+- `markInvalid` emits `pi:auth:invalidated:v1` once per invalidation and immediately switches an idle main session away from the dead account to a ready fallback; `pi:auth:updated:v1` clears invalidation and cooldowns, re-shadows if needed, reloads host auth, activates the re-authenticated account on an idle main session when requested or when the current model is unavailable/non-default, and resumes pending continuations.
 - `/multi-account accounts`, `/multi-account status`, `/multi-account use` completions, invalidation notices, and `provider-failover-state.json` (`authTypeByProvider`) now explicitly distinguish `oauth` vs `api_key` slots for both users and managing agents.
 
 ### Codex usage headers and the shared state file

@@ -14904,3 +14904,65 @@ test("accounts, status, and shared state clearly distinguish oauth vs api_key sl
 	assert.equal(persisted.authTypeByProvider?.["anthropic-account-2"], "api_key");
 	await t.fire("session_shutdown");
 });
+
+test("pi:auth:updated:v1 with activate automatically moves idle main thread from fallback to newly authenticated provider", async () => {
+	const t = setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "expired-1", refresh: "dead-1" },
+			google: { type: "api_key", key: "google-free-key" },
+		},
+		current: { provider: "google", id: "gemini-4-neon" },
+		hostModelsByProvider: {
+			anthropic: ["claude-opus-5-5", "claude-sonnet-5-5"],
+			google: ["gemini-4-neon"],
+		},
+		config: { autoContinue: false },
+	});
+	await t.fire("session_start", { reason: "startup" });
+	t.setCurrent("google", "gemini-4-neon");
+	writeFileSync(
+		AUTH,
+		JSON.stringify({
+			anthropic: {
+				type: "oauth",
+				access: "fresh-anthropic-access",
+				refresh: "fresh-anthropic-refresh",
+				expires: Date.now() + 3_600_000,
+			},
+			google: { type: "api_key", key: "google-free-key" },
+		}),
+	);
+	t.emitBus("pi:auth:updated:v1", { provider: "anthropic", activate: true });
+	await new Promise((resolve) => setImmediate(resolve));
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(t.ctx.model?.provider, "anthropic");
+	await t.fire("session_shutdown");
+});
+
+test("idle main thread moves away immediately when its active account becomes invalidated", async () => {
+	const t = setup({
+		accounts: {
+			anthropic: { type: "oauth", access: "expired-1", refresh: "dead-1" },
+			"anthropic-account-2": { type: "api_key", key: "live-api-key-2" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-5-5" },
+		hostModelsByProvider: {
+			anthropic: ["claude-opus-5-5"],
+			"anthropic-account-2": ["claude-opus-5-5"],
+		},
+		config: { autoContinue: false },
+		forceRefreshResults: {
+			anthropic: { status: "terminal", error: "invalid_grant" },
+		},
+	});
+	t.setIdle(true);
+	await finishError(
+		t,
+		"anthropic",
+		"claude-opus-5-5",
+		'401 {"type":"error","error":{"type":"authentication_error","message":"OAuth access token has expired. Re-authenticate to continue."}}',
+	);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(t.ctx.model?.provider, "anthropic-account-2");
+	await t.fire("session_shutdown");
+});

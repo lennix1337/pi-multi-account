@@ -11550,6 +11550,40 @@ test("an account with a usage endpoint still honours the recheck ceiling", async
 	);
 });
 
+test("an account whose usage probe was already contradicted rests for the stated horizon, not the recheck ceiling", async () => {
+	const now = Date.now();
+	const t = setup({
+		accounts: {
+			"openai-codex-account-2": { type: "oauth", access: "c-tok-2", refresh: "c-ref-2", accountId: "codex-2" },
+			"openai-codex-account-3": { type: "oauth", access: "c-tok-3", refresh: "c-ref-3", accountId: "codex-3" },
+		},
+		current: { provider: "openai-codex-account-2", id: "gpt-5.5" },
+		config: { maxRecheckIntervalMs: 600_000, cooldownMs: 21_600_000 },
+		seedState: {
+			stateVersion: 5,
+			exhaustedUntilByProvider: {},
+			exhaustedUntilByModel: {},
+			lastProbeAtByProvider: {},
+			invalidatedByProvider: {},
+			usageUntrustedUntilByProvider: { "openai-codex-account-2": now + 60 * 60_000 },
+		},
+	});
+	await t.fire("session_start");
+	await finishError(
+		t,
+		"openai-codex-account-2",
+		"gpt-5.5",
+		"You have hit your ChatGPT usage limit. Try again in ~40000 min.",
+	);
+
+	const until = t.readState().exhaustedUntilByProvider?.["openai-codex-account-2"] ?? 0;
+	const minutes = Math.round((until - Date.now()) / 60_000);
+	assert.ok(
+		minutes > 30,
+		`a probe the server already contradicted cannot bring the account back every 10 min; got ${minutes}m`,
+	);
+});
+
 test("accounts refresh fetches GLM CN API-key quota even with the footer disabled", async () => {
 	const t = setup({ accounts: { "zai-coding-cn": { type: "api_key", key: "cn-fixture-key" } },
 		current: { provider: "zai-coding-cn", id: "glm-test" }, config: { showUsage: false } });

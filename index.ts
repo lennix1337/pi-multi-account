@@ -5193,7 +5193,7 @@ export default function piMultiAccount(pi: ExtensionAPI) {
 			Date.now() +
 			Math.min(
 				Math.max(cooldownMs, 1000),
-				hasCheapAvailabilityProbe(provider)
+				hasCheapAvailabilityProbe(provider) && !usageUntrusted(provider)
 					? config.maxRecheckIntervalMs
 					: Number.POSITIVE_INFINITY,
 				MAX_LIVE_COOLDOWN_MS,
